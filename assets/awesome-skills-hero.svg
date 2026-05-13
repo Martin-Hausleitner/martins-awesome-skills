@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="420" viewBox="0 0 1200 420" role="img" aria-labelledby="title desc">
+  <title id="title">Martin's Awesome Skills</title>
+  <desc id="desc">Animated gradient hero for a public agent skills repository.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0f172a">
+        <animate attributeName="stop-color" values="#0f172a;#11324d;#18243f;#0f172a" dur="10s" repeatCount="indefinite"/>
+      </stop>
+      <stop offset="45%" stop-color="#155e75">
+        <animate attributeName="stop-color" values="#155e75;#2563eb;#0f766e;#155e75" dur="10s" repeatCount="indefinite"/>
+      </stop>
+      <stop offset="100%" stop-color="#111827">
+        <animate attributeName="stop-color" values="#111827;#3b0764;#172554;#111827" dur="10s" repeatCount="indefinite"/>
+      </stop>
+    </linearGradient>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feColorMatrix in="blur" type="matrix" values="0 0 0 0 0.33 0 0 0 0 0.8 0 0 0 0 1 0 0 0 .65 0" result="color"/>
+      <feMerge>
+        <feMergeNode in="color"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <style>
+      .title { font: 800 72px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #f8fafc; letter-spacing: 0; }
+      .subtitle { font: 500 24px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #c7f9ff; letter-spacing: 0; }
+      .pill { font: 700 18px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #e0f2fe; letter-spacing: 0; }
+      .tiny { font: 600 15px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #bae6fd; letter-spacing: 0; }
+      .float-a { animation: floatA 5s ease-in-out infinite; transform-origin: center; }
+      .float-b { animation: floatB 6s ease-in-out infinite; transform-origin: center; }
+      .float-c { animation: floatC 7s ease-in-out infinite; transform-origin: center; }
+      @keyframes floatA { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-12px); } }
+      @keyframes floatB { 0%,100% { transform: translateY(0) rotate(0deg); } 50% { transform: translateY(10px) rotate(3deg); } }
+      @keyframes floatC { 0%,100% { transform: translateX(0); } 50% { transform: translateX(12px); } }
+    </style>
+  </defs>
+  <rect width="1200" height="420" rx="34" fill="url(#bg)"/>
+  <circle cx="100" cy="90" r="62" fill="#22d3ee" opacity=".18" class="float-a"/>
+  <circle cx="1070" cy="90" r="72" fill="#a78bfa" opacity=".18" class="float-b"/>
+  <circle cx="1020" cy="330" r="90" fill="#34d399" opacity=".16" class="float-c"/>
+  <path d="M0 318 C180 250 300 382 470 312 S720 236 890 302 S1100 360 1200 296 V420 H0 Z" fill="#020617" opacity=".36"/>
+  <g filter="url(#glow)" class="float-a">
+    <rect x="72" y="248" width="160" height="72" rx="22" fill="#0ea5e9" opacity=".82"/>
+    <text x="152" y="294" text-anchor="middle" class="pill">Telegram</text>
+  </g>
+  <g class="float-b">
+    <rect x="962" y="224" width="156" height="72" rx="22" fill="#7c3aed" opacity=".82"/>
+    <text x="1040" y="270" text-anchor="middle" class="pill">Skills</text>
+  </g>
+  <g class="float-c">
+    <rect x="830" y="80" width="188" height="64" rx="20" fill="#10b981" opacity=".82"/>
+    <text x="924" y="121" text-anchor="middle" class="pill">Human OK</text>
+  </g>
+  <text x="90" y="132" class="tiny">Reusable agent workflows</text>
+  <text x="90" y="215" class="title">Martin's Awesome Skills</text>
+  <text x="94" y="260" class="subtitle">Sanitized Hermes + OpenClaw skills for safer, sharper automation</text>
+  <g transform="translate(94 322)">
+    <rect width="210" height="42" rx="21" fill="#0f172a" opacity=".72"/>
+    <text x="105" y="28" text-anchor="middle" class="tiny">approval-first</text>
+  </g>
+  <g transform="translate(322 322)">
+    <rect width="186" height="42" rx="21" fill="#0f172a" opacity=".72"/>
+    <text x="93" y="28" text-anchor="middle" class="tiny">public-safe</text>
+  </g>
+  <g transform="translate(526 322)">
+    <rect width="210" height="42" rx="21" fill="#0f172a" opacity=".72"/>
+    <text x="105" y="28" text-anchor="middle" class="tiny">testable helpers</text>
+  </g>
+</svg>

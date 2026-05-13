@@ -16,3 +16,13 @@ memory/
 backups/
 outputs/
 tmp/
+*.log
+*.jsonl
+*.sqlite
+*.db
+*.trace
+*.trajectory
+*.trajectory.jsonl
+*.local
+dist/
+coverage/

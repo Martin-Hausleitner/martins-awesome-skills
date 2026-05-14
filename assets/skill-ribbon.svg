@@ -1,0 +1,58 @@
+<svg width="960" height="180" viewBox="0 0 960 180" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">Animated skill ribbon</title>
+  <desc id="desc">A moving ribbon of public-safe agent skill categories.</desc>
+  <style>
+    .bg { fill: #0b1020; }
+    .track { stroke: #2dd4bf; stroke-width: 2; stroke-dasharray: 10 12; opacity: .55; }
+    .chip { fill: #111827; stroke-width: 1.5; }
+    .telegram { stroke: #229ED9; }
+    .dev { stroke: #a78bfa; }
+    .research { stroke: #fbbf24; }
+    .creative { stroke: #fb7185; }
+    .ops { stroke: #34d399; }
+    .label { fill: #e5e7eb; font: 600 18px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .sub { fill: #9ca3af; font: 500 12px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: .08em; }
+    .dot { fill: #2dd4bf; }
+    .pulse { transform-origin: center; animation: pulse 2.8s ease-in-out infinite; }
+    .float-a { animation: floatA 6s ease-in-out infinite; }
+    .float-b { animation: floatB 7s ease-in-out infinite; }
+    .dash { animation: dash 12s linear infinite; }
+    @keyframes dash { to { stroke-dashoffset: -176; } }
+    @keyframes pulse { 0%, 100% { opacity: .55; transform: scale(1); } 50% { opacity: 1; transform: scale(1.22); } }
+    @keyframes floatA { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-7px); } }
+    @keyframes floatB { 0%, 100% { transform: translateY(-4px); } 50% { transform: translateY(6px); } }
+    @media (prefers-reduced-motion: reduce) {
+      .pulse, .float-a, .float-b, .dash { animation: none; }
+    }
+  </style>
+  <rect class="bg" width="960" height="180" rx="28"/>
+  <path class="track dash" d="M70 92 C190 20 290 155 420 84 S650 28 890 96"/>
+  <circle class="dot pulse" cx="82" cy="88" r="5"/>
+  <circle class="dot pulse" cx="878" cy="98" r="5" style="animation-delay:.8s"/>
+
+  <g class="float-a">
+    <rect class="chip telegram" x="70" y="54" width="150" height="68" rx="18"/>
+    <text class="sub" x="96" y="79">MESSAGING</text>
+    <text class="label" x="96" y="105">Telegram</text>
+  </g>
+  <g class="float-b">
+    <rect class="chip dev" x="246" y="78" width="140" height="68" rx="18"/>
+    <text class="sub" x="276" y="103">BUILD</text>
+    <text class="label" x="276" y="129">TDD</text>
+  </g>
+  <g class="float-a" style="animation-delay:.7s">
+    <rect class="chip research" x="418" y="44" width="150" height="68" rx="18"/>
+    <text class="sub" x="448" y="69">RESEARCH</text>
+    <text class="label" x="448" y="95">arXiv</text>
+  </g>
+  <g class="float-b" style="animation-delay:.5s">
+    <rect class="chip creative" x="596" y="68" width="148" height="68" rx="18"/>
+    <text class="sub" x="626" y="93">CREATE</text>
+    <text class="label" x="626" y="119">p5.js</text>
+  </g>
+  <g class="float-a" style="animation-delay:1s">
+    <rect class="chip ops" x="770" y="48" width="124" height="68" rx="18"/>
+    <text class="sub" x="800" y="73">OPS</text>
+    <text class="label" x="800" y="99">MCP</text>
+  </g>
+</svg>

@@ -1,0 +1,23 @@
+name: Public Safety
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+      - name: Run public safety audit
+        run: scripts/audit-public-safety.sh
+      - name: Run Telegram approval tests
+        run: python3 skills/telegram-approval-gate/tests/test_telegram_approval_gate.py
+      - name: Run Telegram channel poster tests
+        run: |
+          cd skills/telegram-channel-poster
+          python3 scripts/test_telegram_channel_post.py

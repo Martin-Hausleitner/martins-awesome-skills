@@ -9,6 +9,10 @@
 </p>
 
 <p align="center">
+  <img src="assets/skill-ribbon.svg" alt="Animated public-safe skill ribbon" width="760">
+</p>
+
+<p align="center">
   <a href="https://github.com/Martin-Hausleitner/martins-awesome-skills"><img alt="GitHub" src="https://img.shields.io/badge/GitHub-Martin's%20Awesome%20Skills-181717?logo=github"></a>
   <img alt="Status" src="https://img.shields.io/badge/status-sanitized%20public%20skills-2ea44f">
   <img alt="Agent Skills" src="https://img.shields.io/badge/agent--skills-Hermes%20%2B%20OpenClaw-6f42c1">
@@ -27,6 +31,7 @@ This repo is intentionally **not** a dump of a private OpenClaw/Hermes setup. It
 - [Skill Cards](#-skill-cards)
 - [Quick Start](#-quick-start)
 - [Featured: Telegram Approval Gate](#-featured-telegram-approval-gate)
+- [New Public-Safe Additions](#-new-public-safe-additions)
 - [Skill Layout](#-skill-layout)
 - [Tests](#-tests)
 - [Public Safety Contract](#-public-safety-contract)
@@ -40,7 +45,10 @@ This repo is intentionally **not** a dump of a private OpenClaw/Hermes setup. It
 - GitHub review workflows
 - Creative skills for ASCII, Excalidraw, p5.js, songwriting, and AI music workflows
 - Research helpers for arXiv, Polymarket, Blogwatcher, Songsee, and YouTube content
+- GitHub auth, issues, PR workflow, and review helpers
+- Webhook and Notion integration patterns with secret-safe placeholders
 - Public-safety audit script included
+- GitHub Actions workflow for public safety checks
 
 ## 🧰 What's Inside
 
@@ -48,14 +56,15 @@ This repo is intentionally **not** a dump of a private OpenClaw/Hermes setup. It
 |---|---|---|
 | 💬 Telegram workflows | `telegram-approval-gate`, `telegram-channel-poster` | Confirm/send/edit/cancel flows and dry-run-first channel publishing |
 | 🛠️ Software craft | `plan`, `writing-plans`, `requesting-code-review`, `subagent-driven-development`, `test-driven-development`, `systematic-debugging` | Planning, review, delegation, implementation loops, and debugging |
-| 🐙 GitHub | `github-code-review` | Structured review of local diffs and pull requests |
+| 🐙 GitHub | `github-auth`, `github-code-review`, `github-issues`, `github-pr-workflow` | Auth setup, issue triage, structured review, and pull request lifecycle |
 | 🎨 Creative tools | `ascii-art`, `excalidraw`, `p5js`, `songwriting-and-ai-music` | Visual explanations, sketches, animations, songs, and terminal-friendly art |
 | 🔎 Research | `arxiv`, `blogwatcher`, `polymarket`, `songsee`, `youtube-content` | Paper search, market research, blog/video/music discovery workflows |
-| 📄 Documents | `ocr-and-documents` | OCR/document extraction workflow guidance |
+| 📄 Productivity | `notion`, `ocr-and-documents` | Notion API patterns and OCR/document extraction workflow guidance |
 | 📬 Email tooling | `himalaya` | IMAP/SMTP CLI workflows with explicit-send safety |
 | 🧭 Search & analysis | `multi-search-engine`, `tool-comparison-heatmap` | Multi-engine search and comparison visuals |
 | 📍 Local discovery | `find-nearby` | Nearby place lookup workflow templates |
 | 🔌 MCP | `native-mcp` | Native Model Context Protocol server setup patterns |
+| ⚙️ DevOps | `webhook-subscriptions` | Event-driven agent activation with signature and dry-run safety |
 
 ## 🌟 Skill Cards
 
@@ -65,6 +74,9 @@ This repo is intentionally **not** a dump of a private OpenClaw/Hermes setup. It
 - 🎨 **Visual creation**: ASCII, Excalidraw, and p5.js workflows for fast diagrams and explainers.
 - 🔬 **Research workflows**: arXiv, Polymarket, and YouTube content helpers.
 - 🔌 **Tool plumbing**: MCP setup patterns and multi-search utilities.
+- 🐙 **GitHub operating loop**: auth, issues, PRs, and review workflows in one public-safe set.
+- ⚙️ **Event bridges**: webhook subscriptions with HMAC-first thinking.
+- 🧱 **Reusable templates**: start new skills from `templates/SKILL_TEMPLATE.md`.
 
 ## 🚀 Quick Start
 
@@ -121,19 +133,36 @@ cp config-templates/hermes-approval.env.example .env.telegram-approval
 
 Then fill the copied private file with your own values. Do not commit it.
 
+## 🆕 New Public-Safe Additions
+
+- `github-auth`: diagnose and configure GitHub access without leaking tokens.
+- `github-issues`: create, triage, label, and close issues with clean public summaries.
+- `github-pr-workflow`: branch, commit, test, push, and open pull requests.
+- `webhook-subscriptions`: design event-driven agent triggers with explicit signature checks.
+- `notion`: use the Notion API with placeholder-only examples and narrow permissions.
+- `templates/SKILL_TEMPLATE.md`: a safe starting point for new skills.
+- `.github/workflows/public-safety.yml`: CI guardrail for audit and Telegram tests.
+
 ## 🗂️ Skill Layout
 
 ```text
 skills/
+  analysis/
+    tool-comparison-heatmap/
   creative/
     ascii-art/
     excalidraw/
     p5js/
     songwriting-and-ai-music/
+  devops/
+    webhook-subscriptions/
   email/
     himalaya/
   github/
+    github-auth/
     github-code-review/
+    github-issues/
+    github-pr-workflow/
   leisure/
     find-nearby/
   mcp/
@@ -142,6 +171,7 @@ skills/
     songsee/
     youtube-content/
   productivity/
+    notion/
     ocr-and-documents/
   research/
     arxiv/
@@ -156,8 +186,6 @@ skills/
     systematic-debugging/
     test-driven-development/
     writing-plans/
-  analysis/
-    tool-comparison-heatmap/
   telegram-approval-gate/
   telegram-channel-poster/
 ```
@@ -198,6 +226,9 @@ See [docs/SECURITY.md](docs/SECURITY.md) for the full checklist.
 - [Security Checklist](docs/SECURITY.md)
 - [Contributing Skills](docs/CONTRIBUTING_SKILLS.md)
 - [Private Setup Boundary](docs/PRIVATE_SETUP_BOUNDARY.md)
+- [Gallery](docs/GALLERY.md)
+- [Release Checklist](docs/RELEASE_CHECKLIST.md)
+- [Skill Template](templates/SKILL_TEMPLATE.md)
 
 ## 💡 Why This Exists
 

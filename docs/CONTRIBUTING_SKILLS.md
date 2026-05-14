@@ -1,5 +1,7 @@
 # Contributing Skills
 
+Start from [`../templates/SKILL_TEMPLATE.md`](../templates/SKILL_TEMPLATE.md) when adding a new skill.
+
 Good skills are small, specific, and easy for an agent to discover.
 
 ## A Good Skill Has

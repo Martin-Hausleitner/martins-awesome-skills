@@ -10,8 +10,12 @@
 | `plan` | Software development | Plan-oriented implementation guidance |
 | `requesting-code-review` | Software development | Request and structure focused code review |
 | `subagent-driven-development` | Software development | Coordinate independent implementation tasks with subagents |
+| `github-auth` | GitHub | Diagnose and configure GitHub auth without committing secrets |
 | `github-code-review` | GitHub | Review local diffs and PRs with structured findings |
+| `github-issues` | GitHub | Create, triage, label, and close GitHub issues |
+| `github-pr-workflow` | GitHub | Branch, commit, test, push, and open pull requests |
 | `native-mcp` | MCP | Configure native Model Context Protocol servers |
+| `webhook-subscriptions` | DevOps | Event-driven agent triggers with secret and dry-run safety |
 | `ascii-art` | Creative | Terminal-friendly visual output |
 | `excalidraw` | Creative | Hand-drawn style diagrams and visual explanations |
 | `p5js` | Creative | Interactive sketches, animations, exports, and visual effects |
@@ -21,6 +25,7 @@
 | `polymarket` | Research | Work with Polymarket market data workflows |
 | `songsee` | Media | Song and music discovery workflows |
 | `youtube-content` | Media | Fetch and structure YouTube transcript/content workflows |
+| `notion` | Productivity | Notion API workflow with safe placeholder configuration |
 | `ocr-and-documents` | Productivity | OCR and document extraction guidance |
 | `himalaya` | Email | Himalaya IMAP/SMTP workflows with explicit-send safety |
 | `find-nearby` | Local discovery | Nearby-place lookup patterns |
@@ -32,3 +37,13 @@
 Skills in this catalog were chosen because they are broadly reusable and can be shared without private workspace state.
 
 Excluded examples include private health, location, chat, memory, accounting, account-specific browser, and personal automation skills.
+
+## Public Assets
+
+- `assets/awesome-skills-hero.svg` introduces the project.
+- `assets/skill-galaxy.svg` shows the category spread.
+- `assets/skill-ribbon.svg` highlights the main workflow families.
+
+## Templates
+
+- `templates/SKILL_TEMPLATE.md` is the recommended starting point for new public-safe skills.

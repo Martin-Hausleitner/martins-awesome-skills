@@ -2,7 +2,7 @@
 
 ## Hermes Agent
 
-Copy any skill folder into `~/.hermes/skills`:
+Copy any skill folder into your Hermes skills directory:
 
 ```bash
 mkdir -p ~/.hermes/skills/messaging
@@ -13,7 +13,7 @@ Restart or reload your agent if it caches skill discovery.
 
 ## OpenClaw-Style Workspace
 
-Copy into your workspace skill directory:
+Copy into your OpenClaw-style workspace skill directory:
 
 ```bash
 mkdir -p ~/.openclaw/workspace/skills

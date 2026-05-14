@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="250" viewBox="0 0 980 250" role="img" aria-labelledby="title desc">
+  <title id="title">Skill Galaxy</title>
+  <desc id="desc">Animated category cards for Martin's Awesome Skills.</desc>
+  <defs>
+    <linearGradient id="line" x1="0" x2="1">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="50%" stop-color="#a78bfa"/>
+      <stop offset="100%" stop-color="#34d399"/>
+    </linearGradient>
+    <style>
+      .label { font: 700 17px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #e5f7ff; letter-spacing: 0; }
+      .small { font: 600 12px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #a8d8ff; letter-spacing: 0; }
+      .node { animation: pulse 3.5s ease-in-out infinite; transform-origin: center; }
+      .node:nth-of-type(2n) { animation-delay: .5s; }
+      .node:nth-of-type(3n) { animation-delay: 1s; }
+      @keyframes pulse { 0%,100% { opacity: .88; transform: scale(1); } 50% { opacity: 1; transform: scale(1.035); } }
+      .dash { stroke-dasharray: 9 13; animation: dash 16s linear infinite; }
+      @keyframes dash { to { stroke-dashoffset: -220; } }
+    </style>
+  </defs>
+  <rect width="980" height="250" rx="28" fill="#07111f"/>
+  <path d="M95 124 C225 34 325 220 470 125 S710 48 874 126" stroke="url(#line)" stroke-width="3" fill="none" opacity=".75" class="dash"/>
+  <g class="node" transform="translate(58 72)">
+    <rect width="146" height="74" rx="18" fill="#0e7490" opacity=".86"/>
+    <text x="73" y="31" text-anchor="middle" class="label">Telegram</text>
+    <text x="73" y="53" text-anchor="middle" class="small">approval + posting</text>
+  </g>
+  <g class="node" transform="translate(228 126)">
+    <rect width="146" height="74" rx="18" fill="#6d28d9" opacity=".86"/>
+    <text x="73" y="31" text-anchor="middle" class="label">Craft</text>
+    <text x="73" y="53" text-anchor="middle" class="small">TDD + debugging</text>
+  </g>
+  <g class="node" transform="translate(410 58)">
+    <rect width="146" height="74" rx="18" fill="#15803d" opacity=".86"/>
+    <text x="73" y="31" text-anchor="middle" class="label">Research</text>
+    <text x="73" y="53" text-anchor="middle" class="small">papers + markets</text>
+  </g>
+  <g class="node" transform="translate(596 126)">
+    <rect width="146" height="74" rx="18" fill="#be123c" opacity=".86"/>
+    <text x="73" y="31" text-anchor="middle" class="label">Creative</text>
+    <text x="73" y="53" text-anchor="middle" class="small">SVG + p5 + art</text>
+  </g>
+  <g class="node" transform="translate(776 72)">
+    <rect width="146" height="74" rx="18" fill="#b45309" opacity=".86"/>
+    <text x="73" y="31" text-anchor="middle" class="label">MCP</text>
+    <text x="73" y="53" text-anchor="middle" class="small">tools + protocols</text>
+  </g>
+</svg>

@@ -20,14 +20,26 @@
 
 This repo is intentionally **not** a dump of a private OpenClaw/Hermes setup. It contains reusable workflows, templates, tests, and docs that are safe to share. Private memories, sessions, chat exports, account ids, real bot tokens, local machine setup, accounting data, and personal automations stay out.
 
+## Contents
+
+- [Highlights](#-highlights)
+- [What's Inside](#-whats-inside)
+- [Skill Cards](#-skill-cards)
+- [Quick Start](#-quick-start)
+- [Featured: Telegram Approval Gate](#-featured-telegram-approval-gate)
+- [Skill Layout](#-skill-layout)
+- [Tests](#-tests)
+- [Public Safety Contract](#-public-safety-contract)
+- [Docs](#-docs)
+
 ## ✨ Highlights
 
 - Human approval gates for external messages
 - Dry-run-first Telegram publishing helpers
-- Debugging and TDD playbooks for coding agents
+- Planning, review, debugging, subagent, and TDD playbooks for coding agents
 - GitHub review workflows
-- Creative skills for ASCII, Excalidraw, and p5.js
-- Research helpers for arXiv, Polymarket, and YouTube content
+- Creative skills for ASCII, Excalidraw, p5.js, songwriting, and AI music workflows
+- Research helpers for arXiv, Polymarket, Blogwatcher, Songsee, and YouTube content
 - Public-safety audit script included
 
 ## 🧰 What's Inside
@@ -35,10 +47,10 @@ This repo is intentionally **not** a dump of a private OpenClaw/Hermes setup. It
 | Area | Skills | Use For |
 |---|---|---|
 | 💬 Telegram workflows | `telegram-approval-gate`, `telegram-channel-poster` | Confirm/send/edit/cancel flows and dry-run-first channel publishing |
-| 🛠️ Software craft | `test-driven-development`, `systematic-debugging` | Better implementation loops and root-cause debugging |
+| 🛠️ Software craft | `plan`, `writing-plans`, `requesting-code-review`, `subagent-driven-development`, `test-driven-development`, `systematic-debugging` | Planning, review, delegation, implementation loops, and debugging |
 | 🐙 GitHub | `github-code-review` | Structured review of local diffs and pull requests |
-| 🎨 Creative tools | `ascii-art`, `excalidraw`, `p5js` | Visual explanations, sketches, animations, and terminal-friendly art |
-| 🔎 Research | `arxiv`, `polymarket`, `youtube-content` | Paper search, market research, and video-content workflows |
+| 🎨 Creative tools | `ascii-art`, `excalidraw`, `p5js`, `songwriting-and-ai-music` | Visual explanations, sketches, animations, songs, and terminal-friendly art |
+| 🔎 Research | `arxiv`, `blogwatcher`, `polymarket`, `songsee`, `youtube-content` | Paper search, market research, blog/video/music discovery workflows |
 | 📄 Documents | `ocr-and-documents` | OCR/document extraction workflow guidance |
 | 📬 Email tooling | `himalaya` | IMAP/SMTP CLI workflows with explicit-send safety |
 | 🧭 Search & analysis | `multi-search-engine`, `tool-comparison-heatmap` | Multi-engine search and comparison visuals |
@@ -49,6 +61,7 @@ This repo is intentionally **not** a dump of a private OpenClaw/Hermes setup. It
 
 - 💬 **Approval-first messaging**: Telegram buttons before the agent sends anything external.
 - 🧪 **Development discipline**: TDD and systematic debugging for agents that need less drama and more evidence.
+- 🧩 **Agent orchestration**: plans, subagents, and review loops for larger work.
 - 🎨 **Visual creation**: ASCII, Excalidraw, and p5.js workflows for fast diagrams and explainers.
 - 🔬 **Research workflows**: arXiv, Polymarket, and YouTube content helpers.
 - 🔌 **Tool plumbing**: MCP setup patterns and multi-search utilities.
@@ -116,6 +129,7 @@ skills/
     ascii-art/
     excalidraw/
     p5js/
+    songwriting-and-ai-music/
   email/
     himalaya/
   github/
@@ -125,17 +139,23 @@ skills/
   mcp/
     native-mcp/
   media/
+    songsee/
     youtube-content/
   productivity/
     ocr-and-documents/
   research/
     arxiv/
+    blogwatcher/
     polymarket/
   search/
     multi-search-engine/
   software-development/
+    plan/
+    requesting-code-review/
+    subagent-driven-development/
     systematic-debugging/
     test-driven-development/
+    writing-plans/
   analysis/
     tool-comparison-heatmap/
   telegram-approval-gate/

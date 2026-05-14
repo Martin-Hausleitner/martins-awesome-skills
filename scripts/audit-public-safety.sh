@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 patterns=(
   'gho_'
   'github_pat_'
-  'sk-[A-Za-z0-9]'
+  'sk-[A-Za-z0-9_-]{20,}'
   'xox[baprs]-'
   'AIza[0-9A-Za-z_-]'
   'ntn_'

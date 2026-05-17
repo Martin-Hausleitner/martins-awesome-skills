@@ -6,10 +6,13 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
 import time
+import tempfile
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -128,6 +131,19 @@ def provider_registry() -> dict[str, dict[str, Any]]:
             "source_urls": ["https://x.ai/news/grok-4-1-fast", "https://docs.x.ai/developers/models/grok-4-1-fast-reasoning"],
             "mode_markers": {"research": ["Research", "DeepSearch", "Think"], "chat": ["Grok", "Ask anything"]},
         },
+        "openrouter": {
+            "url": "https://openrouter.ai/",
+            "aliases": ["open-router"],
+            "modes": ["chat", "models", "credits"],
+            "models": ["Auto", "Claude", "GPT", "Gemini", "Grok", "DeepSeek", "Qwen"],
+            "tools": ["Chat", "Models", "Credits", "API Keys", "Activity"],
+            "source_urls": ["https://openrouter.ai/docs"],
+            "mode_markers": {
+                "chat": ["OpenRouter", "Chat"],
+                "models": ["Models", "OpenRouter"],
+                "credits": ["Credits", "Activity", "Usage"],
+            },
+        },
     }
 
 
@@ -233,6 +249,12 @@ def provider_probe_specs() -> dict[str, dict[str, Any]]:
             "model_hints": ["Grok", "Fast", "Think", "Reasoning"],
             "tool_hints": ["DeepSearch", "Think", "Search", "X"],
             "usage_hints": ["limit", "usage", "remaining", "resets", "quota"],
+        },
+        "openrouter": {
+            "account_hints": ["Account", "Credits", "API Keys", "Activity"],
+            "model_hints": ["Claude", "GPT", "Gemini", "Grok", "DeepSeek", "Qwen"],
+            "tool_hints": ["Chat", "Models", "Credits", "Activity"],
+            "usage_hints": ["credits", "usage", "spent", "remaining", "balance"],
         },
     }
 
@@ -1035,6 +1057,112 @@ def account_audit_text_path(text_dir: Path, *, browser: str, profile: str, provi
     return text_dir.expanduser() / f"{slug(normalize_browser_name(browser))}-{slug(profile)}-{slug(normalize_provider_name(provider))}.txt"
 
 
+def provider_session_domains(provider: str) -> list[str]:
+    return {
+        "chatgpt": ["chatgpt.com", "openai.com", "auth.openai.com"],
+        "gemini": ["gemini.google.com", "google.com", "accounts.google.com"],
+        "claude": ["claude.ai", "anthropic.com"],
+        "perplexity": ["perplexity.ai"],
+        "grok": ["grok.com", "x.com", "x.ai"],
+        "openrouter": ["openrouter.ai", "clerk.openrouter.ai"],
+    }.get(normalize_provider_name(provider), [])
+
+
+def provider_session_cookie_names(provider: str) -> list[str]:
+    return {
+        "chatgpt": ["session", "__Secure-next-auth.session-token", "oai-client-auth-session", "unified_session_manifest", "_puid"],
+        "gemini": ["SAPISID", "APISID", "HSID", "OSID", "__Secure-OSID", "COMPASS"],
+        "claude": ["sessionKey", "lastActiveOrg", "intercom-session", "__ssid"],
+        "perplexity": ["__Secure-next-auth.session-token", "pplx", "g_state", "intercom-session"],
+        "grok": ["sso", "sso-rw", "x-userid", "auth_token", "twid"],
+        "openrouter": ["__session", "__refresh", "__client", "__client_uat"],
+    }.get(normalize_provider_name(provider), [])
+
+
+def profile_storage_roots(profile: dict[str, str]) -> list[Path]:
+    root = Path(profile.get("path", "")).expanduser()
+    if not root:
+        return []
+    roots = [root]
+    nested_default = root / "Default"
+    if nested_default.exists():
+        roots.append(nested_default)
+    return roots
+
+
+def cookie_db_paths(profile: dict[str, str]) -> list[Path]:
+    paths: list[Path] = []
+    for root in profile_storage_roots(profile):
+        for candidate in [root / "Cookies", root / "Network" / "Cookies"]:
+            if candidate.exists():
+                paths.append(candidate)
+    return paths
+
+
+def indexeddb_origin_dirs(profile: dict[str, str], domains: list[str]) -> list[str]:
+    origins: list[str] = []
+    for root in profile_storage_roots(profile):
+        indexeddb = root / "IndexedDB"
+        if not indexeddb.exists():
+            continue
+        for child in indexeddb.iterdir():
+            if not child.is_dir():
+                continue
+            name = child.name
+            if any(domain in name for domain in domains):
+                origins.append(name)
+    return sorted(set(origins))
+
+
+def provider_session_evidence(profile: dict[str, str], provider: str) -> dict[str, Any]:
+    provider_id = normalize_provider_name(provider)
+    domains = provider_session_domains(provider_id)
+    interesting_cookie_names = provider_session_cookie_names(provider_id)
+    matched_hosts: set[str] = set()
+    matched_cookie_names: set[str] = set()
+    session_cookie_names: set[str] = set()
+    cookie_db_count = 0
+
+    for source in cookie_db_paths(profile):
+        cookie_db_count += 1
+        try:
+            tmpdir = Path(tempfile.mkdtemp(prefix="ai-research-cookie-scan-"))
+            tmp = tmpdir / "Cookies"
+            shutil.copy2(source, tmp)
+            con = sqlite3.connect(tmp)
+            try:
+                rows = con.execute(
+                    "select host_key, name from cookies where " + " or ".join(["host_key like ?" for _ in domains]),
+                    [f"%{domain}%" for domain in domains],
+                ).fetchall()
+            finally:
+                con.close()
+        except Exception:
+            continue
+        for host, name in rows:
+            matched_hosts.add(str(host))
+            matched_cookie_names.add(str(name))
+            if any(str(name).startswith(prefix) or prefix in str(name) for prefix in interesting_cookie_names):
+                session_cookie_names.add(str(name))
+
+    origins = indexeddb_origin_dirs(profile, domains)
+    confidence = "none"
+    if session_cookie_names:
+        confidence = "likely-logged-in"
+    elif matched_cookie_names or origins:
+        confidence = "site-data-present"
+    return {
+        "provider": provider_id,
+        "confidence": confidence,
+        "cookie_db_count": cookie_db_count,
+        "matched_hosts": sorted(matched_hosts),
+        "matched_cookie_names": sorted(matched_cookie_names)[:40],
+        "session_cookie_names": sorted(session_cookie_names)[:20],
+        "indexeddb_origins": origins[:40],
+        "note": "Cookie values are intentionally not read or emitted.",
+    }
+
+
 def build_account_audit_matrix(
     browsers: list[dict[str, Any]],
     providers: dict[str, dict[str, Any]] | None = None,
@@ -1067,6 +1195,7 @@ def build_account_audit_matrix(
         for profile in profiles:
             for provider_id, provider in provider_map.items():
                 can_launch, skip_reason = launchable_browser(browser)
+                session_evidence = provider_session_evidence(profile, provider_id)
                 text_path = account_audit_text_path(
                     text_dir,
                     browser=str(browser.get("id", "")),
@@ -1105,6 +1234,7 @@ def build_account_audit_matrix(
                         "skip_reason": skip_reason,
                         "text_artifact": str(text_path) if text_path else "",
                         "account_status": account_status,
+                        "session_evidence": session_evidence,
                         "background_plan": background_plan,
                     }
                 )

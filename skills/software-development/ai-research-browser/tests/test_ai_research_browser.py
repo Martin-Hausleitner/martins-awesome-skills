@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sqlite3
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -85,6 +86,8 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertIn("grok", providers)
         self.assertIn("research", providers["grok"]["modes"])
         self.assertEqual(module.normalize_provider_name("grog"), "grok")
+        self.assertIn("openrouter", providers)
+        self.assertEqual(module.normalize_provider_name("open-router"), "openrouter")
         self.assertIn("claude", providers)
         self.assertIn("chat", providers["claude"]["modes"])
         self.assertIn("research", providers["claude"]["modes"])
@@ -821,6 +824,7 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertEqual([row["provider"] for row in payload["rows"]], ["chatgpt", "gemini"])
         self.assertEqual(payload["rows"][0]["profile_account"], "profile@example.test")
         self.assertEqual(payload["rows"][0]["background_plan"]["visibility"], "headless")
+        self.assertIn("session_evidence", payload["rows"][0])
 
     def test_backend_registry_marks_local_and_managed_options(self):
         module = load_module()
@@ -875,6 +879,47 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertEqual(status["plan"], "Pro")
         self.assertEqual(status["quotas"]["deep_research_remaining"], 4)
         self.assertEqual(status["usage"]["used_percent"], 30)
+
+    def test_provider_session_evidence_reads_cookie_names_without_values(self):
+        module = load_module()
+        root = Path(tempfile.mkdtemp())
+        cookie_db = root / "Cookies"
+        con = sqlite3.connect(cookie_db)
+        con.execute("create table cookies(host_key text, name text)")
+        con.executemany(
+            "insert into cookies(host_key, name) values (?, ?)",
+            [
+                (".chatgpt.com", "__Secure-next-auth.session-token.0"),
+                (".openrouter.ai", "__session"),
+                (".example.test", "other"),
+            ],
+        )
+        con.commit()
+        con.close()
+        indexed = root / "IndexedDB" / "https_chatgpt.com_0.indexeddb.leveldb"
+        indexed.mkdir(parents=True)
+
+        evidence = module.provider_session_evidence({"path": str(root)}, "chatgpt")
+
+        self.assertEqual(evidence["confidence"], "likely-logged-in")
+        self.assertIn(".chatgpt.com", evidence["matched_hosts"])
+        self.assertIn("__Secure-next-auth.session-token.0", evidence["session_cookie_names"])
+        self.assertIn("https_chatgpt.com_0.indexeddb.leveldb", evidence["indexeddb_origins"])
+
+    def test_openrouter_session_evidence_detects_clerk_session_cookie(self):
+        module = load_module()
+        root = Path(tempfile.mkdtemp())
+        con = sqlite3.connect(root / "Cookies")
+        con.execute("create table cookies(host_key text, name text)")
+        con.execute("insert into cookies(host_key, name) values (?, ?)", (".clerk.openrouter.ai", "__session_NO6jtgZM"))
+        con.commit()
+        con.close()
+
+        evidence = module.provider_session_evidence({"path": str(root)}, "open-router")
+
+        self.assertEqual(evidence["provider"], "openrouter")
+        self.assertEqual(evidence["confidence"], "likely-logged-in")
+        self.assertIn("__session_NO6jtgZM", evidence["session_cookie_names"])
 
     def test_chat_cache_key_is_stable_and_provider_normalized(self):
         module = load_module()

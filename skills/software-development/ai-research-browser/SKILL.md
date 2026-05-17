@@ -32,6 +32,7 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 - Provides an interactive wizard that lets a human choose the installed browser, profile, provider, and feature before launching or testing.
 - Archives existing provider chats into a local cache so later runs can continue from cached transcripts or intentionally refresh by scraping again.
 - Extracts visible provider account, plan/subscription, model, quota, and usage text when a real UI snapshot is supplied.
+- Scans local profile site data for provider session evidence without reading or emitting cookie values.
 - Runs Agent Browser backed E2E probes against a CDP-enabled browser profile and records provider inventory artifacts.
 - Exposes provider-specific probe hints for account menus, model selectors, tool controls, and usage/limit text.
 - Lists automation backends such as Playwright/CDP, Codex Computer Use, Peekaboo, OpenAI CUA/Operator, Claude Computer Use, Gemini Computer Use, Stagehand, Browser-Use, and Hyperbrowser.
@@ -137,6 +138,8 @@ Build a local-only account/subscription audit across every discovered browser/pr
 python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py account-audit \
   --output /tmp/ai-account-audit.json
 ```
+
+`account-audit` reports `session_evidence` for ChatGPT, Gemini/Google, Claude/Anthropic, Grok/xAI, Perplexity, and OpenRouter. Treat `likely-logged-in` as a strong local session indicator, but still use `e2e-probe` or a visible UI capture for exact account email, subscription name, and remaining quota.
 
 Parse already captured provider UI text files named `<browser>-<profile>-<provider>.txt`:
 

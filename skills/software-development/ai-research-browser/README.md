@@ -123,6 +123,8 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
   --output /tmp/ai-account-audit.json
 ```
 
+`account-audit` also scans local browser profile site data for provider session evidence. It reports matching cookie names, hosts, and IndexedDB origins, but never reads or emits cookie values. This is how the audit distinguishes "profile account hidden" from "provider session likely logged in" for sites such as ChatGPT, Gemini/Google, Claude, Grok, Perplexity, and OpenRouter.
+
 If you have provider UI text captures, put them in a local-only directory as `<browser>-<profile>-<provider>.txt` and let the audit parse them:
 
 ```bash

@@ -645,6 +645,72 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertEqual(matrix[0]["account_status"]["plan"], "Pro")
         self.assertEqual(matrix[0]["account_status"]["usage"]["used_percent"], 20)
 
+    def test_account_audit_matrix_covers_each_provider_and_parses_text_artifacts(self):
+        module = load_module()
+        text_root = Path(tempfile.mkdtemp())
+        (text_root / "brave-default-chatgpt.txt").write_text(
+            "Signed in as ui@example.test\nChatGPT Pro\nDeep research: 5 remaining\nAgent tasks: 2 left",
+            encoding="utf-8",
+        )
+        browsers = [
+            {
+                "id": "brave",
+                "display_name": "Brave Browser",
+                "default_port": 9222,
+                "app_exists": True,
+                "binary_exists": True,
+                "user_data_dir": "/tmp/brave",
+                "binary_path": "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+                "app_path": "/Applications/Brave Browser.app",
+                "profiles": [{"directory": "Default", "name": "Work", "account": "profile@example.test"}],
+            }
+        ]
+
+        audit = module.build_account_audit_matrix(
+            browsers,
+            {"chatgpt": {"url": "https://chatgpt.com/"}, "gemini": {"url": "https://gemini.google.com/app?hl=de"}},
+            text_dir=text_root,
+            headless=False,
+        )
+
+        self.assertEqual(len(audit["rows"]), 2)
+        chatgpt = audit["rows"][0]
+        self.assertEqual(chatgpt["provider"], "chatgpt")
+        self.assertEqual(chatgpt["account_status"]["provider_account"], "ui@example.test")
+        self.assertEqual(chatgpt["account_status"]["plan"], "Pro")
+        self.assertEqual(chatgpt["account_status"]["quotas"]["deep_research_remaining"], 5)
+        self.assertTrue(chatgpt["background_plan"]["launch_command"])
+        self.assertEqual(audit["rows"][1]["status"], "needs-ui-capture")
+
+    def test_cmd_account_audit_outputs_rows_for_browser_provider_inventory(self):
+        module = load_module()
+        original_discover = module.discover_browsers
+        module.discover_browsers = lambda: [
+            {
+                "id": "chrome",
+                "display_name": "Google Chrome",
+                "default_port": 9224,
+                "app_exists": True,
+                "binary_exists": True,
+                "user_data_dir": "/tmp/chrome",
+                "binary_path": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                "app_path": "/Applications/Google Chrome.app",
+                "profiles": [{"directory": "Profile 2", "name": "Work", "account": "profile@example.test"}],
+            }
+        ]
+        try:
+            out = StringIO()
+            with redirect_stdout(out):
+                exit_code = module.main(["account-audit", "--providers", "chatgpt,google", "--headless"])
+        finally:
+            module.discover_browsers = original_discover
+
+        payload = json.loads(out.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual([row["provider"] for row in payload["rows"]], ["chatgpt", "gemini"])
+        self.assertEqual(payload["rows"][0]["profile_account"], "profile@example.test")
+        self.assertEqual(payload["rows"][0]["background_plan"]["visibility"], "headless")
+
     def test_backend_registry_marks_local_and_managed_options(self):
         module = load_module()
 

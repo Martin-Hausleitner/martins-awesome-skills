@@ -128,6 +128,23 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
   --text-file /tmp/chatgpt-visible-text.txt
 ```
 
+Build a local-only account/subscription audit across every discovered browser/profile/provider:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py account-audit \
+  --output /tmp/ai-account-audit.json
+```
+
+Parse already captured provider UI text files named `<browser>-<profile>-<provider>.txt`:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py account-audit \
+  --text-dir /tmp/ai-provider-ui-text \
+  --output /tmp/ai-account-audit.json
+```
+
+Treat `account-audit` JSON as private local evidence: it may contain names, emails, subscription labels, model names, and remaining Deep Research/Agent usage. Do not commit it.
+
 Parse visible existing chat names from a sidebar/list:
 
 ```bash

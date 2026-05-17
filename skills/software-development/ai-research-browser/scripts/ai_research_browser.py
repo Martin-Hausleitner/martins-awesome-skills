@@ -789,6 +789,100 @@ def build_test_matrix(
     return rows
 
 
+def requested_provider_ids(raw: str = "") -> list[str]:
+    providers = provider_registry()
+    if not raw:
+        return list(providers.keys())
+    ids = []
+    for item in raw.split(","):
+        provider_id = normalize_provider_name(item.strip())
+        if provider_id and provider_id not in ids:
+            if provider_id not in providers:
+                raise ValueError(f"unknown provider: {item}")
+            ids.append(provider_id)
+    return ids
+
+
+def account_audit_text_path(text_dir: Path, *, browser: str, profile: str, provider: str) -> Path:
+    return text_dir.expanduser() / f"{slug(normalize_browser_name(browser))}-{slug(profile)}-{slug(normalize_provider_name(provider))}.txt"
+
+
+def build_account_audit_matrix(
+    browsers: list[dict[str, Any]],
+    providers: dict[str, dict[str, Any]] | None = None,
+    *,
+    text_dir: Path | None = None,
+    headless: bool = False,
+    port_offset: int = 200,
+) -> dict[str, Any]:
+    provider_map = providers or provider_registry()
+    rows: list[dict[str, Any]] = []
+    for browser in browsers:
+        profiles = browser.get("profiles") or []
+        if not profiles:
+            rows.append(
+                {
+                    "browser": browser.get("id", ""),
+                    "browser_name": browser.get("display_name", ""),
+                    "provider": "",
+                    "profile_directory": "",
+                    "profile_name": "",
+                    "profile_account": "",
+                    "profile_account_state": "",
+                    "status": "skipped",
+                    "skip_reason": "no profiles discovered",
+                    "account_status": {},
+                    "background_plan": None,
+                }
+            )
+            continue
+        for profile in profiles:
+            for provider_id, provider in provider_map.items():
+                can_launch, skip_reason = launchable_browser(browser)
+                text_path = account_audit_text_path(
+                    text_dir,
+                    browser=str(browser.get("id", "")),
+                    profile=str(profile.get("directory", "")),
+                    provider=provider_id,
+                ) if text_dir else None
+                visible_text = text_path.read_text(encoding="utf-8") if text_path and text_path.exists() else ""
+                account_status = account_status_record(
+                    browser=str(browser.get("id", "")),
+                    profile=profile,
+                    provider=provider_id,
+                    visible_text=visible_text,
+                ) if visible_text else {}
+                background_plan = None
+                if can_launch:
+                    background_plan = build_background_launch_plan(
+                        browser,
+                        profile_directory=str(profile.get("directory", "Default")),
+                        port=int(browser.get("default_port", 0)) + port_offset + len(rows),
+                        provider=provider_id,
+                        mode="chat",
+                        model="Auto",
+                        headless=headless,
+                    )
+                rows.append(
+                    {
+                        "browser": browser.get("id", ""),
+                        "browser_name": browser.get("display_name", ""),
+                        "provider": provider_id,
+                        "provider_url": provider.get("url", ""),
+                        "profile_directory": profile.get("directory", ""),
+                        "profile_name": profile.get("name", ""),
+                        "profile_account": profile.get("account", ""),
+                        "profile_account_state": profile.get("account_state", ""),
+                        "status": "captured" if account_status else ("skipped" if not can_launch else "needs-ui-capture"),
+                        "skip_reason": skip_reason,
+                        "text_artifact": str(text_path) if text_path else "",
+                        "account_status": account_status,
+                        "background_plan": background_plan,
+                    }
+                )
+    return {"rows": rows}
+
+
 def render_choice_table(title: str, items: list[dict[str, str]]) -> str:
     lines = [title]
     for index, item in enumerate(items, start=1):
@@ -1104,6 +1198,23 @@ def cmd_launch_all_background(args: argparse.Namespace) -> int:
     return 0 if all(execution.get("started") or execution.get("dry_run") for execution in executions) else 2
 
 
+def cmd_account_audit(args: argparse.Namespace) -> int:
+    provider_ids = requested_provider_ids(args.providers)
+    providers = provider_registry()
+    provider_map = {provider_id: providers[provider_id] for provider_id in provider_ids}
+    payload = build_account_audit_matrix(
+        discover_browsers(),
+        provider_map,
+        text_dir=Path(args.text_dir).expanduser() if args.text_dir else None,
+        headless=args.headless,
+        port_offset=args.port_offset,
+    )
+    if args.output:
+        write_json(Path(args.output).expanduser(), payload)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_verify_text(args: argparse.Namespace) -> int:
     text = Path(args.text_file).expanduser().read_text(encoding="utf-8") if args.text_file else sys.stdin.read()
     result = verify_visible_text(text, provider=args.provider, mode=args.mode)
@@ -1239,6 +1350,12 @@ def build_parser() -> argparse.ArgumentParser:
     launch_all_background.add_argument("--force", action="store_true", help="Launch even when preflight reports running non-CDP browsers.")
     launch_all_background.add_argument("--all-profiles", action="store_true")
     launch_all_background.add_argument("--port-offset", type=int, default=100)
+    account_audit = sub.add_parser("account-audit")
+    account_audit.add_argument("--providers", default="", help="Comma-separated providers. Defaults to every provider.")
+    account_audit.add_argument("--text-dir", default="", help="Directory containing <browser>-<profile>-<provider>.txt UI captures.")
+    account_audit.add_argument("--output", default="")
+    account_audit.add_argument("--headless", action="store_true")
+    account_audit.add_argument("--port-offset", type=int, default=200)
     verify = sub.add_parser("verify-text")
     verify.add_argument("--provider", choices=provider_cli_choices(), required=True)
     verify.add_argument("--mode", required=True)
@@ -1305,6 +1422,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_launch_background(args)
     if args.command == "launch-all-background":
         return cmd_launch_all_background(args)
+    if args.command == "account-audit":
+        return cmd_account_audit(args)
     if args.command == "launch-args":
         browsers = {b["id"]: b for b in discover_browsers()}
         browser_id = normalize_browser_name(args.browser)

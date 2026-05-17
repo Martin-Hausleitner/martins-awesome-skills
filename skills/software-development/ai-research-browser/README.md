@@ -116,6 +116,25 @@ The parser extracts:
 - Agent task remaining count, when visible
 - usage snippets such as `75% used`, `3/3 left`, and reset hints such as `resets tomorrow`
 
+Build a full account/subscription audit inventory across every discovered browser/profile/provider:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py account-audit \
+  --output /tmp/ai-account-audit.json
+```
+
+If you have provider UI text captures, put them in a local-only directory as `<browser>-<profile>-<provider>.txt` and let the audit parse them:
+
+```bash
+mkdir -p /tmp/ai-provider-ui-text
+# Example: /tmp/ai-provider-ui-text/brave-default-chatgpt.txt
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py account-audit \
+  --text-dir /tmp/ai-provider-ui-text \
+  --output /tmp/ai-account-audit.json
+```
+
+Rows with parsed provider text are marked `captured`. Rows without UI text are marked `needs-ui-capture`; their `background_plan` contains the hidden/headless launch command needed to collect the provider page without distracting the user. Keep the resulting JSON local because it may contain private names, emails, subscription labels, and usage quotas.
+
 Inspect supported automation backends:
 
 ```bash

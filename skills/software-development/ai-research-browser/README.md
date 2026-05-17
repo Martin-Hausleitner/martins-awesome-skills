@@ -6,6 +6,8 @@ This skill gives Hermes a local CLI for discovering installed Chromium-family br
 
 It is designed for the real-world macOS setup where Brave, Comet/Komet, Chrome, and Edge may already be open with different accounts. The CLI does not blindly quit or relaunch those browsers; it reports blockers and lets you choose whether to run headful, headless, or via Computer Use.
 
+Background runs are the default automation shape: the CLI can start launchable browsers through macOS `open -g -j` so the app is opened hidden and does not steal focus from the user. For zero-window runs, add `--headless`; for provider UIs that reject headless mode, keep the hidden background launch and verify via CDP, Computer Use, or Peekaboo.
+
 ## Quick Start
 
 From the repository root:
@@ -29,6 +31,30 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 ```
 
 The wizard prints pure JSON to stdout, so it can be piped into other scripts.
+
+Preview a hidden background launch for one browser:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py launch-background \
+  --browser opera \
+  --profile Default \
+  --provider google \
+  --mode deep-research \
+  --model "Thinking with 3 Pro" \
+  --dry-run
+```
+
+Preview background launches for every launchable discovered browser:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py launch-all-background \
+  --provider chatgpt \
+  --mode agent \
+  --model "GPT-5.5 Pro" \
+  --dry-run
+```
+
+Remove `--dry-run` to actually start the background sessions. If a browser is already running without `--remote-debugging-port`, the CLI reports blockers instead of racing a second instance against the same profile. Use `--force` only when you intentionally accept that risk.
 
 ## Providers
 
@@ -169,6 +195,17 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 
 Without `--headful`, the generated command includes `--headless=new`.
 
+## Background Launch
+
+`launch-background` and `launch-all-background` are the preferred commands for unattended AI-provider control on a shared desktop. They produce a structured plan and, unless `--dry-run` is set, start the browser with:
+
+- `/usr/bin/open -g -j -n -a <Browser.app>` so macOS does not activate the app
+- `--remote-debugging-port=<port>` for CDP control
+- `--user-data-dir=<profile root>` and `--profile-directory=<profile>` for the chosen account/profile
+- an `osascript` post-launch hide command as a second guardrail
+
+The launch plan records `model_selection: select-in-provider-ui`; the automation must still verify the model/mode inside the provider UI before claiming a Deep Research or Agent run has started.
+
 ## Preflight
 
 Before a hidden/CDP run, check whether the browser is already running in a way that blocks automation:
@@ -202,14 +239,14 @@ The record includes the provider, feature, browser/profile, screenshot path, ver
 
 ## Design Inspiration
 
-This follows the pattern that makes Peter Steinberger's Peekaboo useful for agents: keep discovery/snapshot data as structured JSON, then run actions and verification against that state. The CLI therefore separates:
+This follows the pattern that makes Peter Steinberger's Peekaboo and Oracle useful for agents: keep discovery/snapshot data as structured JSON, print the browser-control plan before touching a shared desktop, then run actions and verification against that state. The CLI therefore separates:
 
 - `discover` and `matrix`: inventory/snapshot
 - `preflight`: blocker detection
-- `wizard` and `launch-args`: selected action plan
+- `wizard`, `launch-args`, `launch-background`, and `launch-all-background`: selected action plan
 - `verify-text` and `record-e2e`: evidence capture
 
-The "Oracle" style capability in this space is usually OpenAI Operator / Computer-Using Agent rather than Oracle. Operator has since been integrated into ChatGPT as agent mode, so this skill treats it as the `openai-cua` comparison backend and keeps the local browser-profile workflow separate.
+Peter Steinberger's Oracle is a separate multi-model consult CLI; its browser-mode lesson for this skill is to reuse/reattach to a reachable browser and avoid surprising shared desktops. This CLI mirrors that locally by offering dry-run plans, hidden macOS launches, CDP ports, and blocker reporting before execution.
 
 ## Tests
 

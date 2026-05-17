@@ -311,6 +311,8 @@ class AiResearchBrowserTest(unittest.TestCase):
     def test_launch_plan_includes_model_without_pretending_url_selects_it(self):
         module = load_module()
         browser = {
+            "id": "brave",
+            "display_name": "Brave Browser",
             "app_path": "/Applications/Brave Browser.app",
             "binary_path": "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
             "user_data_dir": "/tmp/brave",
@@ -330,6 +332,183 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertEqual(plan["model"], "Pro")
         self.assertEqual(plan["model_selection"], "select-in-provider-ui")
         self.assertIn("--profile-directory=Default", plan["launch_args"])
+
+    def test_background_launch_plan_uses_hidden_macos_open_without_focus(self):
+        module = load_module()
+        browser = {
+            "id": "opera",
+            "display_name": "Opera",
+            "app_path": "/Applications/Opera.app",
+            "binary_path": "/Applications/Opera.app/Contents/MacOS/Opera",
+            "user_data_dir": "/tmp/opera",
+        }
+
+        plan = module.build_background_launch_plan(
+            browser,
+            profile_directory="Default",
+            port=9555,
+            provider="google",
+            mode="deep-research",
+            model="Thinking with 3 Pro",
+            headless=False,
+        )
+
+        self.assertEqual(plan["strategy"], "macos-open-hidden")
+        self.assertEqual(plan["launch_command"][:5], ["/usr/bin/open", "-g", "-j", "-n", "-a"])
+        self.assertIn("/Applications/Opera.app", plan["launch_command"])
+        self.assertIn("--args", plan["launch_command"])
+        self.assertIn("--remote-debugging-port=9555", plan["launch_command"])
+        self.assertIn("--profile-directory=Default", plan["launch_command"])
+        self.assertIn("https://gemini.google.com/app?hl=de", plan["launch_command"])
+        self.assertEqual(plan["post_launch_hide_command"], ["osascript", "-e", 'tell application "Opera" to set visible to false'])
+
+    def test_background_launch_plan_can_be_headless_for_zero_window_runs(self):
+        module = load_module()
+        browser = {
+            "id": "brave",
+            "display_name": "Brave Browser",
+            "app_path": "/Applications/Brave Browser.app",
+            "binary_path": "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+            "user_data_dir": "/tmp/brave",
+        }
+
+        plan = module.build_background_launch_plan(
+            browser,
+            profile_directory="Default",
+            port=9556,
+            provider="chatgpt",
+            mode="agent",
+            model="GPT-5.5 Pro",
+            headless=True,
+        )
+
+        self.assertIn("--headless=new", plan["launch_command"])
+        self.assertEqual(plan["visibility"], "headless")
+
+    def test_background_all_plan_filters_launchable_browsers_and_reports_blockers(self):
+        module = load_module()
+        browsers = [
+            {
+                "id": "brave",
+                "display_name": "Brave Browser",
+                "app_path": "/Applications/Brave Browser.app",
+                "binary_path": "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+                "user_data_dir": "/tmp/brave",
+                "default_port": 9222,
+                "app_exists": True,
+                "binary_exists": True,
+                "profiles": [{"directory": "Default", "name": "Work", "account": ""}],
+            },
+            {
+                "id": "edge",
+                "display_name": "Microsoft Edge",
+                "app_path": "/Applications/Microsoft Edge.app",
+                "binary_path": "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+                "user_data_dir": "/tmp/edge",
+                "default_port": 9225,
+                "app_exists": False,
+                "binary_exists": False,
+                "profiles": [{"directory": "Default", "name": "Default", "account": ""}],
+            },
+        ]
+
+        plan = module.build_background_all_plan(
+            browsers,
+            provider="chatgpt",
+            mode="chat",
+            model="Auto",
+            headless=False,
+            port_offset=100,
+        )
+
+        self.assertEqual([item["browser"] for item in plan["launches"]], ["brave"])
+        self.assertEqual(plan["launches"][0]["port"], 9322)
+        self.assertEqual(plan["skipped"][0]["browser"], "edge")
+        self.assertIn("binary is not installed", plan["skipped"][0]["reason"])
+
+    def test_cmd_launch_background_outputs_hidden_plan_in_dry_run(self):
+        module = load_module()
+        original_discover = module.discover_browsers
+        module.discover_browsers = lambda: [
+            {
+                "id": "opera",
+                "display_name": "Opera",
+                "app_path": "/Applications/Opera.app",
+                "binary_path": "/Applications/Opera.app/Contents/MacOS/Opera",
+                "user_data_dir": "/tmp/opera",
+                "default_port": 9226,
+                "app_exists": True,
+                "binary_exists": True,
+                "profiles": [{"directory": "Default", "name": "Opera Default", "account": ""}],
+            }
+        ]
+        try:
+            out = StringIO()
+            with redirect_stdout(out):
+                exit_code = module.main(
+                    [
+                        "launch-background",
+                        "--browser",
+                        "opera",
+                        "--profile",
+                        "Default",
+                        "--provider",
+                        "google",
+                        "--mode",
+                        "deep-research",
+                        "--model",
+                        "Pro",
+                        "--dry-run",
+                    ]
+                )
+        finally:
+            module.discover_browsers = original_discover
+
+        payload = json.loads(out.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertFalse(payload["execution"]["started"])
+        self.assertEqual(payload["plan"]["strategy"], "macos-open-hidden")
+        self.assertEqual(payload["plan"]["provider"], "gemini")
+
+    def test_cmd_launch_all_background_outputs_all_launchable_browsers(self):
+        module = load_module()
+        original_discover = module.discover_browsers
+        module.discover_browsers = lambda: [
+            {
+                "id": "brave",
+                "display_name": "Brave Browser",
+                "app_path": "/Applications/Brave Browser.app",
+                "binary_path": "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+                "user_data_dir": "/tmp/brave",
+                "default_port": 9222,
+                "app_exists": True,
+                "binary_exists": True,
+                "profiles": [{"directory": "Default", "name": "Work", "account": ""}],
+            },
+            {
+                "id": "edge",
+                "display_name": "Microsoft Edge",
+                "app_path": "/Applications/Microsoft Edge.app",
+                "binary_path": "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+                "user_data_dir": "/tmp/edge",
+                "default_port": 9225,
+                "app_exists": False,
+                "binary_exists": False,
+                "profiles": [{"directory": "Default", "name": "Default", "account": ""}],
+            },
+        ]
+        try:
+            out = StringIO()
+            with redirect_stdout(out):
+                exit_code = module.main(["launch-all-background", "--provider", "chatgpt", "--dry-run"])
+        finally:
+            module.discover_browsers = original_discover
+
+        payload = json.loads(out.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual([item["browser"] for item in payload["plan"]["launches"]], ["brave"])
+        self.assertEqual(payload["executions"][0]["dry_run"], True)
+        self.assertEqual(payload["plan"]["skipped"][0]["browser"], "edge")
 
     def test_detect_launch_blockers_reports_busy_port_and_non_cdp_process(self):
         module = load_module()

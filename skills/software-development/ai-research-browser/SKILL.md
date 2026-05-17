@@ -26,6 +26,7 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 - Reads Chromium profile metadata from `Local State` and `Preferences`, including profile directory, display name, and visible account email when available.
 - Resolves profile aliases such as `work` by exact profile/account match first, then by a Work/Arbeit name match.
 - Produces launch arguments for headless or background runs with `--remote-debugging-port`, `--user-data-dir`, and `--profile-directory`.
+- Starts launchable browsers hidden in the background via macOS `open -g -j`, with optional true headless mode and a dry-run JSON plan before execution.
 - Supports provider modes for ChatGPT chat, ChatGPT Deep Research, ChatGPT Agent, Gemini chat, Gemini Deep Research, Gemini Agent, Claude chat/research/artifacts, Perplexity research, and Grok/Grog research.
 - Builds a full browser x profile x provider x feature test matrix for systematic E2E runs.
 - Provides an interactive wizard that lets a human choose the installed browser, profile, provider, and feature before launching or testing.
@@ -39,7 +40,7 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 
 ## Safety Rule
 
-Do not quit or relaunch the user's already-open browser without explicit permission. If a browser is already running without `--remote-debugging-port`, run preflight and report the blocker. For live UI checks, use Computer Use against the existing window and record screenshots locally.
+Do not quit or relaunch the user's already-open browser without explicit permission. If a browser is already running without `--remote-debugging-port`, run preflight and report the blocker. Prefer `launch-background --dry-run` or `launch-all-background --dry-run` before execution, so the user can see whether the run will attach, launch hidden, or be blocked. For live UI checks, use Computer Use against the existing window and record screenshots locally.
 
 Do not commit private screenshots that contain account names, chat history, or private prompts to a public repository. Keep them as local artifacts unless the user explicitly asks for a sanitized export.
 
@@ -92,6 +93,30 @@ Use the interactive picker:
 ```bash
 python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py wizard --headful
 ```
+
+Preview a hidden background launch for one browser:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py launch-background \
+  --browser opera \
+  --profile Default \
+  --provider google \
+  --mode deep-research \
+  --model "Thinking with 3 Pro" \
+  --dry-run
+```
+
+Preview hidden background launches for every launchable browser:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py launch-all-background \
+  --provider chatgpt \
+  --mode agent \
+  --model "GPT-5.5 Pro" \
+  --dry-run
+```
+
+Remove `--dry-run` only when you actually want to start the background sessions. Use `--headless` for zero-window browser processes; otherwise the CLI uses hidden macOS app launches and an `osascript` hide guard.
 
 Capture account/login/quota status from visible provider UI text:
 
@@ -230,9 +255,9 @@ Grok may be typed as `grok` or `grog` in the CLI. Availability of research modes
 
 ## Design Notes
 
-This follows the same shape that makes Peter Steinberger's Peekaboo useful for agents: separate discovery/snapshot JSON from actions. The `matrix` command is the snapshot, while `wizard`, `launch-args`, `verify-text`, and `record-e2e` are the action/evidence layer.
+This follows the same shape that makes Peter Steinberger's Peekaboo and Oracle useful for agents: separate discovery/snapshot JSON from actions, print a browser-control plan before touching a shared desktop, and avoid profile races by reusing reachable browser state or reporting blockers. The `matrix` command is the snapshot, while `wizard`, `launch-args`, `launch-background`, `launch-all-background`, `verify-text`, and `record-e2e` are the action/evidence layer.
 
-If a user says "Oracle" in this context, first consider that they may mean OpenAI Operator / Computer-Using Agent. The skill exposes that path as `openai-cua`, but keeps local logged-in browser profiles under `playwright-cdp`, `computer-use`, or `peekaboo`.
+If a user says "Oracle" in this context, check Peter Steinberger's `steipete/oracle` pattern first: API mode when possible, browser mode only with an explicit control plan, remote/reachable browser reuse, auto-reattach, and session artifacts. The skill exposes OpenAI CUA as `openai-cua`, but keeps local logged-in browser profiles under `playwright-cdp`, `computer-use`, or `peekaboo`.
 
 ## Testing
 

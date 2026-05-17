@@ -404,6 +404,107 @@ def build_launch_plan(
     }
 
 
+def build_background_launch_plan(
+    browser: dict[str, Any],
+    *,
+    profile_directory: str,
+    port: int,
+    provider: str,
+    mode: str,
+    model: str,
+    headless: bool,
+) -> dict[str, Any]:
+    base_plan = build_launch_plan(
+        browser,
+        profile_directory=profile_directory,
+        port=port,
+        provider=provider,
+        mode=mode,
+        model=model,
+        headless=headless,
+    )
+    app_path = str(browser.get("app_path", ""))
+    display_name = str(browser.get("display_name") or browser.get("id") or "")
+    launch_args = list(base_plan["launch_args"])
+    browser_args = launch_args[1:] if launch_args else []
+    launch_command = ["/usr/bin/open", "-g", "-j", "-n", "-a", app_path, "--args", *browser_args]
+    return {
+        **base_plan,
+        "strategy": "macos-open-hidden",
+        "visibility": "headless" if headless else "hidden",
+        "port": port,
+        "browser_display_name": display_name,
+        "launch_command": launch_command,
+        "post_launch_hide_command": ["osascript", "-e", f'tell application "{display_name}" to set visible to false'],
+        "notes": [
+            "Uses macOS open -g -j to avoid activation and launch hidden.",
+            "Keeps model selection as a UI-verification step because providers do not expose stable model URL parameters.",
+        ],
+    }
+
+
+def launchable_browser(browser: dict[str, Any]) -> tuple[bool, str]:
+    if browser.get("binary_exists") is False:
+        return False, "browser binary is not installed"
+    if browser.get("app_exists") is False:
+        return False, "browser app is not installed"
+    if not browser.get("profiles"):
+        return False, "no profiles discovered"
+    return True, ""
+
+
+def build_background_all_plan(
+    browsers: list[dict[str, Any]],
+    *,
+    provider: str,
+    mode: str,
+    model: str,
+    headless: bool,
+    port_offset: int = 100,
+    all_profiles: bool = False,
+) -> dict[str, Any]:
+    launches: list[dict[str, Any]] = []
+    skipped: list[dict[str, str]] = []
+    for browser in browsers:
+        can_launch, reason = launchable_browser(browser)
+        if not can_launch:
+            skipped.append({"browser": str(browser.get("id", "")), "reason": reason})
+            continue
+        profiles = browser.get("profiles", [])
+        selected_profiles = profiles if all_profiles else profiles[:1]
+        for profile in selected_profiles:
+            port = int(browser.get("default_port", 0)) + port_offset + len(launches)
+            plan = build_background_launch_plan(
+                browser,
+                profile_directory=str(profile.get("directory", "Default")),
+                port=port,
+                provider=provider,
+                mode=mode,
+                model=model,
+                headless=headless,
+            )
+            launches.append({**plan, "profile": profile})
+    return {
+        "provider": normalize_provider_name(provider),
+        "mode": mode,
+        "model": model or "Auto",
+        "visibility": "headless" if headless else "hidden",
+        "launches": launches,
+        "skipped": skipped,
+    }
+
+
+def execute_background_launch(plan: dict[str, Any], *, dry_run: bool = False) -> dict[str, Any]:
+    if dry_run:
+        return {"started": False, "dry_run": True, "pid": None}
+    command = [str(part) for part in plan["launch_command"]]
+    process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    hide_command = plan.get("post_launch_hide_command") or []
+    if hide_command:
+        subprocess.run([str(part) for part in hide_command], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return {"started": True, "dry_run": False, "pid": process.pid}
+
+
 def parse_visible_status(text: str) -> dict[str, Any]:
     text = text or ""
     account_match = re.search(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", text)
@@ -941,6 +1042,68 @@ def cmd_preflight(args: argparse.Namespace) -> int:
     return 2 if blockers else 0
 
 
+def cmd_launch_background(args: argparse.Namespace) -> int:
+    browsers = {b["id"]: b for b in discover_browsers()}
+    browser_id = normalize_browser_name(args.browser)
+    if browser_id not in browsers:
+        raise SystemExit(f"browser not discovered: {args.browser}")
+    browser = browsers[browser_id]
+    can_launch, reason = launchable_browser(browser)
+    if not can_launch:
+        payload = {"plan": None, "execution": {"started": False, "dry_run": args.dry_run, "error": reason}}
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 2
+    profile = resolve_profile(browser["profiles"], args.profile)
+    plan = build_background_launch_plan(
+        browser,
+        profile_directory=profile["directory"],
+        port=args.port or int(browser["default_port"]),
+        provider=args.provider,
+        mode=args.mode,
+        model=args.model,
+        headless=args.headless,
+    )
+    blockers = detect_launch_blockers(
+        browser_name=str(browser["display_name"]),
+        port=int(plan["port"]),
+        port_owner=port_owner(int(plan["port"])),
+        process_args=process_args_for_browser(str(browser["display_name"])),
+    )
+    if blockers and not args.force:
+        payload = {"plan": plan, "execution": {"started": False, "dry_run": args.dry_run, "blockers": blockers}}
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0 if args.dry_run else 2
+    execution = execute_background_launch(plan, dry_run=args.dry_run)
+    print(json.dumps({"plan": plan, "execution": execution}, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_launch_all_background(args: argparse.Namespace) -> int:
+    plan = build_background_all_plan(
+        discover_browsers(),
+        provider=args.provider,
+        mode=args.mode,
+        model=args.model,
+        headless=args.headless,
+        port_offset=args.port_offset,
+        all_profiles=args.all_profiles,
+    )
+    executions = []
+    for launch_plan in plan["launches"]:
+        blockers = detect_launch_blockers(
+            browser_name=str(launch_plan.get("browser_display_name") or launch_plan.get("browser", "")),
+            port=int(launch_plan["port"]),
+            port_owner=port_owner(int(launch_plan["port"])),
+            process_args=process_args_for_browser(str(launch_plan.get("browser_display_name") or launch_plan.get("browser", ""))),
+        )
+        if blockers and not args.force:
+            executions.append({"started": False, "dry_run": args.dry_run, "blockers": blockers})
+            continue
+        executions.append(execute_background_launch(launch_plan, dry_run=args.dry_run))
+    print(json.dumps({"plan": plan, "executions": executions}, ensure_ascii=False, indent=2))
+    return 0 if all(execution.get("started") or execution.get("dry_run") for execution in executions) else 2
+
+
 def cmd_verify_text(args: argparse.Namespace) -> int:
     text = Path(args.text_file).expanduser().read_text(encoding="utf-8") if args.text_file else sys.stdin.read()
     result = verify_visible_text(text, provider=args.provider, mode=args.mode)
@@ -1057,6 +1220,25 @@ def build_parser() -> argparse.ArgumentParser:
     launch.add_argument("--port", type=int)
     launch.add_argument("--headful", action="store_true")
     launch.add_argument("--artifact-root", default="")
+    launch_background = sub.add_parser("launch-background")
+    launch_background.add_argument("--browser", required=True)
+    launch_background.add_argument("--profile", default="Default")
+    launch_background.add_argument("--provider", choices=provider_cli_choices(), required=True)
+    launch_background.add_argument("--mode", default="chat")
+    launch_background.add_argument("--model", default="Auto")
+    launch_background.add_argument("--port", type=int)
+    launch_background.add_argument("--headless", action="store_true")
+    launch_background.add_argument("--dry-run", action="store_true")
+    launch_background.add_argument("--force", action="store_true", help="Launch even when preflight reports a running non-CDP browser.")
+    launch_all_background = sub.add_parser("launch-all-background")
+    launch_all_background.add_argument("--provider", choices=provider_cli_choices(), required=True)
+    launch_all_background.add_argument("--mode", default="chat")
+    launch_all_background.add_argument("--model", default="Auto")
+    launch_all_background.add_argument("--headless", action="store_true")
+    launch_all_background.add_argument("--dry-run", action="store_true")
+    launch_all_background.add_argument("--force", action="store_true", help="Launch even when preflight reports running non-CDP browsers.")
+    launch_all_background.add_argument("--all-profiles", action="store_true")
+    launch_all_background.add_argument("--port-offset", type=int, default=100)
     verify = sub.add_parser("verify-text")
     verify.add_argument("--provider", choices=provider_cli_choices(), required=True)
     verify.add_argument("--mode", required=True)
@@ -1119,6 +1301,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_wizard(args)
     if args.command == "preflight":
         return cmd_preflight(args)
+    if args.command == "launch-background":
+        return cmd_launch_background(args)
+    if args.command == "launch-all-background":
+        return cmd_launch_all_background(args)
     if args.command == "launch-args":
         browsers = {b["id"]: b for b in discover_browsers()}
         browser_id = normalize_browser_name(args.browser)

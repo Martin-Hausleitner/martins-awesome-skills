@@ -1,0 +1,122 @@
+---
+name: ai-research-browser
+description: Discover local Brave, Comet/Komet, Chrome, or Edge profiles and run ChatGPT/Gemini research or agent workflows with hidden/headless launch arguments and screenshot-backed E2E records.
+version: 0.1.0
+author: Hermes Agent
+license: MIT
+metadata:
+  hermes:
+    tags: [browser, brave, comet, chatgpt, gemini, deep-research, agent, e2e]
+    related_skills: [browser-profile-routing, ai-research-ui-fallbacks, google-deep-researcher]
+---
+
+# AI Research Browser
+
+Use this skill when the user wants Hermes to run AI chat, Deep Research, or Agent flows through an installed browser profile, especially Brave or Comet/Komet.
+
+The helper CLI is:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py
+```
+
+## What It Does
+
+- Discovers installed Chromium-family browsers: Brave, Comet/Komet, Google Chrome, and Microsoft Edge.
+- Reads Chromium profile metadata from `Local State` and `Preferences`, including profile directory, display name, and visible account email when available.
+- Resolves profile aliases such as `work` by exact profile/account match first, then by a Work/Arbeit name match.
+- Produces launch arguments for headless or background runs with `--remote-debugging-port`, `--user-data-dir`, and `--profile-directory`.
+- Supports provider modes for ChatGPT chat, ChatGPT Deep Research, ChatGPT Agent, Gemini chat, Gemini Deep Research, Gemini Agent, and Perplexity research.
+- Records E2E evidence as a `status.json` plus screenshot path, so a human can verify whether the provider UI actually entered the requested mode.
+
+## Safety Rule
+
+Do not quit or relaunch the user's already-open browser without explicit permission. If a browser is already running without `--remote-debugging-port`, run preflight and report the blocker. For live UI checks, use Computer Use against the existing window and record screenshots locally.
+
+Do not commit private screenshots that contain account names, chat history, or private prompts to a public repository. Keep them as local artifacts unless the user explicitly asks for a sanitized export.
+
+## Commands
+
+Discover browsers, profiles, providers, modes, and known model labels:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py discover
+```
+
+Check whether a browser/profile can be launched for CDP automation:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py preflight \
+  --browser comet \
+  --profile work
+```
+
+Build a hidden/headless launch command for ChatGPT Deep Research:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py launch-args \
+  --browser brave \
+  --profile work \
+  --provider chatgpt \
+  --mode deep-research
+```
+
+Use `--headful` when you need to see the browser or when a provider blocks headless mode.
+
+Verify captured UI text against expected mode markers:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py verify-text \
+  --provider chatgpt \
+  --mode deep-research \
+  --text-file /tmp/chatgpt-visible-text.txt
+```
+
+Record an E2E result with a screenshot path:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py record-e2e \
+  --artifact-root /tmp/hermes-ai-research-e2e \
+  --browser brave \
+  --profile work \
+  --provider chatgpt \
+  --mode deep-research \
+  --status verified \
+  --screenshot /tmp/chatgpt-deep-research.png \
+  --text-file /tmp/chatgpt-visible-text.txt \
+  --note "Deep Research was selected in the ChatGPT tools menu."
+```
+
+## E2E Workflow
+
+1. Run `discover` and choose an installed browser and profile.
+2. Run `preflight` before attempting CDP/headless control.
+3. If preflight is clean, launch with the generated `launch-args`; otherwise use Computer Use against the existing browser window.
+4. Navigate to the provider:
+   - ChatGPT: `https://chatgpt.com/`
+   - Gemini: `https://gemini.google.com/app?hl=de`
+   - Perplexity: `https://www.perplexity.ai/`
+5. Select the requested mode in the provider UI.
+6. Capture a real screenshot of the browser tab.
+7. Extract visible UI text from Accessibility or the page.
+8. Run `verify-text` and `record-e2e`.
+9. Report whether the mode was truly started, only selected, blocked, or failed.
+
+## Provider Notes
+
+ChatGPT Deep Research is selected through the tools menu. A valid E2E needs to show the composer in Deep Research mode or a started research report.
+
+ChatGPT Agent is selected through the tools menu or mode chip. A valid E2E needs to show the composer/task area in Agent mode or an active agent run.
+
+Gemini Deep Research may be labeled `Deep Research`, `Recherche starten`, or `Start research` depending on locale and account state.
+
+Gemini Agent availability varies by account and region. Record the visible account/model/quota text when it is shown.
+
+## Testing
+
+Run unit tests from the repository root:
+
+```bash
+python3 -m unittest discover -s skills/software-development/ai-research-browser/tests -p 'test_*.py'
+```
+

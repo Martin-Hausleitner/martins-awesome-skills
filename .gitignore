@@ -15,6 +15,7 @@ sessions/
 memory/
 backups/
 outputs/
+e2e-artifacts/
 tmp/
 *.log
 *.jsonl

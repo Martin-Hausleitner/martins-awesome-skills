@@ -718,9 +718,11 @@ class AiResearchBrowserTest(unittest.TestCase):
 
         self.assertIn("playwright-cdp", backends)
         self.assertIn("computer-use", backends)
+        self.assertIn("oracle", backends)
         self.assertIn("openai-cua", backends)
         self.assertIn("hyperbrowser", backends)
         self.assertEqual(backends["playwright-cdp"]["scope"], "local")
+        self.assertIn("@steipete/oracle", backends["oracle"]["aliases"])
         self.assertIn("Operator", " ".join(backends["openai-cua"]["aliases"]))
 
     def test_render_choice_table_is_human_readable(self):
@@ -911,6 +913,7 @@ class AiResearchBrowserTest(unittest.TestCase):
         payload = json.loads(out.getvalue())
         self.assertEqual(exit_code, 0)
         self.assertIn("playwright-cdp", payload["backends"])
+        self.assertIn("oracle", payload["backends"])
         self.assertIn("openai-cua", payload["backends"])
 
     def test_cmd_preflight_reports_missing_profiles_without_traceback(self):

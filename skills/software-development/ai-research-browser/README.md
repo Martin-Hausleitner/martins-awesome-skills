@@ -141,7 +141,7 @@ Inspect supported automation backends:
 python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py backends
 ```
 
-The local-first path is `playwright-cdp` for deterministic browser control plus `computer-use` or `peekaboo` for screenshot-backed proof. Managed alternatives such as OpenAI CUA/Operator, Claude Computer Use, Gemini Computer Use, Stagehand, Browser-Use, and Hyperbrowser are represented as comparison backends, not as replacements for your local logged-in profiles.
+The local-first path is `playwright-cdp` for deterministic browser control plus `computer-use` or `peekaboo` for screenshot-backed proof. Peter Steinberger's `@steipete/oracle` is represented as `oracle`: use it for multi-model code review, consults, browser-session reattach, and session artifacts. It is not a replacement for auditing subscriptions inside your own local browser profiles. Managed alternatives such as OpenAI CUA/Operator, Claude Computer Use, Gemini Computer Use, Stagehand, Browser-Use, and Hyperbrowser are represented as comparison backends, not as replacements for your local logged-in profiles.
 
 ## Existing Chat Cache
 
@@ -265,7 +265,7 @@ This follows the pattern that makes Peter Steinberger's Peekaboo and Oracle usef
 - `wizard`, `launch-args`, `launch-background`, and `launch-all-background`: selected action plan
 - `verify-text` and `record-e2e`: evidence capture
 
-Peter Steinberger's Oracle is a separate multi-model consult CLI; its browser-mode lesson for this skill is to reuse/reattach to a reachable browser and avoid surprising shared desktops. This CLI mirrors that locally by offering dry-run plans, hidden macOS launches, CDP ports, and blocker reporting before execution.
+Peter Steinberger's Oracle is a separate multi-model consult CLI; its browser-mode lesson for this skill is to reuse/reattach to a reachable browser, keep session artifacts, and avoid surprising shared desktops. This CLI mirrors that locally by offering dry-run plans, hidden macOS launches, CDP ports, and blocker reporting before execution. When Oracle is installed, use it alongside this CLI for coding help or long-running model consultation; use this CLI for browser/profile/provider/account inventory.
 
 ## Tests
 

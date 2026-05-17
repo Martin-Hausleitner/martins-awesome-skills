@@ -33,6 +33,7 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 - Archives existing provider chats into a local cache so later runs can continue from cached transcripts or intentionally refresh by scraping again.
 - Extracts visible provider account, plan/subscription, model, quota, and usage text when a real UI snapshot is supplied.
 - Lists automation backends such as Playwright/CDP, Codex Computer Use, Peekaboo, OpenAI CUA/Operator, Claude Computer Use, Gemini Computer Use, Stagehand, Browser-Use, and Hyperbrowser.
+- Lists Peter Steinberger's Oracle as an optional consult backend for multi-model review, browser-session reattach, and session artifacts.
 - Lists selectable model/tool catalogs for ChatGPT, Gemini/Google, Claude/Anthropic, Perplexity, and Grok/xAI.
 - Marks profiles as `signed-in-hidden` when browser metadata indicates account/session state but no email is exposed.
 - Reports `app_exists`, `binary_exists`, and `user_data_exists` so stale browser profile data is not confused with a launchable installed browser.
@@ -274,7 +275,7 @@ Grok may be typed as `grok` or `grog` in the CLI. Availability of research modes
 
 This follows the same shape that makes Peter Steinberger's Peekaboo and Oracle useful for agents: separate discovery/snapshot JSON from actions, print a browser-control plan before touching a shared desktop, and avoid profile races by reusing reachable browser state or reporting blockers. The `matrix` command is the snapshot, while `wizard`, `launch-args`, `launch-background`, `launch-all-background`, `verify-text`, and `record-e2e` are the action/evidence layer.
 
-If a user says "Oracle" in this context, check Peter Steinberger's `steipete/oracle` pattern first: API mode when possible, browser mode only with an explicit control plan, remote/reachable browser reuse, auto-reattach, and session artifacts. The skill exposes OpenAI CUA as `openai-cua`, but keeps local logged-in browser profiles under `playwright-cdp`, `computer-use`, or `peekaboo`.
+If a user says "Oracle" in this context, check Peter Steinberger's `steipete/oracle` pattern first: API mode when possible, browser mode only with an explicit control plan, remote/reachable browser reuse, auto-reattach, and session artifacts. The CLI exposes Oracle as `oracle` for consult/code-review help and long-running session capture. It exposes OpenAI CUA as `openai-cua`, but keeps local logged-in browser profiles under `playwright-cdp`, `computer-use`, or `peekaboo`.
 
 ## Testing
 

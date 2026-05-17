@@ -161,6 +161,14 @@ def backend_registry() -> dict[str, dict[str, Any]]:
             "aliases": ["Peter Steinberger Peekaboo", "macOS screenshots", "MCP"],
             "description": "Optional macOS screenshot and UI evidence backend when installed.",
         },
+        "oracle": {
+            "scope": "local-or-api",
+            "aliases": ["Peter Steinberger Oracle", "@steipete/oracle", "multi-model consult"],
+            "description": (
+                "Consult GPT/Gemini/Claude through Oracle API or browser sessions; useful for code review, "
+                "long-run reattach, and session artifacts, not a replacement for local provider account audits."
+            ),
+        },
         "openai-cua": {
             "scope": "managed",
             "aliases": ["OpenAI Operator", "ChatGPT agent", "Computer-Using Agent"],

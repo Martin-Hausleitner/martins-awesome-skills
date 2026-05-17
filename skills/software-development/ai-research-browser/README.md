@@ -143,6 +143,50 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 
 The local-first path is `playwright-cdp` for deterministic browser control plus `computer-use` or `peekaboo` for screenshot-backed proof. Peter Steinberger's `@steipete/oracle` is represented as `oracle`: use it for multi-model code review, consults, browser-session reattach, and session artifacts. It is not a replacement for auditing subscriptions inside your own local browser profiles. Managed alternatives such as OpenAI CUA/Operator, Claude Computer Use, Gemini Computer Use, Stagehand, Browser-Use, and Hyperbrowser are represented as comparison backends, not as replacements for your local logged-in profiles.
 
+Show provider-specific probe hints before writing or running selectors:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py probe-specs
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py probe-specs --provider anthropic
+```
+
+Run a real provider probe through Agent Browser against a CDP-enabled browser:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py e2e-probe \
+  --artifact-root /tmp/hermes-ai-research-e2e \
+  --browser chrome \
+  --profile "Profile 2" \
+  --provider chatgpt \
+  --mode chat \
+  --cdp-port 9224 \
+  --open-controls
+```
+
+`e2e-probe` opens the provider URL, captures an Agent Browser accessibility snapshot, optionally opens known model/tool controls, takes a screenshot, and writes `status.json` plus `visible-text.txt`. The inventory includes inferred login state, visible account/email, plan, selected model, matched model/tool labels, available mode markers, and usage/limit lines.
+
+When you already have visible UI text from Computer Use, Peekaboo, or another capture, parse it without touching the browser:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py e2e-probe \
+  --artifact-root /tmp/hermes-ai-research-e2e \
+  --browser opera \
+  --profile Default \
+  --provider anthropic \
+  --mode chat \
+  --text-file /tmp/opera-claude-visible-text.txt
+```
+
+Generate concrete Oracle fetch/show commands for a second-model consult:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py oracle-plan \
+  -p "Review the AI provider E2E probes" \
+  --file "skills/software-development/ai-research-browser/**" \
+  --cdp-port 9224 \
+  --deep-research
+```
+
 ## Existing Chat Cache
 
 Existing chats can be archived and reused across later test runs. This lets Hermes continue from a known conversation snapshot instead of scraping the same UI again every time.

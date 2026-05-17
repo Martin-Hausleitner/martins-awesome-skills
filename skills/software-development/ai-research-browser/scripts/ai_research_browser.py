@@ -202,6 +202,71 @@ def backend_registry() -> dict[str, dict[str, Any]]:
     }
 
 
+def provider_probe_specs() -> dict[str, dict[str, Any]]:
+    return {
+        "chatgpt": {
+            "account_hints": ["Account", "Settings", "My plan", "Plan", "Upgrade plan"],
+            "model_hints": ["GPT", "Auto", "More models"],
+            "tool_hints": ["Tools", "Deep research", "Agent", "Codex"],
+            "usage_hints": ["limits", "usage", "remaining", "resets", "messages"],
+        },
+        "gemini": {
+            "account_hints": ["Google Account", "Google AI", "Gemini Advanced", "Google One"],
+            "model_hints": ["Gemini", "Pro", "Flash", "Deep Think"],
+            "tool_hints": ["Tools", "Deep Research", "Agent", "Canvas"],
+            "usage_hints": ["limit", "usage", "remaining", "resets", "quota"],
+        },
+        "claude": {
+            "account_hints": ["Account", "Settings", "Plan", "Max plan", "Pro plan"],
+            "model_hints": ["Opus", "Sonnet", "Haiku"],
+            "tool_hints": ["Search", "Research", "Artifacts", "Create"],
+            "usage_hints": ["weekly limit", "used", "remaining", "resets", "Guest pass"],
+        },
+        "perplexity": {
+            "account_hints": ["Account", "Settings", "Pro", "Max"],
+            "model_hints": ["Auto", "Sonar", "GPT", "Claude", "Gemini"],
+            "tool_hints": ["Search", "Pro Search", "Research", "Deep Research", "Spaces"],
+            "usage_hints": ["queries", "usage", "remaining", "left", "reset"],
+        },
+        "grok": {
+            "account_hints": ["Account", "Settings", "Premium", "SuperGrok"],
+            "model_hints": ["Grok", "Fast", "Think", "Reasoning"],
+            "tool_hints": ["DeepSearch", "Think", "Search", "X"],
+            "usage_hints": ["limit", "usage", "remaining", "resets", "quota"],
+        },
+    }
+
+
+def build_oracle_plan(
+    *,
+    prompt: str,
+    files: list[str] | None = None,
+    cdp_port: int | None = None,
+    deep_research: bool = False,
+    model_strategy: str = "current",
+) -> dict[str, Any]:
+    base = ["npx", "-y", "@steipete/oracle"]
+    consult = [*base, "--dry-run", "summary", "--engine", "browser", "--browser-model-strategy", model_strategy]
+    if cdp_port:
+        consult.extend(["--browser-attach-running", "--remote-chrome", f"127.0.0.1:{cdp_port}"])
+    if deep_research:
+        consult.extend(["--browser-research", "deep"])
+    consult.extend(["-p", prompt])
+    for file_pattern in files or []:
+        consult.extend(["--file", file_pattern])
+    return {
+        "purpose": "Use Oracle for multi-model/code consults and ChatGPT browser-session artifacts; keep account audits in ai_research_browser.",
+        "consult_dry_run": consult,
+        "status": [*base, "status", "--hours", "72", "--browser-tabs"],
+        "show_session": [*base, "session", "<session-id>", "--render"],
+        "notes": [
+            "Use --dry-run summary first on shared desktops.",
+            "Use --browser-attach-running with a real CDP-enabled signed-in browser.",
+            "Use session/status to fetch/show long-running Oracle browser results instead of starting duplicates.",
+        ],
+    }
+
+
 def read_json(path: Path) -> dict[str, Any]:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -518,14 +583,26 @@ def parse_visible_status(text: str) -> dict[str, Any]:
     account_match = re.search(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", text)
     model_match = re.search(r"Model:\s*([^\n]+)", text, flags=re.I)
     if not model_match:
-        model_match = re.search(r"\b((?:GPT|Claude|Opus|Sonnet|Gemini|Grok)[^\n]{0,40})", text, flags=re.I)
+        model_match = re.search(
+            r"\b((?:GPT[- ][^\n]+|Claude[ \t]+[^\n]+|Opus[ \t]+[^\n]+|Sonnet[ \t]+[^\n]+|Gemini[ \t]+[^\n]+|Grok[ \t]+[^\n]+))",
+            text,
+            flags=re.I,
+        )
     plan_match = re.search(
-        r"\b(ChatGPT\s+)?(Free|Plus|Pro|Team|Enterprise|Max|Advanced|SuperGrok|Premium)\s+(?:plan|subscription|abo)\b",
+        r"\b(ChatGPT\s+|Claude\s+|Google\s+AI\s+|Google\s+One\s+AI\s+|Gemini\s+|Perplexity\s+|X\s+)?"
+        r"(Free|Plus|Pro|Team|Enterprise|Max|Advanced|Ultra|SuperGrok|Premium\+?|Premium)\s+"
+        r"(?:plan|subscription|abo|tier)\b",
         text,
         flags=re.I,
     )
     if not plan_match:
-        plan_match = re.search(r"\b(Gemini Advanced|Perplexity Pro|ChatGPT Pro|ChatGPT Plus|SuperGrok|Claude Max)\b", text, flags=re.I)
+        plan_match = re.search(
+            r"\b(Gemini Advanced|Google AI Pro|Google AI Ultra|Google One AI Pro|Google One AI Ultra|"
+            r"Perplexity Pro|Perplexity Max|ChatGPT Pro|ChatGPT Plus|Claude Pro|Claude Max|"
+            r"SuperGrok|X Premium\+?|Premium\+)\b",
+            text,
+            flags=re.I,
+        )
     used_percent_match = re.search(r"(?:used|verwendet|genutzt)\D{0,20}(\d{1,3})\s*%", text, flags=re.I)
     if not used_percent_match:
         used_percent_match = re.search(r"(\d{1,3})\s*%\s*(?:used|verwendet|genutzt)", text, flags=re.I)
@@ -535,7 +612,9 @@ def parse_visible_status(text: str) -> dict[str, Any]:
     deep_match = re.search(r"(?:Deep research|Rechercheberichte?|Research)\D{0,40}(\d+)\s*(?:remaining|left|übrig|verbleibend)?", text, flags=re.I)
     agent_match = re.search(r"(?:Agent tasks?|Agent)\D{0,40}(\d+)\s*(?:remaining|left|übrig|verbleibend)?", text, flags=re.I)
     raw_plan = plan_match.group(2 if plan_match.lastindex and plan_match.lastindex >= 2 else 1).strip() if plan_match else ""
-    plan = raw_plan.replace("ChatGPT ", "").replace("Gemini ", "").replace("Perplexity ", "").replace("Claude ", "")
+    plan = raw_plan
+    for prefix in ["ChatGPT ", "Gemini ", "Perplexity ", "Claude ", "Google AI ", "Google One AI ", "X "]:
+        plan = plan.replace(prefix, "")
     return {
         "account": account_match.group(0) if account_match else "",
         "model": model_match.group(1).strip() if model_match else "",
@@ -577,6 +656,146 @@ def verify_visible_text(text: str, *, provider: str, mode: str) -> dict[str, Any
         "expected_markers": markers,
         "visible_status": parse_visible_status(text or ""),
     }
+
+
+def normalized_contains(text: str, needle: str) -> bool:
+    return re.sub(r"\s+", " ", needle.casefold()).strip() in re.sub(r"\s+", " ", text.casefold())
+
+
+def extract_usage_lines(text: str) -> list[str]:
+    patterns = re.compile(
+        r"(plan|subscription|abo|tier|limit|quota|usage|remaining|left|used|reset|resets|"
+        r"verbleibend|übrig|genutzt|erneuert|weekly|daily|messages|queries|research|agent)",
+        flags=re.I,
+    )
+    lines = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if line and patterns.search(line):
+            lines.append(line)
+    return lines[:80]
+
+
+def infer_login_state(text: str, provider: str) -> str:
+    lowered = (text or "").casefold()
+    signed_out = ["sign in", "log in", "login", "anmelden", "registrieren", "create account"]
+    if any(marker in lowered for marker in signed_out):
+        return "signed-out-or-wall"
+    provider_markers = provider_registry().get(normalize_provider_name(provider), {}).get("mode_markers", {})
+    flattened = [marker for markers in provider_markers.values() for marker in markers]
+    if any(str(marker).casefold() in lowered for marker in flattened):
+        return "signed-in-or-ready"
+    if parse_visible_status(text).get("account") or parse_visible_status(text).get("plan"):
+        return "signed-in-or-ready"
+    return "unknown"
+
+
+def extract_provider_inventory(provider: str, text: str) -> dict[str, Any]:
+    provider_id = normalize_provider_name(provider)
+    catalog = model_catalog().get(provider_id, {"models": [], "tools": [], "modes": []})
+    specs = provider_probe_specs().get(provider_id, {})
+    visible_status = parse_visible_status(text or "")
+    models = [
+        model
+        for model in catalog.get("models", [])
+        if model != "Auto" and normalized_contains(text or "", str(model))
+    ]
+    tools = [
+        tool
+        for tool in catalog.get("tools", [])
+        if normalized_contains(text or "", str(tool))
+    ]
+    modes = {}
+    for mode in provider_registry().get(provider_id, {}).get("modes", []):
+        try:
+            modes[mode] = verify_visible_text(text or "", provider=provider_id, mode=str(mode))["detected"]
+        except ValueError:
+            modes[mode] = False
+    matched_hints = {
+        key: [hint for hint in values if normalized_contains(text or "", str(hint))]
+        for key, values in specs.items()
+    }
+    return {
+        "provider": provider_id,
+        "login_state": infer_login_state(text or "", provider_id),
+        "visible_status": visible_status,
+        "available_models": models,
+        "available_tools": tools,
+        "available_modes": modes,
+        "matched_hints": matched_hints,
+        "usage_lines": extract_usage_lines(text or ""),
+    }
+
+
+def run_agent_browser(args: list[str], *, session: str = "") -> subprocess.CompletedProcess[str]:
+    command = ["agent-browser"]
+    if session:
+        command.extend(["--session", session])
+    command.extend(args)
+    return subprocess.run(command, capture_output=True, text=True)
+
+
+def agent_browser_probe(
+    *,
+    cdp_port: int,
+    provider: str,
+    mode: str,
+    artifact_root: Path,
+    browser: str,
+    profile: str,
+    session: str = "",
+    open_controls: bool = False,
+) -> dict[str, Any]:
+    provider_id = normalize_provider_name(provider)
+    paths = build_artifact_paths(artifact_root, provider=provider_id, mode=mode, browser=browser, profile=profile)
+    paths["run_dir"].mkdir(parents=True, exist_ok=True)
+    screenshot = paths["screenshot_png"]
+    commands: list[dict[str, Any]] = []
+
+    def invoke(label: str, extra_args: list[str]) -> subprocess.CompletedProcess[str]:
+        result = run_agent_browser(["--cdp", str(cdp_port), *extra_args], session=session)
+        commands.append(
+            {
+                "label": label,
+                "args": ["agent-browser", "--cdp", str(cdp_port), *extra_args],
+                "returncode": result.returncode,
+                "stdout": result.stdout[-4000:],
+                "stderr": result.stderr[-4000:],
+            }
+        )
+        return result
+
+    invoke("open", ["open", provider_url(provider_id)])
+    invoke("wait", ["wait", "3000"])
+    snapshot = invoke("snapshot-interactive", ["snapshot", "-i", "-c"])
+    visible_text = snapshot.stdout
+    if open_controls:
+        for label in provider_probe_specs().get(provider_id, {}).get("model_hints", [])[:3]:
+            invoke(f"try-open-control:{label}", ["find", "text", str(label), "click"])
+            control_snapshot = invoke(f"snapshot-after:{label}", ["snapshot", "-i", "-c"])
+            if control_snapshot.stdout:
+                visible_text += "\n" + control_snapshot.stdout
+    screenshot_result = invoke("screenshot", ["screenshot", str(screenshot)])
+
+    inventory = extract_provider_inventory(provider_id, visible_text)
+    evidence_status = "captured" if visible_text else "failed"
+    if visible_text and screenshot_result.returncode != 0:
+        evidence_status = "captured-without-screenshot"
+    payload = {
+        "provider": provider_id,
+        "mode": mode,
+        "browser": normalize_browser_name(browser),
+        "profile": profile,
+        "status": evidence_status,
+        "cdp_port": cdp_port,
+        "screenshot": str(screenshot) if screenshot.exists() else "",
+        "inventory": inventory,
+        "commands": commands,
+        "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    }
+    write_json(paths["status_json"], payload)
+    (paths["run_dir"] / "visible-text.txt").write_text(visible_text, encoding="utf-8")
+    return {**payload, "status_json": str(paths["status_json"]), "visible_text_path": str(paths["run_dir"] / "visible-text.txt")}
 
 
 def is_port_open(port: int, host: str = "127.0.0.1", timeout: float = 0.2) -> bool:
@@ -627,7 +846,8 @@ def detect_launch_blockers(
     blockers = []
     if port_owner:
         blockers.append(f"port {port} is already used by {port_owner}")
-    if process_args and "--remote-debugging-port" not in process_args:
+    non_cdp_processes = [line for line in process_args.splitlines() if line.strip() and "--remote-debugging-port" not in line]
+    if non_cdp_processes:
         blockers.append(f"{browser_name} is already running without --remote-debugging-port")
     return blockers
 
@@ -1247,6 +1467,73 @@ def cmd_record_e2e(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_probe_specs(args: argparse.Namespace) -> int:
+    provider_id = normalize_provider_name(args.provider) if args.provider else ""
+    specs = provider_probe_specs()
+    if provider_id:
+        if provider_id not in specs:
+            raise SystemExit(f"unknown provider: {args.provider}")
+        print(json.dumps({"provider": provider_id, "probe_spec": specs[provider_id]}, ensure_ascii=False, indent=2))
+        return 0
+    print(json.dumps({"probe_specs": specs}, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_oracle_plan(args: argparse.Namespace) -> int:
+    files = [item for item in args.file or [] if item]
+    payload = build_oracle_plan(
+        prompt=args.prompt,
+        files=files,
+        cdp_port=args.cdp_port,
+        deep_research=args.deep_research,
+        model_strategy=args.browser_model_strategy,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_e2e_probe(args: argparse.Namespace) -> int:
+    provider_id = normalize_provider_name(args.provider)
+    browser_id = normalize_browser_name(args.browser)
+    artifact_root = Path(args.artifact_root).expanduser()
+    if args.text_file:
+        visible_text = Path(args.text_file).expanduser().read_text(encoding="utf-8")
+        paths = build_artifact_paths(artifact_root, provider=provider_id, mode=args.mode, browser=browser_id, profile=args.profile)
+        paths["run_dir"].mkdir(parents=True, exist_ok=True)
+        payload = {
+            "provider": provider_id,
+            "mode": args.mode,
+            "browser": browser_id,
+            "profile": args.profile,
+            "status": "captured",
+            "source": "text-file",
+            "screenshot": args.screenshot,
+            "inventory": extract_provider_inventory(provider_id, visible_text),
+            "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        }
+        write_json(paths["status_json"], payload)
+        (paths["run_dir"] / "visible-text.txt").write_text(visible_text, encoding="utf-8")
+        print(json.dumps({**payload, "status_json": str(paths["status_json"]), "visible_text_path": str(paths["run_dir"] / "visible-text.txt")}, ensure_ascii=False, indent=2))
+        return 0
+    if not args.cdp_port:
+        raise SystemExit("e2e-probe requires --cdp-port for live runs or --text-file for captured UI text")
+    if not is_port_open(args.cdp_port):
+        print(json.dumps({"status": "blocked", "blocker": f"CDP port {args.cdp_port} is not reachable"}, ensure_ascii=False, indent=2))
+        return 2
+    payload = agent_browser_probe(
+        cdp_port=args.cdp_port,
+        provider=provider_id,
+        mode=args.mode,
+        artifact_root=artifact_root,
+        browser=browser_id,
+        profile=args.profile,
+        session=args.session,
+        open_controls=args.open_controls,
+    )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0 if payload["status"] == "captured" else 1
+
+
 def cmd_save_chat(args: argparse.Namespace) -> int:
     text = Path(args.text_file).expanduser().read_text(encoding="utf-8") if args.text_file else sys.stdin.read()
     record = save_chat_record(
@@ -1312,6 +1599,14 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("discover")
     sub.add_parser("backends")
+    probe_specs = sub.add_parser("probe-specs")
+    probe_specs.add_argument("--provider", choices=provider_cli_choices(), default="")
+    oracle_plan = sub.add_parser("oracle-plan")
+    oracle_plan.add_argument("-p", "--prompt", required=True)
+    oracle_plan.add_argument("--file", action="append")
+    oracle_plan.add_argument("--cdp-port", type=int)
+    oracle_plan.add_argument("--deep-research", action="store_true")
+    oracle_plan.add_argument("--browser-model-strategy", choices=["select", "current", "ignore"], default="current")
     models = sub.add_parser("models")
     models.add_argument("--provider", choices=provider_cli_choices(), default="")
     matrix = sub.add_parser("matrix")
@@ -1378,6 +1673,17 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument("--screenshot", default="")
     record.add_argument("--text-file", default="")
     record.add_argument("--note", action="append")
+    e2e_probe = sub.add_parser("e2e-probe")
+    e2e_probe.add_argument("--artifact-root", required=True)
+    e2e_probe.add_argument("--browser", required=True)
+    e2e_probe.add_argument("--profile", required=True)
+    e2e_probe.add_argument("--provider", choices=provider_cli_choices(), required=True)
+    e2e_probe.add_argument("--mode", default="chat")
+    e2e_probe.add_argument("--cdp-port", type=int)
+    e2e_probe.add_argument("--session", default="")
+    e2e_probe.add_argument("--text-file", default="")
+    e2e_probe.add_argument("--screenshot", default="")
+    e2e_probe.add_argument("--open-controls", action="store_true", help="Best-effort click known model/tool controls and resnapshot.")
     save_chat = sub.add_parser("save-chat")
     save_chat.add_argument("--cache-root", default=str(default_chat_cache_root()))
     save_chat.add_argument("--browser", required=True)
@@ -1416,6 +1722,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_discover(args)
     if args.command == "backends":
         return cmd_backends(args)
+    if args.command == "probe-specs":
+        return cmd_probe_specs(args)
+    if args.command == "oracle-plan":
+        return cmd_oracle_plan(args)
     if args.command == "models":
         return cmd_models(args)
     if args.command == "matrix":
@@ -1466,6 +1776,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_verify_text(args)
     if args.command == "record-e2e":
         return cmd_record_e2e(args)
+    if args.command == "e2e-probe":
+        return cmd_e2e_probe(args)
     if args.command == "save-chat":
         return cmd_save_chat(args)
     if args.command == "chat-cache":

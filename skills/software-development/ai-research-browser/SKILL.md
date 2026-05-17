@@ -32,8 +32,10 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 - Provides an interactive wizard that lets a human choose the installed browser, profile, provider, and feature before launching or testing.
 - Archives existing provider chats into a local cache so later runs can continue from cached transcripts or intentionally refresh by scraping again.
 - Extracts visible provider account, plan/subscription, model, quota, and usage text when a real UI snapshot is supplied.
+- Runs Agent Browser backed E2E probes against a CDP-enabled browser profile and records provider inventory artifacts.
+- Exposes provider-specific probe hints for account menus, model selectors, tool controls, and usage/limit text.
 - Lists automation backends such as Playwright/CDP, Codex Computer Use, Peekaboo, OpenAI CUA/Operator, Claude Computer Use, Gemini Computer Use, Stagehand, Browser-Use, and Hyperbrowser.
-- Lists Peter Steinberger's Oracle as an optional consult backend for multi-model review, browser-session reattach, and session artifacts.
+- Lists Peter Steinberger's Oracle as an optional consult backend for multi-model review, browser-session reattach, Deep Research, and session artifacts.
 - Lists selectable model/tool catalogs for ChatGPT, Gemini/Google, Claude/Anthropic, Perplexity, and Grok/xAI.
 - Marks profiles as `signed-in-hidden` when browser metadata indicates account/session state but no email is exposed.
 - Reports `app_exists`, `binary_exists`, and `user_data_exists` so stale browser profile data is not confused with a launchable installed browser.
@@ -145,6 +147,48 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 ```
 
 Treat `account-audit` JSON as private local evidence: it may contain names, emails, subscription labels, model names, and remaining Deep Research/Agent usage. Do not commit it.
+
+List provider-specific probe hints:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py probe-specs
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py probe-specs --provider anthropic
+```
+
+Run a real Agent Browser/CDP E2E probe:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py e2e-probe \
+  --artifact-root /tmp/hermes-ai-research-e2e \
+  --browser chrome \
+  --profile "Profile 2" \
+  --provider chatgpt \
+  --mode chat \
+  --cdp-port 9224 \
+  --open-controls
+```
+
+Parse a captured UI snapshot without touching a browser:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py e2e-probe \
+  --artifact-root /tmp/hermes-ai-research-e2e \
+  --browser opera \
+  --profile Default \
+  --provider anthropic \
+  --mode chat \
+  --text-file /tmp/opera-claude-visible-text.txt
+```
+
+Generate Oracle fetch/show commands:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py oracle-plan \
+  -p "Review the provider E2E probes" \
+  --file "skills/software-development/ai-research-browser/**" \
+  --cdp-port 9224 \
+  --deep-research
+```
 
 Parse visible existing chat names from a sidebar/list:
 
@@ -275,7 +319,7 @@ Grok may be typed as `grok` or `grog` in the CLI. Availability of research modes
 
 This follows the same shape that makes Peter Steinberger's Peekaboo and Oracle useful for agents: separate discovery/snapshot JSON from actions, print a browser-control plan before touching a shared desktop, and avoid profile races by reusing reachable browser state or reporting blockers. The `matrix` command is the snapshot, while `wizard`, `launch-args`, `launch-background`, `launch-all-background`, `verify-text`, and `record-e2e` are the action/evidence layer.
 
-If a user says "Oracle" in this context, check Peter Steinberger's `steipete/oracle` pattern first: API mode when possible, browser mode only with an explicit control plan, remote/reachable browser reuse, auto-reattach, and session artifacts. The CLI exposes Oracle as `oracle` for consult/code-review help and long-running session capture. It exposes OpenAI CUA as `openai-cua`, but keeps local logged-in browser profiles under `playwright-cdp`, `computer-use`, or `peekaboo`.
+If a user says "Oracle" in this context, check Peter Steinberger's `steipete/oracle` pattern first: API mode when possible, browser mode only with an explicit control plan, remote/reachable browser reuse, auto-reattach, Deep Research, and session artifacts. The CLI exposes Oracle as `oracle` for consult/code-review help and long-running session capture, and `oracle-plan` prints dry-run/status/session commands. It exposes OpenAI CUA as `openai-cua`, but keeps local logged-in browser profiles under `playwright-cdp`, `computer-use`, `agent-browser`, or `peekaboo`.
 
 ## Testing
 

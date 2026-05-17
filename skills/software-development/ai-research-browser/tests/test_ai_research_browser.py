@@ -277,7 +277,9 @@ class AiResearchBrowserTest(unittest.TestCase):
         examples = {
             "ChatGPT Pro\nDeep research: 12 remaining": "Pro",
             "Gemini Advanced\nModel: Pro": "Advanced",
+            "Google AI Ultra plan\nDeep Research": "Ultra",
             "Perplexity Pro\nResearch: 4 left": "Pro",
+            "X Premium+ subscription\nGrok": "Premium+",
             "SuperGrok\nDeepSearch": "SuperGrok",
         }
 
@@ -522,6 +524,115 @@ class AiResearchBrowserTest(unittest.TestCase):
 
         self.assertIn("port 9223 is already used by Code Helper", blockers)
         self.assertIn("Comet is already running without --remote-debugging-port", blockers)
+
+    def test_detect_launch_blockers_notices_mixed_cdp_and_non_cdp_processes(self):
+        module = load_module()
+
+        blockers = module.detect_launch_blockers(
+            browser_name="Google Chrome",
+            port=9224,
+            port_owner="",
+            process_args=(
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome\n"
+                "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome --remote-debugging-port=58554"
+            ),
+        )
+
+        self.assertIn("Google Chrome is already running without --remote-debugging-port", blockers)
+
+    def test_extract_provider_inventory_from_snapshot_text(self):
+        module = load_module()
+
+        inventory = module.extract_provider_inventory(
+            "chatgpt",
+            "ChatGPT\nSigned in as work@example.test\nChatGPT Pro\n"
+            "GPT-5.5 Pro\nDeep research\nAgent\nDeep research: 8 remaining\n"
+            "Usage resets tomorrow",
+        )
+
+        self.assertEqual(inventory["login_state"], "signed-in-or-ready")
+        self.assertEqual(inventory["visible_status"]["account"], "work@example.test")
+        self.assertEqual(inventory["visible_status"]["plan"], "Pro")
+        self.assertIn("GPT-5.5 Pro", inventory["available_models"])
+        self.assertIn("Deep research", inventory["available_tools"])
+        self.assertTrue(inventory["available_modes"]["deep-research"])
+        self.assertTrue(any("remaining" in line for line in inventory["usage_lines"]))
+
+    def test_cmd_probe_specs_outputs_provider_paths(self):
+        module = load_module()
+
+        out = StringIO()
+        with redirect_stdout(out):
+            exit_code = module.main(["probe-specs", "--provider", "anthropic"])
+
+        payload = json.loads(out.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["provider"], "claude")
+        self.assertIn("model_hints", payload["probe_spec"])
+
+    def test_oracle_plan_outputs_attach_status_and_show_commands(self):
+        module = load_module()
+
+        plan = module.build_oracle_plan(
+            prompt="Review this E2E probe",
+            files=["skills/software-development/ai-research-browser/**"],
+            cdp_port=9224,
+            deep_research=True,
+        )
+
+        self.assertIn("--browser-attach-running", plan["consult_dry_run"])
+        self.assertIn("--remote-chrome", plan["consult_dry_run"])
+        self.assertIn("127.0.0.1:9224", plan["consult_dry_run"])
+        self.assertIn("--browser-research", plan["consult_dry_run"])
+        self.assertEqual(plan["status"][:3], ["npx", "-y", "@steipete/oracle"])
+        self.assertIn("--render", plan["show_session"])
+
+    def test_cmd_oracle_plan_outputs_json_commands(self):
+        module = load_module()
+
+        out = StringIO()
+        with redirect_stdout(out):
+            exit_code = module.main(["oracle-plan", "-p", "Check implementation", "--cdp-port", "9224"])
+
+        payload = json.loads(out.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertIn("--browser-attach-running", payload["consult_dry_run"])
+
+    def test_cmd_e2e_probe_parses_captured_text_file(self):
+        module = load_module()
+        root = Path(tempfile.mkdtemp())
+        text_file = root / "claude.txt"
+        text_file.write_text(
+            "Claude\nMartin\nMax plan\nOpus 4.7 Adaptive\nYou've used 75% of your weekly limit",
+            encoding="utf-8",
+        )
+
+        out = StringIO()
+        with redirect_stdout(out):
+            exit_code = module.main(
+                [
+                    "e2e-probe",
+                    "--artifact-root",
+                    str(root / "artifacts"),
+                    "--browser",
+                    "opera",
+                    "--profile",
+                    "Default",
+                    "--provider",
+                    "anthropic",
+                    "--mode",
+                    "chat",
+                    "--text-file",
+                    str(text_file),
+                ]
+            )
+
+        payload = json.loads(out.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["provider"], "claude")
+        self.assertEqual(payload["inventory"]["visible_status"]["plan"], "Max")
+        self.assertEqual(payload["inventory"]["visible_status"]["usage"]["used_percent"], 75)
+        self.assertTrue(Path(payload["status_json"]).exists())
 
     def test_run_artifact_paths_are_stable_and_screenshot_friendly(self):
         module = load_module()

@@ -34,6 +34,7 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 - Lists automation backends such as Playwright/CDP, Codex Computer Use, Peekaboo, OpenAI CUA/Operator, Claude Computer Use, Gemini Computer Use, Stagehand, Browser-Use, and Hyperbrowser.
 - Lists selectable model/tool catalogs for ChatGPT, Gemini/Google, Claude/Anthropic, Perplexity, and Grok/xAI.
 - Marks profiles as `signed-in-hidden` when browser metadata indicates account/session state but no email is exposed.
+- Reports `app_exists`, `binary_exists`, and `user_data_exists` so stale browser profile data is not confused with a launchable installed browser.
 - Records E2E evidence as a `status.json` plus screenshot path, so a human can verify whether the provider UI actually entered the requested mode.
 
 ## Safety Rule
@@ -69,6 +70,14 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py models --provider anthropic
 python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py models --provider google
 ```
+
+The provider catalog should preserve common user aliases:
+
+- `google` / `google-gemini` -> Gemini
+- `anthropic` / `entropic` -> Claude
+- `grog` / `xai` -> Grok
+
+Keep provider model labels broad enough for the UI picker and exact enough for E2E assertions. Current examples include ChatGPT `GPT-5.5 Pro`, Gemini `Complex` / `Thinking with 3 Pro`, Perplexity `Sonar Deep Research`, and Grok `Grok 4.1 Fast Reasoning`.
 
 Save the matrix for a later E2E run:
 

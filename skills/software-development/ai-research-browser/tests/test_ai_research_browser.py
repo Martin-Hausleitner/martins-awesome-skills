@@ -105,18 +105,50 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertEqual(candidates["opera"]["display_name"], "Opera")
         self.assertEqual(candidates["atlas"]["display_name"], "ChatGPT Atlas")
 
+    def test_browser_install_state_distinguishes_app_binary_and_profile_data(self):
+        module = load_module()
+        root = Path(tempfile.mkdtemp())
+        app_path = root / "Example.app"
+        binary_rel = "Contents/MacOS/Example"
+        (app_path / "Contents" / "MacOS").mkdir(parents=True)
+        (app_path / binary_rel).write_text("#!/bin/sh\n", encoding="utf-8")
+        user_data_dir = root / "ProfileData"
+        user_data_dir.mkdir()
+
+        state = module.browser_install_state(
+            {
+                "app_path": str(app_path),
+                "binary_rel": binary_rel,
+                "user_data_dir": str(user_data_dir),
+            }
+        )
+
+        self.assertEqual(
+            state,
+            {
+                "app_exists": True,
+                "binary_exists": True,
+                "user_data_exists": True,
+            },
+        )
+
     def test_model_catalog_lists_selectable_models_and_feature_modes(self):
         module = load_module()
 
         catalog = module.model_catalog()
 
         self.assertIn("GPT-5.5", catalog["chatgpt"]["models"])
+        self.assertIn("GPT-5.5 Pro", catalog["chatgpt"]["models"])
         self.assertIn("Pro", catalog["gemini"]["models"])
+        self.assertIn("Complex", catalog["gemini"]["models"])
+        self.assertIn("Thinking with 3 Pro", catalog["gemini"]["models"])
         self.assertIn("Deep Think", catalog["gemini"]["tools"])
         self.assertIn("Opus 4.7", catalog["claude"]["models"])
         self.assertIn("Sonnet 4.6", catalog["claude"]["models"])
         self.assertIn("Research", catalog["perplexity"]["tools"])
+        self.assertIn("Sonar Deep Research", catalog["perplexity"]["models"])
         self.assertIn("DeepSearch", catalog["grok"]["tools"])
+        self.assertIn("Grok 4.1 Fast Reasoning", catalog["grok"]["models"])
 
     def test_cmd_models_outputs_provider_catalog(self):
         module = load_module()

@@ -67,8 +67,9 @@ def provider_registry() -> dict[str, dict[str, Any]]:
         "chatgpt": {
             "url": "https://chatgpt.com/",
             "modes": ["chat", "deep-research", "agent"],
-            "models": ["Auto", "GPT-5.5", "GPT-5.4", "GPT-5.3 Codex", "GPT-5.2", "GPT-5.2 Thinking"],
+            "models": ["Auto", "GPT-5.3 Instant", "GPT-5.5", "GPT-5.5 Thinking", "GPT-5.5 Pro"],
             "tools": ["Deep research", "Agent", "Codex", "Search", "Canvas", "Data analysis", "Image generation"],
+            "source_urls": ["https://help.openai.com/en/articles/11909943-gpt-52-in-chatgpt"],
             "mode_markers": {
                 "deep-research": ["Deep research", "/Deepresearch", "Start research"],
                 "agent": ["Agent", "/agent", "Take control", "Codex"],
@@ -79,8 +80,9 @@ def provider_registry() -> dict[str, dict[str, Any]]:
             "url": "https://gemini.google.com/app?hl=de",
             "aliases": ["google", "google-gemini"],
             "modes": ["chat", "deep-research", "agent"],
-            "models": ["Auto", "Flash", "Pro", "Deep Think"],
+            "models": ["Auto", "Fast", "Flash", "Complex", "Pro", "Thinking with 3 Pro", "Deep Think"],
             "tools": ["Deep Research", "Agent", "Deep Think", "Gmail", "Drive", "Google Search"],
+            "source_urls": ["https://support.google.com/gemini/answer/16275805"],
             "mode_markers": {
                 "deep-research": ["Deep Research", "Recherche starten", "Start research"],
                 "agent": ["Agent", "Confirm", "Bestätigen"],
@@ -90,8 +92,18 @@ def provider_registry() -> dict[str, dict[str, Any]]:
         "perplexity": {
             "url": "https://www.perplexity.ai/",
             "modes": ["chat", "research"],
-            "models": ["Auto", "Sonar", "Sonar Pro", "GPT-5.4", "Claude Sonnet 4.6", "Gemini 3.1 Pro"],
-            "tools": ["Search", "Pro Search", "Research", "Deep Research", "Spaces", "MCP"],
+            "models": [
+                "Auto",
+                "Sonar",
+                "Sonar Pro",
+                "Sonar Reasoning Pro",
+                "Sonar Deep Research",
+                "GPT-5.5",
+                "Claude Sonnet 4.6",
+                "Gemini 3.1 Pro",
+            ],
+            "tools": ["Search", "Pro Search", "Research", "Deep Research", "Agent API", "Spaces", "MCP"],
+            "source_urls": ["https://docs.perplexity.ai/docs/sonar/models"],
             "mode_markers": {"research": ["Research", "Deep Research"], "chat": ["Perplexity"]},
         },
         "claude": {
@@ -100,6 +112,7 @@ def provider_registry() -> dict[str, dict[str, Any]]:
             "modes": ["chat", "research", "artifacts"],
             "models": ["Auto", "Opus 4.7", "Sonnet 4.6", "Haiku"],
             "tools": ["Search", "Research", "Artifacts", "Computer use", "Claude Code"],
+            "source_urls": ["https://support.claude.com/en/articles/11088861-using-research-on-claude"],
             "mode_markers": {
                 "chat": ["Claude", "How can I help"],
                 "research": ["Research", "Search", "Sources"],
@@ -110,8 +123,9 @@ def provider_registry() -> dict[str, dict[str, Any]]:
             "url": "https://grok.com/",
             "aliases": ["grog", "xai"],
             "modes": ["chat", "research"],
-            "models": ["Auto", "Grok 4.20 Fast", "Grok 4.20 Expert", "Grok 4.1", "Grok 4.1 Thinking"],
-            "tools": ["DeepSearch", "Think", "Search", "X realtime"],
+            "models": ["Auto", "Grok 4.20", "Grok 4.20 Reasoning", "Grok 4.1", "Grok 4.1 Thinking", "Grok 4.1 Fast Reasoning"],
+            "tools": ["DeepSearch", "Think", "Search", "X realtime", "Agent Tools API", "Connectors"],
+            "source_urls": ["https://x.ai/news/grok-4-1-fast", "https://docs.x.ai/developers/models/grok-4-1-fast-reasoning"],
             "mode_markers": {"research": ["Research", "DeepSearch", "Think"], "chat": ["Grok", "Ask anything"]},
         },
     }
@@ -124,6 +138,7 @@ def model_catalog() -> dict[str, dict[str, Any]]:
             "tools": [str(tool) for tool in provider.get("tools", [])],
             "modes": [str(mode) for mode in provider.get("modes", [])],
             "url": str(provider.get("url", "")),
+            "source_urls": [str(url) for url in provider.get("source_urls", [])],
         }
         for provider_id, provider in provider_registry().items()
     }
@@ -276,12 +291,24 @@ def normalize_browser_name(name: str) -> str:
     return lowered
 
 
+def browser_install_state(cfg: dict[str, Any]) -> dict[str, bool]:
+    app_path = Path(str(cfg["app_path"])).expanduser()
+    user_data_dir = Path(str(cfg["user_data_dir"])).expanduser()
+    binary_path = app_path / str(cfg["binary_rel"])
+    return {
+        "app_exists": app_path.exists(),
+        "binary_exists": binary_path.exists(),
+        "user_data_exists": user_data_dir.exists(),
+    }
+
+
 def discover_browsers() -> list[dict[str, Any]]:
     out = []
     for key, cfg in BROWSER_CANDIDATES.items():
         app_path = Path(str(cfg["app_path"])).expanduser()
         user_data_dir = Path(str(cfg["user_data_dir"])).expanduser()
-        if not app_path.exists() and not user_data_dir.exists():
+        install_state = browser_install_state(cfg)
+        if not install_state["app_exists"] and not install_state["user_data_exists"]:
             continue
         profiles = discover_profiles(user_data_dir, browser_id=key)
         out.append(
@@ -293,6 +320,7 @@ def discover_browsers() -> list[dict[str, Any]]:
                 "user_data_dir": str(user_data_dir),
                 "default_port": cfg["default_port"],
                 "profiles": profiles,
+                **install_state,
             }
         )
     return out

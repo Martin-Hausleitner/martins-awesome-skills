@@ -55,6 +55,8 @@ The CLI currently discovers:
 
 Profiles are read from Chromium `Local State` and `Preferences`, including display name and account email when Chromium exposes it. Some browsers, notably Opera, hide the account identifier even when sync/session state exists; those profiles are marked with `account_state: signed-in-hidden`.
 
+Discovery also reports `app_exists`, `binary_exists`, and `user_data_exists`. This matters on machines where stale profile data remains after an app was removed: the browser may be discoverable for cache/profile inspection but not launchable until the app binary exists again.
+
 ## Models and Tools
 
 List selectable provider models and tools:
@@ -65,7 +67,7 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py models --provider google
 ```
 
-Provider aliases include `google`/`google-gemini` for Gemini and `anthropic`/`entropic` for Claude. Launch plans can carry the intended model, but the CLI does not fake model selection through URL parameters; it records `model_selection: select-in-provider-ui` so the E2E step must verify the visible provider UI.
+Provider aliases include `google`/`google-gemini` for Gemini, `anthropic`/`entropic` for Claude, and `grog`/`xai` for Grok. The catalog includes provider/source URLs and current UI/API labels such as ChatGPT `GPT-5.5 Pro`, Gemini `Complex` / `Thinking with 3 Pro`, Perplexity `Sonar Deep Research`, and Grok `Grok 4.1 Fast Reasoning`. Launch plans can carry the intended model, but the CLI does not fake model selection through URL parameters; it records `model_selection: select-in-provider-ui` so the E2E step must verify the visible provider UI.
 
 ## Account and Quota Capture
 

@@ -29,6 +29,7 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 - Supports provider modes for ChatGPT chat, ChatGPT Deep Research, ChatGPT Agent, Gemini chat, Gemini Deep Research, Gemini Agent, Perplexity research, and Grok/Grog research.
 - Builds a full browser x profile x provider x feature test matrix for systematic E2E runs.
 - Provides an interactive wizard that lets a human choose the installed browser, profile, provider, and feature before launching or testing.
+- Archives existing provider chats into a local cache so later runs can continue from cached transcripts or intentionally refresh by scraping again.
 - Records E2E evidence as a `status.json` plus screenshot path, so a human can verify whether the provider UI actually entered the requested mode.
 
 ## Safety Rule
@@ -73,6 +74,55 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
   --profile work \
   --provider chatgpt \
   --text-file /tmp/chatgpt-visible-text.txt
+```
+
+Parse visible existing chat names from a sidebar/list:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py parse-chats \
+  --provider chatgpt \
+  --text-file /tmp/chat-sidebar-visible-text.txt
+```
+
+Save a current conversation transcript into the cache:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py save-chat \
+  --browser brave \
+  --profile Default \
+  --provider chatgpt \
+  --chat-url https://chatgpt.com/c/example \
+  --title "Existing research chat" \
+  --text-file /tmp/chat-transcript.txt
+```
+
+Reuse cached chat data when available:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py chat-cache \
+  --browser brave \
+  --profile Default \
+  --provider chatgpt \
+  --chat-url https://chatgpt.com/c/example \
+  --include-text
+```
+
+Force a fresh scrape/update:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py chat-cache \
+  --browser brave \
+  --profile Default \
+  --provider chatgpt \
+  --chat-url https://chatgpt.com/c/example \
+  --text-file /tmp/fresh-chat-transcript.txt \
+  --refresh
+```
+
+List the cache:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py list-chats
 ```
 
 Check whether a browser/profile can be launched for CDP automation:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -325,6 +326,10 @@ def slug(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-") or "run"
 
 
+def default_chat_cache_root() -> Path:
+    return Path(os.environ.get("AI_RESEARCH_BROWSER_CACHE", "~/.cache/ai-research-browser/chats")).expanduser()
+
+
 def build_artifact_paths(root: Path, *, provider: str, mode: str, browser: str, profile: str) -> dict[str, Path]:
     run_dir = root / f"{slug(provider)}-{slug(mode)}-{slug(browser)}-{slug(profile)}"
     return {
@@ -332,6 +337,120 @@ def build_artifact_paths(root: Path, *, provider: str, mode: str, browser: str, 
         "status_json": run_dir / "status.json",
         "screenshot_png": run_dir / "screenshot.png",
     }
+
+
+def chat_cache_key(*, browser: str, profile: str, provider: str, chat_url: str) -> str:
+    browser_id = normalize_browser_name(browser)
+    provider_id = normalize_provider_name(provider)
+    digest = hashlib.sha256(f"{browser_id}\0{profile}\0{provider_id}\0{chat_url}".encode("utf-8")).hexdigest()[:16]
+    return f"{slug(browser_id)}-{slug(profile)}-{slug(provider_id)}-{digest}"
+
+
+def chat_record_paths(cache_root: Path, key: str) -> dict[str, Path]:
+    record_dir = cache_root.expanduser() / key
+    return {
+        "record_dir": record_dir,
+        "metadata_path": record_dir / "metadata.json",
+        "text_path": record_dir / "chat.txt",
+        "index_path": cache_root.expanduser() / "index.json",
+    }
+
+
+def read_chat_index(cache_root: Path) -> dict[str, Any]:
+    index_path = cache_root.expanduser() / "index.json"
+    if not index_path.exists():
+        return {"chats": []}
+    data = read_json(index_path)
+    if not isinstance(data.get("chats"), list):
+        return {"chats": []}
+    return data
+
+
+def write_chat_index(cache_root: Path, record: dict[str, Any]) -> None:
+    index = read_chat_index(cache_root)
+    chats = [chat for chat in index["chats"] if chat.get("key") != record.get("key")]
+    chats.append(record)
+    chats.sort(key=lambda chat: str(chat.get("updated_at", "")), reverse=True)
+    write_json(cache_root.expanduser() / "index.json", {"chats": chats})
+
+
+def save_chat_record(
+    *,
+    cache_root: Path,
+    browser: str,
+    profile: str,
+    provider: str,
+    chat_url: str,
+    title: str,
+    text: str,
+    source: str,
+    refresh: bool,
+) -> dict[str, Any]:
+    provider_id = normalize_provider_name(provider)
+    browser_id = normalize_browser_name(browser)
+    key = chat_cache_key(browser=browser_id, profile=profile, provider=provider_id, chat_url=chat_url)
+    paths = chat_record_paths(cache_root, key)
+    cache_hit = paths["metadata_path"].exists() and not refresh
+    if cache_hit:
+        metadata = read_json(paths["metadata_path"])
+        return {**paths, "key": key, "metadata": metadata, "cache_hit": True}
+
+    now = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    paths["record_dir"].mkdir(parents=True, exist_ok=True)
+    paths["text_path"].write_text(text, encoding="utf-8")
+    metadata = {
+        "key": key,
+        "browser": browser_id,
+        "profile": profile,
+        "provider": provider_id,
+        "chat_url": chat_url,
+        "title": title or chat_url,
+        "source": source,
+        "text_path": str(paths["text_path"]),
+        "created_at": now,
+        "updated_at": now,
+        "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        "text_bytes": len(text.encode("utf-8")),
+    }
+    write_json(paths["metadata_path"], metadata)
+    write_chat_index(cache_root, metadata)
+    return {**paths, "key": key, "metadata": metadata, "cache_hit": False}
+
+
+def list_chat_records(cache_root: Path, *, provider: str = "", browser: str = "", profile: str = "") -> list[dict[str, Any]]:
+    records = read_chat_index(cache_root)["chats"]
+    provider_id = normalize_provider_name(provider) if provider else ""
+    browser_id = normalize_browser_name(browser) if browser else ""
+    out = []
+    for record in records:
+        if provider_id and record.get("provider") != provider_id:
+            continue
+        if browser_id and record.get("browser") != browser_id:
+            continue
+        if profile and record.get("profile") != profile:
+            continue
+        out.append(record)
+    return out
+
+
+def parse_chat_listing(text: str, *, provider: str) -> list[dict[str, str]]:
+    skip = {
+        "recents",
+        "chats",
+        "projects",
+        "more",
+        "new chat",
+        "search chats",
+        "chat history",
+        "gemini",
+    }
+    chats: list[dict[str, str]] = []
+    for line in (text or "").splitlines():
+        title = line.strip()
+        if not title or title.lower() in skip:
+            continue
+        chats.append({"provider": normalize_provider_name(provider), "title": title})
+    return chats
 
 
 def build_test_matrix(browsers: list[dict[str, Any]], providers: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
@@ -594,6 +713,66 @@ def cmd_record_e2e(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_save_chat(args: argparse.Namespace) -> int:
+    text = Path(args.text_file).expanduser().read_text(encoding="utf-8") if args.text_file else sys.stdin.read()
+    record = save_chat_record(
+        cache_root=Path(args.cache_root).expanduser(),
+        browser=args.browser,
+        profile=args.profile,
+        provider=args.provider,
+        chat_url=args.chat_url,
+        title=args.title,
+        text=text,
+        source=args.source,
+        refresh=args.refresh,
+    )
+    payload = {
+        "key": record["key"],
+        "cache_hit": record["cache_hit"],
+        "metadata": record["metadata"],
+        "metadata_path": str(record["metadata_path"]),
+        "text_path": str(record["text_path"]),
+    }
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_chat_cache(args: argparse.Namespace) -> int:
+    key = chat_cache_key(
+        browser=args.browser,
+        profile=args.profile,
+        provider=args.provider,
+        chat_url=args.chat_url,
+    )
+    paths = chat_record_paths(Path(args.cache_root).expanduser(), key)
+    if paths["metadata_path"].exists() and not args.refresh:
+        metadata = read_json(paths["metadata_path"])
+        text = paths["text_path"].read_text(encoding="utf-8") if paths["text_path"].exists() and args.include_text else ""
+        print(json.dumps({"key": key, "cache_hit": True, "metadata": metadata, "text": text}, ensure_ascii=False, indent=2))
+        return 0
+    if not args.text_file:
+        print(json.dumps({"key": key, "cache_hit": False, "needs_scrape": True}, ensure_ascii=False, indent=2))
+        return 2
+    return cmd_save_chat(args)
+
+
+def cmd_list_chats(args: argparse.Namespace) -> int:
+    records = list_chat_records(
+        Path(args.cache_root).expanduser(),
+        provider=args.provider,
+        browser=args.browser,
+        profile=args.profile,
+    )
+    print(json.dumps({"cache_root": str(Path(args.cache_root).expanduser()), "chats": records}, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_parse_chats(args: argparse.Namespace) -> int:
+    text = Path(args.text_file).expanduser().read_text(encoding="utf-8") if args.text_file else sys.stdin.read()
+    print(json.dumps({"chats": parse_chat_listing(text, provider=args.provider)}, ensure_ascii=False, indent=2))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Discover browser profiles and run AI research/agent workflows with E2E artifacts.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -635,6 +814,35 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument("--screenshot", default="")
     record.add_argument("--text-file", default="")
     record.add_argument("--note", action="append")
+    save_chat = sub.add_parser("save-chat")
+    save_chat.add_argument("--cache-root", default=str(default_chat_cache_root()))
+    save_chat.add_argument("--browser", required=True)
+    save_chat.add_argument("--profile", required=True)
+    save_chat.add_argument("--provider", choices=provider_cli_choices(), required=True)
+    save_chat.add_argument("--chat-url", required=True)
+    save_chat.add_argument("--title", default="")
+    save_chat.add_argument("--text-file", default="")
+    save_chat.add_argument("--source", default="manual")
+    save_chat.add_argument("--refresh", action="store_true")
+    chat_cache = sub.add_parser("chat-cache")
+    chat_cache.add_argument("--cache-root", default=str(default_chat_cache_root()))
+    chat_cache.add_argument("--browser", required=True)
+    chat_cache.add_argument("--profile", required=True)
+    chat_cache.add_argument("--provider", choices=provider_cli_choices(), required=True)
+    chat_cache.add_argument("--chat-url", required=True)
+    chat_cache.add_argument("--title", default="")
+    chat_cache.add_argument("--text-file", default="")
+    chat_cache.add_argument("--source", default="manual")
+    chat_cache.add_argument("--refresh", action="store_true")
+    chat_cache.add_argument("--include-text", action="store_true")
+    list_chats = sub.add_parser("list-chats")
+    list_chats.add_argument("--cache-root", default=str(default_chat_cache_root()))
+    list_chats.add_argument("--provider", default="")
+    list_chats.add_argument("--browser", default="")
+    list_chats.add_argument("--profile", default="")
+    parse_chats = sub.add_parser("parse-chats")
+    parse_chats.add_argument("--provider", choices=provider_cli_choices(), required=True)
+    parse_chats.add_argument("--text-file", default="")
     return parser
 
 
@@ -681,6 +889,14 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_verify_text(args)
     if args.command == "record-e2e":
         return cmd_record_e2e(args)
+    if args.command == "save-chat":
+        return cmd_save_chat(args)
+    if args.command == "chat-cache":
+        return cmd_chat_cache(args)
+    if args.command == "list-chats":
+        return cmd_list_chats(args)
+    if args.command == "parse-chats":
+        return cmd_parse_chats(args)
     raise SystemExit(f"unknown command: {args.command}")
 
 

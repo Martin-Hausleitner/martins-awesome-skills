@@ -4,6 +4,8 @@ import importlib.util
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 
 
@@ -250,6 +252,144 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertEqual(status["profile_account"], "profile@example.test")
         self.assertEqual(status["provider_account"], "ui@example.test")
         self.assertEqual(status["quotas"]["deep_research_remaining"], 4)
+
+    def test_chat_cache_key_is_stable_and_provider_normalized(self):
+        module = load_module()
+
+        first = module.chat_cache_key(
+            browser="brave",
+            profile="Default",
+            provider="grog",
+            chat_url="https://grok.com/c/123",
+        )
+        second = module.chat_cache_key(
+            browser="Brave",
+            profile="Default",
+            provider="grok",
+            chat_url="https://grok.com/c/123",
+        )
+
+        self.assertEqual(first, second)
+        self.assertTrue(first.startswith("brave-default-grok-"))
+
+    def test_save_chat_record_writes_metadata_text_and_index(self):
+        module = load_module()
+        root = Path(tempfile.mkdtemp())
+        text_file = root / "visible.txt"
+        text_file.write_text("User: hi\nAssistant: hello", encoding="utf-8")
+
+        record = module.save_chat_record(
+            cache_root=root / "cache",
+            browser="brave",
+            profile="Default",
+            provider="chatgpt",
+            chat_url="https://chatgpt.com/c/abc",
+            title="Greeting",
+            text=text_file.read_text(encoding="utf-8"),
+            source="manual",
+            refresh=False,
+        )
+
+        metadata = json.loads(record["metadata_path"].read_text(encoding="utf-8"))
+        index = json.loads((root / "cache" / "index.json").read_text(encoding="utf-8"))
+        self.assertEqual(metadata["title"], "Greeting")
+        self.assertEqual(metadata["text_path"], str(record["text_path"]))
+        self.assertEqual(record["text_path"].read_text(encoding="utf-8"), "User: hi\nAssistant: hello")
+        self.assertEqual(len(index["chats"]), 1)
+
+    def test_save_chat_record_uses_cache_without_refresh(self):
+        module = load_module()
+        root = Path(tempfile.mkdtemp())
+
+        first = module.save_chat_record(
+            cache_root=root,
+            browser="brave",
+            profile="Default",
+            provider="chatgpt",
+            chat_url="https://chatgpt.com/c/abc",
+            title="First",
+            text="old text",
+            source="manual",
+            refresh=False,
+        )
+        second = module.save_chat_record(
+            cache_root=root,
+            browser="brave",
+            profile="Default",
+            provider="chatgpt",
+            chat_url="https://chatgpt.com/c/abc",
+            title="Second",
+            text="new text",
+            source="manual",
+            refresh=False,
+        )
+
+        self.assertTrue(second["cache_hit"])
+        self.assertEqual(first["text_path"].read_text(encoding="utf-8"), "old text")
+
+    def test_save_chat_record_refresh_rescrapes_text(self):
+        module = load_module()
+        root = Path(tempfile.mkdtemp())
+
+        module.save_chat_record(
+            cache_root=root,
+            browser="brave",
+            profile="Default",
+            provider="chatgpt",
+            chat_url="https://chatgpt.com/c/abc",
+            title="First",
+            text="old text",
+            source="manual",
+            refresh=False,
+        )
+        refreshed = module.save_chat_record(
+            cache_root=root,
+            browser="brave",
+            profile="Default",
+            provider="chatgpt",
+            chat_url="https://chatgpt.com/c/abc",
+            title="Second",
+            text="new text",
+            source="manual",
+            refresh=True,
+        )
+
+        self.assertFalse(refreshed["cache_hit"])
+        self.assertEqual(refreshed["text_path"].read_text(encoding="utf-8"), "new text")
+
+    def test_parse_chat_listing_from_visible_text(self):
+        module = load_module()
+
+        chats = module.parse_chat_listing(
+            "Recents\nPreisvergleich Original vs Angebote\nMotherboard Rahmen und Kosten\nProjects\n",
+            provider="chatgpt",
+        )
+
+        self.assertEqual(chats[0]["title"], "Preisvergleich Original vs Angebote")
+        self.assertEqual(chats[0]["provider"], "chatgpt")
+
+    def test_cmd_list_chats_outputs_cached_records(self):
+        module = load_module()
+        root = Path(tempfile.mkdtemp())
+        module.save_chat_record(
+            cache_root=root,
+            browser="brave",
+            profile="Default",
+            provider="chatgpt",
+            chat_url="https://chatgpt.com/c/abc",
+            title="Greeting",
+            text="hello",
+            source="manual",
+            refresh=False,
+        )
+
+        out = StringIO()
+        with redirect_stdout(out):
+            exit_code = module.main(["list-chats", "--cache-root", str(root)])
+
+        payload = json.loads(out.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["chats"][0]["title"], "Greeting")
 
 
 if __name__ == "__main__":

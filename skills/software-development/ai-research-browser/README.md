@@ -70,6 +70,61 @@ The parser extracts:
 - Deep Research remaining count, when visible
 - Agent task remaining count, when visible
 
+## Existing Chat Cache
+
+Existing chats can be archived and reused across later test runs. This lets Hermes continue from a known conversation snapshot instead of scraping the same UI again every time.
+
+Parse a visible chat sidebar/listing:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py parse-chats \
+  --provider chatgpt \
+  --text-file /tmp/chat-sidebar-visible-text.txt
+```
+
+Save a chat transcript into the local cache:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py save-chat \
+  --browser brave \
+  --profile Default \
+  --provider chatgpt \
+  --chat-url https://chatgpt.com/c/example \
+  --title "Preisvergleich Original vs Angebote" \
+  --text-file /tmp/chat-transcript.txt
+```
+
+Read from cache when present, otherwise report that a scrape is needed:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py chat-cache \
+  --browser brave \
+  --profile Default \
+  --provider chatgpt \
+  --chat-url https://chatgpt.com/c/example \
+  --include-text
+```
+
+Force a fresh scrape/update with `--refresh`:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py chat-cache \
+  --browser brave \
+  --profile Default \
+  --provider chatgpt \
+  --chat-url https://chatgpt.com/c/example \
+  --text-file /tmp/fresh-chat-transcript.txt \
+  --refresh
+```
+
+List cached chats:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py list-chats
+```
+
+Default cache root is `~/.cache/ai-research-browser/chats`. Override it with `--cache-root` or `AI_RESEARCH_BROWSER_CACHE`.
+
 ## Launch Args
 
 Generate a command for a selected profile/provider/feature:
@@ -130,4 +185,3 @@ This follows the pattern that makes Peter Steinberger's Peekaboo useful for agen
 ```bash
 python3 -m unittest discover -s skills/software-development/ai-research-browser/tests -p 'test_*.py'
 ```
-

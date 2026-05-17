@@ -85,6 +85,12 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertIn("grok", providers)
         self.assertIn("research", providers["grok"]["modes"])
         self.assertEqual(module.normalize_provider_name("grog"), "grok")
+        self.assertIn("claude", providers)
+        self.assertIn("chat", providers["claude"]["modes"])
+        self.assertIn("research", providers["claude"]["modes"])
+        self.assertIn("artifacts", providers["claude"]["modes"])
+        self.assertEqual(module.provider_url("claude"), "https://claude.ai/new")
+        self.assertIn("claude", module.provider_cli_choices())
 
     def test_parse_account_and_quota_from_visible_text(self):
         module = load_module()
@@ -204,16 +210,31 @@ class AiResearchBrowserTest(unittest.TestCase):
         providers = {
             "chatgpt": {"modes": ["chat", "deep-research"]},
             "grok": {"modes": ["chat"]},
+            "claude": {"modes": ["chat", "research", "artifacts"]},
         }
 
         matrix = module.build_test_matrix(browsers, providers)
 
-        self.assertEqual(len(matrix), 6)
+        self.assertEqual(len(matrix), 12)
         self.assertEqual(matrix[0]["browser"], "brave")
         self.assertEqual(matrix[0]["profile_directory"], "Default")
         self.assertEqual(matrix[0]["profile_account"], "work@example.test")
         self.assertEqual(matrix[0]["provider"], "chatgpt")
         self.assertEqual(matrix[0]["feature"], "chat")
+        self.assertIn(
+            {
+                "browser": "brave",
+                "browser_name": "Brave Browser",
+                "profile_directory": "Default",
+                "profile_name": "Work",
+                "profile_account": "work@example.test",
+                "provider": "claude",
+                "feature": "artifacts",
+                "provider_url": "",
+                "status": "untested",
+            },
+            matrix,
+        )
 
     def test_render_choice_table_is_human_readable(self):
         module = load_module()

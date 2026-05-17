@@ -76,6 +76,17 @@ def provider_registry() -> dict[str, dict[str, Any]]:
             "models": ["Best", "Sonar", "GPT-5.2", "Claude Sonnet", "Gemini Pro"],
             "mode_markers": {"research": ["Research", "Deep Research"], "chat": ["Perplexity"]},
         },
+        "claude": {
+            "url": "https://claude.ai/new",
+            "aliases": ["anthropic"],
+            "modes": ["chat", "research", "artifacts"],
+            "models": ["default", "Claude Sonnet", "Claude Opus"],
+            "mode_markers": {
+                "chat": ["Claude", "How can I help"],
+                "research": ["Research", "Search", "Sources"],
+                "artifacts": ["Artifacts", "Artifact", "Preview"],
+            },
+        },
         "grok": {
             "url": "https://grok.com/",
             "aliases": ["grog", "xai"],

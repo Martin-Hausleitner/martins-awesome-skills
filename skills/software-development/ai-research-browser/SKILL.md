@@ -26,7 +26,7 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 - Reads Chromium profile metadata from `Local State` and `Preferences`, including profile directory, display name, and visible account email when available.
 - Resolves profile aliases such as `work` by exact profile/account match first, then by a Work/Arbeit name match.
 - Produces launch arguments for headless or background runs with `--remote-debugging-port`, `--user-data-dir`, and `--profile-directory`.
-- Supports provider modes for ChatGPT chat, ChatGPT Deep Research, ChatGPT Agent, Gemini chat, Gemini Deep Research, Gemini Agent, Perplexity research, and Grok/Grog research.
+- Supports provider modes for ChatGPT chat, ChatGPT Deep Research, ChatGPT Agent, Gemini chat, Gemini Deep Research, Gemini Agent, Claude chat/research/artifacts, Perplexity research, and Grok/Grog research.
 - Builds a full browser x profile x provider x feature test matrix for systematic E2E runs.
 - Provides an interactive wizard that lets a human choose the installed browser, profile, provider, and feature before launching or testing.
 - Archives existing provider chats into a local cache so later runs can continue from cached transcripts or intentionally refresh by scraping again.
@@ -177,6 +177,7 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 4. Navigate to the provider:
    - ChatGPT: `https://chatgpt.com/`
    - Gemini: `https://gemini.google.com/app?hl=de`
+   - Claude: `https://claude.ai/new`
    - Perplexity: `https://www.perplexity.ai/`
    - Grok: `https://grok.com/`
 5. Select the requested mode in the provider UI.
@@ -194,6 +195,8 @@ ChatGPT Agent is selected through the tools menu or mode chip. A valid E2E needs
 Gemini Deep Research may be labeled `Deep Research`, `Recherche starten`, or `Start research` depending on locale and account state.
 
 Gemini Agent availability varies by account and region. Record the visible account/model/quota text when it is shown.
+
+Claude research and artifacts availability varies by account and current UI. A valid E2E should capture the visible mode marker, generated artifact panel, or sources/search state.
 
 Grok may be typed as `grok` or `grog` in the CLI. Availability of research modes depends on the account and current Grok UI.
 

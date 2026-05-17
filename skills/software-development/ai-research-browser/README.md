@@ -2,7 +2,7 @@
 
 Inventory and test AI providers across your installed browser profiles.
 
-This skill gives Hermes a local CLI for discovering installed Chromium-family browsers, finding their profiles, selecting a provider such as ChatGPT, Gemini, Perplexity, or Grok, and recording evidence for each tested AI feature.
+This skill gives Hermes a local CLI for discovering installed Chromium-family browsers, finding their profiles, selecting a provider such as ChatGPT, Gemini, Claude, Perplexity, or Grok, and recording evidence for each tested AI feature.
 
 It is designed for the real-world macOS setup where Brave, Comet/Komet, Chrome, and Edge may already be open with different accounts. The CLI does not blindly quit or relaunch those browsers; it reports blockers and lets you choose whether to run headful, headless, or via Computer Use.
 
@@ -35,6 +35,7 @@ Current provider registry:
 
 - ChatGPT: `chat`, `deep-research`, `agent`
 - Gemini: `chat`, `deep-research`, `agent`
+- Claude: `chat`, `research`, `artifacts`
 - Perplexity: `chat`, `research`
 - Grok: `chat`, `research`
 

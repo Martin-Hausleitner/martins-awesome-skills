@@ -22,7 +22,7 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 
 ## What It Does
 
-- Discovers installed Chromium-family browsers: Brave, Comet/Komet, Google Chrome, and Microsoft Edge.
+- Discovers installed Chromium-family browsers: Brave, Comet/Komet, Google Chrome, Microsoft Edge, Opera, and ChatGPT Atlas.
 - Reads Chromium profile metadata from `Local State` and `Preferences`, including profile directory, display name, and visible account email when available.
 - Resolves profile aliases such as `work` by exact profile/account match first, then by a Work/Arbeit name match.
 - Produces launch arguments for headless or background runs with `--remote-debugging-port`, `--user-data-dir`, and `--profile-directory`.
@@ -30,6 +30,8 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 - Builds a full browser x profile x provider x feature test matrix for systematic E2E runs.
 - Provides an interactive wizard that lets a human choose the installed browser, profile, provider, and feature before launching or testing.
 - Archives existing provider chats into a local cache so later runs can continue from cached transcripts or intentionally refresh by scraping again.
+- Extracts visible provider account, plan/subscription, model, quota, and usage text when a real UI snapshot is supplied.
+- Lists automation backends such as Playwright/CDP, Codex Computer Use, Peekaboo, OpenAI CUA/Operator, Claude Computer Use, Gemini Computer Use, Stagehand, Browser-Use, and Hyperbrowser.
 - Records E2E evidence as a `status.json` plus screenshot path, so a human can verify whether the provider UI actually entered the requested mode.
 
 ## Safety Rule
@@ -49,7 +51,13 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 Build the full test matrix:
 
 ```bash
-python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py matrix --json
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py matrix --json --backend playwright-cdp
+```
+
+List automation backends:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py backends
 ```
 
 Save the matrix for a later E2E run:
@@ -203,6 +211,8 @@ Grok may be typed as `grok` or `grog` in the CLI. Availability of research modes
 ## Design Notes
 
 This follows the same shape that makes Peter Steinberger's Peekaboo useful for agents: separate discovery/snapshot JSON from actions. The `matrix` command is the snapshot, while `wizard`, `launch-args`, `verify-text`, and `record-e2e` are the action/evidence layer.
+
+If a user says "Oracle" in this context, first consider that they may mean OpenAI Operator / Computer-Using Agent. The skill exposes that path as `openai-cua`, but keeps local logged-in browser profiles under `playwright-cdp`, `computer-use`, or `peekaboo`.
 
 ## Testing
 

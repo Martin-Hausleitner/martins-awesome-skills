@@ -92,6 +92,16 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertEqual(module.provider_url("claude"), "https://claude.ai/new")
         self.assertIn("claude", module.provider_cli_choices())
 
+    def test_browser_candidates_include_common_chromium_browsers(self):
+        module = load_module()
+
+        candidates = module.BROWSER_CANDIDATES
+
+        self.assertIn("opera", candidates)
+        self.assertIn("atlas", candidates)
+        self.assertEqual(candidates["opera"]["display_name"], "Opera")
+        self.assertEqual(candidates["atlas"]["display_name"], "ChatGPT Atlas")
+
     def test_parse_account_and_quota_from_visible_text(self):
         module = load_module()
 
@@ -106,6 +116,38 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertEqual(status["quotas"]["deep_research_remaining"], 7)
         self.assertEqual(status["quotas"]["agent_remaining"], 3)
         self.assertEqual(status["model"], "GPT-5.2 Thinking")
+
+    def test_parse_plan_and_usage_from_provider_visible_text(self):
+        module = load_module()
+
+        status = module.parse_visible_status(
+            "Martin\nMax plan\n"
+            "Opus 4.7 Adaptive\n"
+            "You've used 75% of your weekly limit\n"
+            "Guest pass: 3/3 left\n"
+            "Usage resets tomorrow"
+        )
+
+        self.assertEqual(status["plan"], "Max")
+        self.assertEqual(status["model"], "Opus 4.7 Adaptive")
+        self.assertEqual(status["usage"]["used_percent"], 75)
+        self.assertEqual(status["usage"]["remaining_count"], 3)
+        self.assertEqual(status["usage"]["remaining_total"], 3)
+        self.assertEqual(status["usage"]["reset"], "tomorrow")
+
+    def test_parse_common_provider_plan_labels(self):
+        module = load_module()
+
+        examples = {
+            "ChatGPT Pro\nDeep research: 12 remaining": "Pro",
+            "Gemini Advanced\nModel: Pro": "Advanced",
+            "Perplexity Pro\nResearch: 4 left": "Pro",
+            "SuperGrok\nDeepSearch": "SuperGrok",
+        }
+
+        for text, plan in examples.items():
+            with self.subTest(text=text):
+                self.assertEqual(module.parse_visible_status(text)["plan"], plan)
 
     def test_launch_args_include_selected_profile_headless_and_provider_url(self):
         module = load_module()
@@ -231,10 +273,51 @@ class AiResearchBrowserTest(unittest.TestCase):
                 "provider": "claude",
                 "feature": "artifacts",
                 "provider_url": "",
+                "backend": "manual",
+                "account_status": {},
                 "status": "untested",
             },
             matrix,
         )
+
+    def test_build_test_matrix_can_attach_account_status_by_provider(self):
+        module = load_module()
+        browsers = [
+            {
+                "id": "brave",
+                "display_name": "Brave Browser",
+                "profiles": [{"directory": "Default", "name": "Work", "account": "work@example.test"}],
+            }
+        ]
+
+        matrix = module.build_test_matrix(
+            browsers,
+            {"chatgpt": {"url": "https://chatgpt.com/", "modes": ["deep-research"]}},
+            account_status={
+                ("brave", "Default", "chatgpt"): {
+                    "provider_account": "ui@example.test",
+                    "plan": "Pro",
+                    "usage": {"used_percent": 20},
+                }
+            },
+            backend="playwright-cdp",
+        )
+
+        self.assertEqual(matrix[0]["backend"], "playwright-cdp")
+        self.assertEqual(matrix[0]["account_status"]["plan"], "Pro")
+        self.assertEqual(matrix[0]["account_status"]["usage"]["used_percent"], 20)
+
+    def test_backend_registry_marks_local_and_managed_options(self):
+        module = load_module()
+
+        backends = module.backend_registry()
+
+        self.assertIn("playwright-cdp", backends)
+        self.assertIn("computer-use", backends)
+        self.assertIn("openai-cua", backends)
+        self.assertIn("hyperbrowser", backends)
+        self.assertEqual(backends["playwright-cdp"]["scope"], "local")
+        self.assertIn("Operator", " ".join(backends["openai-cua"]["aliases"]))
 
     def test_render_choice_table_is_human_readable(self):
         module = load_module()
@@ -266,13 +349,15 @@ class AiResearchBrowserTest(unittest.TestCase):
             browser="brave",
             profile={"directory": "Default", "name": "Work", "account": "profile@example.test"},
             provider="chatgpt",
-            visible_text="Signed in as ui@example.test\nDeep research: 4 remaining\nAgent tasks: 2 left",
+            visible_text="Signed in as ui@example.test\nChatGPT Pro\nDeep research: 4 remaining\nAgent tasks: 2 left\n30% used",
         )
 
         self.assertEqual(status["browser"], "brave")
         self.assertEqual(status["profile_account"], "profile@example.test")
         self.assertEqual(status["provider_account"], "ui@example.test")
+        self.assertEqual(status["plan"], "Pro")
         self.assertEqual(status["quotas"]["deep_research_remaining"], 4)
+        self.assertEqual(status["usage"]["used_percent"], 30)
 
     def test_chat_cache_key_is_stable_and_provider_normalized(self):
         module = load_module()
@@ -411,6 +496,46 @@ class AiResearchBrowserTest(unittest.TestCase):
         payload = json.loads(out.getvalue())
         self.assertEqual(exit_code, 0)
         self.assertEqual(payload["chats"][0]["title"], "Greeting")
+
+    def test_cmd_backends_outputs_backend_registry(self):
+        module = load_module()
+
+        out = StringIO()
+        with redirect_stdout(out):
+            exit_code = module.main(["backends"])
+
+        payload = json.loads(out.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertIn("playwright-cdp", payload["backends"])
+        self.assertIn("openai-cua", payload["backends"])
+
+    def test_cmd_preflight_reports_missing_profiles_without_traceback(self):
+        module = load_module()
+        original_discover = module.discover_browsers
+        original_port_owner = module.port_owner
+        original_process_args = module.process_args_for_browser
+        module.discover_browsers = lambda: [
+            {
+                "id": "edge",
+                "display_name": "Microsoft Edge",
+                "default_port": 9225,
+                "profiles": [],
+            }
+        ]
+        module.port_owner = lambda port: ""
+        module.process_args_for_browser = lambda display_name: ""
+        try:
+            out = StringIO()
+            with redirect_stdout(out):
+                exit_code = module.main(["preflight", "--browser", "edge", "--profile", "Default"])
+        finally:
+            module.discover_browsers = original_discover
+            module.port_owner = original_port_owner
+            module.process_args_for_browser = original_process_args
+
+        payload = json.loads(out.getvalue())
+        self.assertEqual(exit_code, 2)
+        self.assertIn("no profiles discovered for Microsoft Edge", payload["blockers"])
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ Build the full browser x profile x provider x feature matrix:
 
 ```bash
 python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py matrix --json \
+  --backend playwright-cdp \
   --output /tmp/ai-research-browser-matrix.json
 ```
 
@@ -49,6 +50,8 @@ The CLI currently discovers:
 - Comet/Komet
 - Google Chrome
 - Microsoft Edge
+- Opera
+- ChatGPT Atlas
 
 Profiles are read from Chromium `Local State` and `Preferences`, including display name and account email when Chromium exposes it.
 
@@ -68,8 +71,18 @@ The parser extracts:
 
 - provider account email, when visible
 - selected model, when visible as `Model: ...`
+- plan/subscription labels such as ChatGPT Pro, Gemini Advanced, Claude Max, Perplexity Pro, or SuperGrok, when visible
 - Deep Research remaining count, when visible
 - Agent task remaining count, when visible
+- usage snippets such as `75% used`, `3/3 left`, and reset hints such as `resets tomorrow`
+
+Inspect supported automation backends:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py backends
+```
+
+The local-first path is `playwright-cdp` for deterministic browser control plus `computer-use` or `peekaboo` for screenshot-backed proof. Managed alternatives such as OpenAI CUA/Operator, Claude Computer Use, Gemini Computer Use, Stagehand, Browser-Use, and Hyperbrowser are represented as comparison backends, not as replacements for your local logged-in profiles.
 
 ## Existing Chat Cache
 
@@ -180,6 +193,8 @@ This follows the pattern that makes Peter Steinberger's Peekaboo useful for agen
 - `preflight`: blocker detection
 - `wizard` and `launch-args`: selected action plan
 - `verify-text` and `record-e2e`: evidence capture
+
+The "Oracle" style capability in this space is usually OpenAI Operator / Computer-Using Agent rather than Oracle. Operator has since been integrated into ChatGPT as agent mode, so this skill treats it as the `openai-cua` comparison backend and keeps the local browser-profile workflow separate.
 
 ## Tests
 

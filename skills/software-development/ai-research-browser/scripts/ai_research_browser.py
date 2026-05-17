@@ -45,6 +45,20 @@ BROWSER_CANDIDATES = {
         "user_data_dir": "~/Library/Application Support/Microsoft Edge",
         "default_port": 9225,
     },
+    "opera": {
+        "display_name": "Opera",
+        "app_path": "/Applications/Opera.app",
+        "binary_rel": "Contents/MacOS/Opera",
+        "user_data_dir": "~/Library/Application Support/com.operasoftware.Opera",
+        "default_port": 9226,
+    },
+    "atlas": {
+        "display_name": "ChatGPT Atlas",
+        "app_path": "/Applications/ChatGPT Atlas.app",
+        "binary_rel": "Contents/MacOS/ChatGPT Atlas",
+        "user_data_dir": "~/Library/Application Support/com.openai.atlas/browser-data/host",
+        "default_port": 9227,
+    },
 }
 
 
@@ -93,6 +107,56 @@ def provider_registry() -> dict[str, dict[str, Any]]:
             "modes": ["chat", "research"],
             "models": ["Auto", "Grok 4.1", "Grok 4.1 Thinking"],
             "mode_markers": {"research": ["Research", "DeepSearch", "Think"], "chat": ["Grok", "Ask anything"]},
+        },
+    }
+
+
+def backend_registry() -> dict[str, dict[str, Any]]:
+    return {
+        "playwright-cdp": {
+            "scope": "local",
+            "aliases": ["Playwright", "CDP", "persistent profile"],
+            "description": "Deterministic local browser control through Chrome DevTools Protocol.",
+        },
+        "computer-use": {
+            "scope": "local",
+            "aliases": ["Codex Computer Use", "macOS UI automation"],
+            "description": "Real visible UI control and screenshot evidence against installed apps.",
+        },
+        "peekaboo": {
+            "scope": "local",
+            "aliases": ["Peter Steinberger Peekaboo", "macOS screenshots", "MCP"],
+            "description": "Optional macOS screenshot and UI evidence backend when installed.",
+        },
+        "openai-cua": {
+            "scope": "managed",
+            "aliases": ["OpenAI Operator", "ChatGPT agent", "Computer-Using Agent"],
+            "description": "OpenAI browser-use agent backend; useful as a comparison target, not a local profile replacement.",
+        },
+        "claude-computer-use": {
+            "scope": "managed",
+            "aliases": ["Anthropic Computer Use", "Claude Computer Use"],
+            "description": "Claude's computer-use style backend for web/UI task execution.",
+        },
+        "gemini-computer-use": {
+            "scope": "managed",
+            "aliases": ["Gemini Computer Use", "Google browser agent"],
+            "description": "Gemini-style computer-use backend for agentic browser tasks.",
+        },
+        "browser-use": {
+            "scope": "local-or-managed",
+            "aliases": ["browser-use", "Playwright agent"],
+            "description": "Open-source Playwright-based browser agent framework.",
+        },
+        "stagehand": {
+            "scope": "local-or-managed",
+            "aliases": ["Stagehand", "Browserbase Stagehand"],
+            "description": "Playwright-oriented natural-language browser automation.",
+        },
+        "hyperbrowser": {
+            "scope": "managed",
+            "aliases": ["Hyperbrowser", "cloud browser sessions"],
+            "description": "Cloud browser sessions with Playwright, Browser-Use, Claude Computer Use, OpenAI CUA, and Gemini Computer Use adapters.",
         },
     }
 
@@ -241,16 +305,42 @@ def build_launch_args(
 
 
 def parse_visible_status(text: str) -> dict[str, Any]:
-    account_match = re.search(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", text or "")
-    model_match = re.search(r"Model:\s*([^\n]+)", text or "", flags=re.I)
-    deep_match = re.search(r"(?:Deep research|Rechercheberichte?)\D{0,40}(\d+)\s*(?:remaining|left|übrig|verbleibend)?", text or "", flags=re.I)
-    agent_match = re.search(r"(?:Agent tasks?|Agent)\D{0,40}(\d+)\s*(?:remaining|left|übrig|verbleibend)?", text or "", flags=re.I)
+    text = text or ""
+    account_match = re.search(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", text)
+    model_match = re.search(r"Model:\s*([^\n]+)", text, flags=re.I)
+    if not model_match:
+        model_match = re.search(r"\b((?:GPT|Claude|Opus|Sonnet|Gemini|Grok)[^\n]{0,40})", text, flags=re.I)
+    plan_match = re.search(
+        r"\b(ChatGPT\s+)?(Free|Plus|Pro|Team|Enterprise|Max|Advanced|SuperGrok|Premium)\s+(?:plan|subscription|abo)\b",
+        text,
+        flags=re.I,
+    )
+    if not plan_match:
+        plan_match = re.search(r"\b(Gemini Advanced|Perplexity Pro|ChatGPT Pro|ChatGPT Plus|SuperGrok|Claude Max)\b", text, flags=re.I)
+    used_percent_match = re.search(r"(?:used|verwendet|genutzt)\D{0,20}(\d{1,3})\s*%", text, flags=re.I)
+    if not used_percent_match:
+        used_percent_match = re.search(r"(\d{1,3})\s*%\s*(?:used|verwendet|genutzt)", text, flags=re.I)
+    remaining_percent_match = re.search(r"(\d{1,3})\s*%\s*(?:remaining|left|übrig|verbleibend)", text, flags=re.I)
+    count_match = re.search(r"(\d+)\s*/\s*(\d+)\s*(?:left|remaining|übrig|verbleibend)", text, flags=re.I)
+    reset_match = re.search(r"(?:resets?|reset|erneuert|setzt zurück)\s+([^\n.]+)", text, flags=re.I)
+    deep_match = re.search(r"(?:Deep research|Rechercheberichte?|Research)\D{0,40}(\d+)\s*(?:remaining|left|übrig|verbleibend)?", text, flags=re.I)
+    agent_match = re.search(r"(?:Agent tasks?|Agent)\D{0,40}(\d+)\s*(?:remaining|left|übrig|verbleibend)?", text, flags=re.I)
+    raw_plan = plan_match.group(2 if plan_match.lastindex and plan_match.lastindex >= 2 else 1).strip() if plan_match else ""
+    plan = raw_plan.replace("ChatGPT ", "").replace("Gemini ", "").replace("Perplexity ", "").replace("Claude ", "")
     return {
         "account": account_match.group(0) if account_match else "",
         "model": model_match.group(1).strip() if model_match else "",
+        "plan": plan,
         "quotas": {
             "deep_research_remaining": int(deep_match.group(1)) if deep_match else None,
             "agent_remaining": int(agent_match.group(1)) if agent_match else None,
+        },
+        "usage": {
+            "used_percent": int(used_percent_match.group(1)) if used_percent_match else None,
+            "remaining_percent": int(remaining_percent_match.group(1)) if remaining_percent_match else None,
+            "remaining_count": int(count_match.group(1)) if count_match else None,
+            "remaining_total": int(count_match.group(2)) if count_match else None,
+            "reset": reset_match.group(1).strip() if reset_match else "",
         },
     }
 
@@ -464,13 +554,21 @@ def parse_chat_listing(text: str, *, provider: str) -> list[dict[str, str]]:
     return chats
 
 
-def build_test_matrix(browsers: list[dict[str, Any]], providers: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+def build_test_matrix(
+    browsers: list[dict[str, Any]],
+    providers: dict[str, dict[str, Any]] | None = None,
+    *,
+    account_status: dict[tuple[str, str, str], dict[str, Any]] | None = None,
+    backend: str = "manual",
+) -> list[dict[str, Any]]:
     provider_map = providers or provider_registry()
+    account_status = account_status or {}
     rows: list[dict[str, Any]] = []
     for browser in browsers:
         profiles = browser.get("profiles") or [{"directory": "", "name": "", "account": ""}]
         for profile in profiles:
             for provider_id, provider in provider_map.items():
+                status_key = (str(browser.get("id", "")), str(profile.get("directory", "")), provider_id)
                 for mode in provider.get("modes", []):
                     rows.append(
                         {
@@ -482,6 +580,8 @@ def build_test_matrix(browsers: list[dict[str, Any]], providers: dict[str, dict[
                             "provider": provider_id,
                             "feature": mode,
                             "provider_url": provider.get("url", ""),
+                            "backend": backend,
+                            "account_status": account_status.get(status_key, {}),
                             "status": "untested",
                         }
                     )
@@ -526,7 +626,9 @@ def account_status_record(
         "provider": normalize_provider_name(provider),
         "provider_account": visible_status.get("account", ""),
         "model": visible_status.get("model", ""),
+        "plan": visible_status.get("plan", ""),
         "quotas": visible_status.get("quotas", {}),
+        "usage": visible_status.get("usage", {}),
     }
 
 
@@ -573,11 +675,17 @@ def cmd_matrix(args: argparse.Namespace) -> int:
     payload = {
         "browsers": discover_browsers(),
         "providers": provider_registry(),
+        "backends": backend_registry(),
     }
-    payload["matrix"] = build_test_matrix(payload["browsers"], payload["providers"])
+    payload["matrix"] = build_test_matrix(payload["browsers"], payload["providers"], backend=args.backend)
     if args.output:
         write_json(Path(args.output).expanduser(), payload)
     print(json.dumps(payload if args.json else payload["matrix"], ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_backends(args: argparse.Namespace) -> int:
+    print(json.dumps({"backends": backend_registry()}, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -688,13 +796,20 @@ def cmd_preflight(args: argparse.Namespace) -> int:
     if browser_id not in browsers:
         raise SystemExit(f"browser not discovered: {args.browser}")
     browser = browsers[browser_id]
-    profile = resolve_profile(browser["profiles"], args.profile)
+    blockers = []
+    try:
+        profile = resolve_profile(browser["profiles"], args.profile)
+    except ValueError:
+        profile = {"directory": args.profile, "name": "", "account": "", "path": ""}
+        blockers.append(f"no profiles discovered for {browser['display_name']}")
     port = args.port or int(browser["default_port"])
-    blockers = detect_launch_blockers(
-        browser_name=str(browser["display_name"]),
-        port=port,
-        port_owner=port_owner(port),
-        process_args=process_args_for_browser(str(browser["display_name"])),
+    blockers.extend(
+        detect_launch_blockers(
+            browser_name=str(browser["display_name"]),
+            port=port,
+            port_owner=port_owner(port),
+            process_args=process_args_for_browser(str(browser["display_name"])),
+        )
     )
     print(json.dumps({"browser": browser, "profile": profile, "port": port, "blockers": blockers}, ensure_ascii=False, indent=2))
     return 2 if blockers else 0
@@ -788,9 +903,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Discover browser profiles and run AI research/agent workflows with E2E artifacts.")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("discover")
+    sub.add_parser("backends")
     matrix = sub.add_parser("matrix")
     matrix.add_argument("--json", action="store_true", help="Include discovered browsers and provider registry.")
     matrix.add_argument("--output", default="")
+    matrix.add_argument("--backend", default="manual", choices=sorted(backend_registry().keys()))
     accounts = sub.add_parser("accounts")
     accounts.add_argument("--browser", required=True)
     accounts.add_argument("--profile", default="Default")
@@ -861,6 +978,8 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "discover":
         return cmd_discover(args)
+    if args.command == "backends":
+        return cmd_backends(args)
     if args.command == "matrix":
         return cmd_matrix(args)
     if args.command == "accounts":

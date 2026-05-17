@@ -32,6 +32,8 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 - Archives existing provider chats into a local cache so later runs can continue from cached transcripts or intentionally refresh by scraping again.
 - Extracts visible provider account, plan/subscription, model, quota, and usage text when a real UI snapshot is supplied.
 - Lists automation backends such as Playwright/CDP, Codex Computer Use, Peekaboo, OpenAI CUA/Operator, Claude Computer Use, Gemini Computer Use, Stagehand, Browser-Use, and Hyperbrowser.
+- Lists selectable model/tool catalogs for ChatGPT, Gemini/Google, Claude/Anthropic, Perplexity, and Grok/xAI.
+- Marks profiles as `signed-in-hidden` when browser metadata indicates account/session state but no email is exposed.
 - Records E2E evidence as a `status.json` plus screenshot path, so a human can verify whether the provider UI actually entered the requested mode.
 
 ## Safety Rule
@@ -58,6 +60,14 @@ List automation backends:
 
 ```bash
 python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py backends
+```
+
+List model and tool catalogs:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py models
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py models --provider anthropic
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py models --provider google
 ```
 
 Save the matrix for a later E2E run:
@@ -148,10 +158,11 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
   --browser brave \
   --profile work \
   --provider chatgpt \
-  --mode deep-research
+  --mode deep-research \
+  --model GPT-5.5
 ```
 
-Use `--headful` when you need to see the browser or when a provider blocks headless mode.
+Use `--headful` when you need to see the browser or when a provider blocks headless mode. Model selection is recorded in the launch plan as `model_selection: select-in-provider-ui`; a real E2E must verify the model picker visibly selected that model.
 
 Verify captured UI text against expected mode markers:
 

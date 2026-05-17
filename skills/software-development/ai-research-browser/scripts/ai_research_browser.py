@@ -67,7 +67,8 @@ def provider_registry() -> dict[str, dict[str, Any]]:
         "chatgpt": {
             "url": "https://chatgpt.com/",
             "modes": ["chat", "deep-research", "agent"],
-            "models": ["default", "GPT-5.2", "GPT-5.2 Thinking", "GPT-4.1", "GPT-4.1 mini"],
+            "models": ["Auto", "GPT-5.5", "GPT-5.4", "GPT-5.3 Codex", "GPT-5.2", "GPT-5.2 Thinking"],
+            "tools": ["Deep research", "Agent", "Codex", "Search", "Canvas", "Data analysis", "Image generation"],
             "mode_markers": {
                 "deep-research": ["Deep research", "/Deepresearch", "Start research"],
                 "agent": ["Agent", "/agent", "Take control", "Codex"],
@@ -76,8 +77,10 @@ def provider_registry() -> dict[str, dict[str, Any]]:
         },
         "gemini": {
             "url": "https://gemini.google.com/app?hl=de",
+            "aliases": ["google", "google-gemini"],
             "modes": ["chat", "deep-research", "agent"],
-            "models": ["Fast", "Thinking", "Pro"],
+            "models": ["Auto", "Flash", "Pro", "Deep Think"],
+            "tools": ["Deep Research", "Agent", "Deep Think", "Gmail", "Drive", "Google Search"],
             "mode_markers": {
                 "deep-research": ["Deep Research", "Recherche starten", "Start research"],
                 "agent": ["Agent", "Confirm", "Bestätigen"],
@@ -87,14 +90,16 @@ def provider_registry() -> dict[str, dict[str, Any]]:
         "perplexity": {
             "url": "https://www.perplexity.ai/",
             "modes": ["chat", "research"],
-            "models": ["Best", "Sonar", "GPT-5.2", "Claude Sonnet", "Gemini Pro"],
+            "models": ["Auto", "Sonar", "Sonar Pro", "GPT-5.4", "Claude Sonnet 4.6", "Gemini 3.1 Pro"],
+            "tools": ["Search", "Pro Search", "Research", "Deep Research", "Spaces", "MCP"],
             "mode_markers": {"research": ["Research", "Deep Research"], "chat": ["Perplexity"]},
         },
         "claude": {
             "url": "https://claude.ai/new",
-            "aliases": ["anthropic"],
+            "aliases": ["anthropic", "entropic"],
             "modes": ["chat", "research", "artifacts"],
-            "models": ["default", "Claude Sonnet", "Claude Opus"],
+            "models": ["Auto", "Opus 4.7", "Sonnet 4.6", "Haiku"],
+            "tools": ["Search", "Research", "Artifacts", "Computer use", "Claude Code"],
             "mode_markers": {
                 "chat": ["Claude", "How can I help"],
                 "research": ["Research", "Search", "Sources"],
@@ -105,9 +110,22 @@ def provider_registry() -> dict[str, dict[str, Any]]:
             "url": "https://grok.com/",
             "aliases": ["grog", "xai"],
             "modes": ["chat", "research"],
-            "models": ["Auto", "Grok 4.1", "Grok 4.1 Thinking"],
+            "models": ["Auto", "Grok 4.20 Fast", "Grok 4.20 Expert", "Grok 4.1", "Grok 4.1 Thinking"],
+            "tools": ["DeepSearch", "Think", "Search", "X realtime"],
             "mode_markers": {"research": ["Research", "DeepSearch", "Think"], "chat": ["Grok", "Ask anything"]},
         },
+    }
+
+
+def model_catalog() -> dict[str, dict[str, Any]]:
+    return {
+        provider_id: {
+            "models": [str(model) for model in provider.get("models", [])],
+            "tools": [str(tool) for tool in provider.get("tools", [])],
+            "modes": [str(mode) for mode in provider.get("modes", [])],
+            "url": str(provider.get("url", "")),
+        }
+        for provider_id, provider in provider_registry().items()
     }
 
 
@@ -168,7 +186,30 @@ def read_json(path: Path) -> dict[str, Any]:
         return {}
 
 
-def discover_profiles(user_data_dir: str | Path) -> list[dict[str, str]]:
+def profile_account_state(browser_id: str, prefs: dict[str, Any], data: dict[str, Any]) -> str:
+    if data.get("user_name") or data.get("gaia_name"):
+        return "visible"
+    account_info = prefs.get("account_info")
+    if isinstance(account_info, list) and any(account.get("email") for account in account_info if isinstance(account, dict)):
+        return "visible"
+    sync = prefs.get("sync", {})
+    if isinstance(sync, dict) and (sync.get("gaia_id") or sync.get("transport_data_per_account")):
+        return "signed-in-hidden"
+    if browser_id == "opera":
+        serialized = json.dumps(prefs, ensure_ascii=False)
+        if "anonymous_hidden_account" in serialized or "opera_account" in serialized:
+            return "signed-in-hidden"
+    return "unknown"
+
+
+def profile_display_name(browser_id: str, directory: str, data: dict[str, Any], prefs: dict[str, Any]) -> str:
+    display_name = data.get("name") or prefs.get("profile", {}).get("name") or directory
+    if browser_id == "opera" and display_name == "Default":
+        return "Opera Default"
+    return str(display_name)
+
+
+def discover_profiles(user_data_dir: str | Path, *, browser_id: str = "") -> list[dict[str, str]]:
     root = Path(user_data_dir).expanduser()
     local_state = read_json(root / "Local State")
     info_cache = local_state.get("profile", {}).get("info_cache", {})
@@ -183,12 +224,13 @@ def discover_profiles(user_data_dir: str | Path) -> list[dict[str, str]]:
             or ((prefs.get("account_info") or [{}])[0].get("email") if isinstance(prefs.get("account_info"), list) else "")
             or ""
         )
-        display_name = data.get("name") or prefs.get("profile", {}).get("name") or directory
+        display_name = profile_display_name(browser_id, directory, data, prefs)
         profiles.append(
             {
                 "directory": directory,
-                "name": str(display_name),
+                "name": display_name,
                 "account": str(account),
+                "account_state": profile_account_state(browser_id, prefs, data),
                 "path": str(profile_dir),
             }
         )
@@ -199,8 +241,9 @@ def discover_profiles(user_data_dir: str | Path) -> list[dict[str, str]]:
                 profiles.append(
                     {
                         "directory": child.name,
-                        "name": str(prefs.get("profile", {}).get("name") or child.name),
+                        "name": profile_display_name(browser_id, child.name, {}, prefs),
                         "account": str(((prefs.get("account_info") or [{}])[0].get("email") if isinstance(prefs.get("account_info"), list) else "") or ""),
+                        "account_state": profile_account_state(browser_id, prefs, {}),
                         "path": str(child),
                     }
                 )
@@ -240,7 +283,7 @@ def discover_browsers() -> list[dict[str, Any]]:
         user_data_dir = Path(str(cfg["user_data_dir"])).expanduser()
         if not app_path.exists() and not user_data_dir.exists():
             continue
-        profiles = discover_profiles(user_data_dir)
+        profiles = discover_profiles(user_data_dir, browser_id=key)
         out.append(
             {
                 "id": key,
@@ -302,6 +345,35 @@ def build_launch_args(
         args.append("--headless=new")
     args.append(provider_url(provider))
     return args
+
+
+def build_launch_plan(
+    browser: dict[str, Any],
+    *,
+    profile_directory: str,
+    port: int,
+    provider: str,
+    mode: str,
+    model: str,
+    headless: bool,
+) -> dict[str, Any]:
+    provider_id = normalize_provider_name(provider)
+    return {
+        "browser": browser.get("id", ""),
+        "profile_directory": profile_directory,
+        "provider": provider_id,
+        "mode": mode,
+        "model": model or "Auto",
+        "model_selection": "select-in-provider-ui",
+        "launch_args": build_launch_args(
+            browser,
+            profile_directory=profile_directory,
+            port=port,
+            provider=provider_id,
+            mode=mode,
+            headless=headless,
+        ),
+    }
 
 
 def parse_visible_status(text: str) -> dict[str, Any]:
@@ -689,6 +761,18 @@ def cmd_backends(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_models(args: argparse.Namespace) -> int:
+    provider_id = normalize_provider_name(args.provider) if args.provider else ""
+    catalog = model_catalog()
+    if provider_id:
+        if provider_id not in catalog:
+            raise SystemExit(f"unknown provider: {args.provider}")
+        print(json.dumps({"provider": provider_id, **catalog[provider_id]}, ensure_ascii=False, indent=2))
+        return 0
+    print(json.dumps({"providers": catalog}, ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_accounts(args: argparse.Namespace) -> int:
     browsers = {b["id"]: b for b in discover_browsers()}
     browser_id = normalize_browser_name(args.browser)
@@ -764,12 +848,24 @@ def cmd_wizard(args: argparse.Namespace) -> int:
             for mode in providers[provider_id].get("modes", [])
         ],
     )
-    launch_args = build_launch_args(
+    model_choice = prompt_choice(
+        "Models",
+        [
+            {
+                "id": model,
+                "label": model,
+                "detail": "select in provider UI after launch",
+            }
+            for model in model_catalog()[provider_id].get("models", ["Auto"])
+        ],
+    )
+    launch_plan = build_launch_plan(
         browser,
         profile_directory=profile_choice["id"],
         port=args.port or int(browser["default_port"]),
         provider=provider_id,
         mode=feature_choice["id"],
+        model=model_choice["id"],
         headless=not args.headful,
     )
     payload = {
@@ -778,13 +874,15 @@ def cmd_wizard(args: argparse.Namespace) -> int:
             "profile": profile_choice["id"],
             "provider": provider_id,
             "feature": feature_choice["id"],
+            "model": model_choice["id"],
         },
         "account_status": account_status_record(
             browser=browser["id"],
             profile=resolve_profile(browser.get("profiles", []), profile_choice["id"]),
             provider=provider_id,
         ),
-        "launch_args": launch_args,
+        "launch_plan": launch_plan,
+        "launch_args": launch_plan["launch_args"],
     }
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
@@ -904,6 +1002,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("discover")
     sub.add_parser("backends")
+    models = sub.add_parser("models")
+    models.add_argument("--provider", choices=provider_cli_choices(), default="")
     matrix = sub.add_parser("matrix")
     matrix.add_argument("--json", action="store_true", help="Include discovered browsers and provider registry.")
     matrix.add_argument("--output", default="")
@@ -925,6 +1025,7 @@ def build_parser() -> argparse.ArgumentParser:
     launch.add_argument("--profile", default="Default")
     launch.add_argument("--provider", choices=provider_cli_choices(), required=True)
     launch.add_argument("--mode", default="chat")
+    launch.add_argument("--model", default="Auto")
     launch.add_argument("--port", type=int)
     launch.add_argument("--headful", action="store_true")
     launch.add_argument("--artifact-root", default="")
@@ -980,6 +1081,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_discover(args)
     if args.command == "backends":
         return cmd_backends(args)
+    if args.command == "models":
+        return cmd_models(args)
     if args.command == "matrix":
         return cmd_matrix(args)
     if args.command == "accounts":
@@ -995,12 +1098,13 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit(f"browser not discovered: {args.browser}")
         browser = browsers[browser_id]
         profile = resolve_profile(browser["profiles"], args.profile)
-        launch_args = build_launch_args(
+        launch_plan = build_launch_plan(
             browser,
             profile_directory=profile["directory"],
             port=args.port or int(browser["default_port"]),
             provider=normalize_provider_name(args.provider),
             mode=args.mode,
+            model=args.model,
             headless=not args.headful,
         )
         payload = {
@@ -1008,7 +1112,9 @@ def main(argv: list[str] | None = None) -> int:
             "profile": profile,
             "provider": normalize_provider_name(args.provider),
             "mode": args.mode,
-            "launch_args": launch_args,
+            "model": launch_plan["model"],
+            "model_selection": launch_plan["model_selection"],
+            "launch_args": launch_plan["launch_args"],
         }
         if args.artifact_root:
             paths = build_artifact_paths(Path(args.artifact_root), provider=args.provider, mode=args.mode, browser=browser["id"], profile=args.profile)

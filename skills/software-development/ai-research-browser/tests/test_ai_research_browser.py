@@ -91,6 +91,9 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertIn("artifacts", providers["claude"]["modes"])
         self.assertEqual(module.provider_url("claude"), "https://claude.ai/new")
         self.assertIn("claude", module.provider_cli_choices())
+        self.assertEqual(module.normalize_provider_name("anthropic"), "claude")
+        self.assertEqual(module.normalize_provider_name("entropic"), "claude")
+        self.assertEqual(module.normalize_provider_name("google"), "gemini")
 
     def test_browser_candidates_include_common_chromium_browsers(self):
         module = load_module()
@@ -101,6 +104,107 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertIn("atlas", candidates)
         self.assertEqual(candidates["opera"]["display_name"], "Opera")
         self.assertEqual(candidates["atlas"]["display_name"], "ChatGPT Atlas")
+
+    def test_model_catalog_lists_selectable_models_and_feature_modes(self):
+        module = load_module()
+
+        catalog = module.model_catalog()
+
+        self.assertIn("GPT-5.5", catalog["chatgpt"]["models"])
+        self.assertIn("Pro", catalog["gemini"]["models"])
+        self.assertIn("Deep Think", catalog["gemini"]["tools"])
+        self.assertIn("Opus 4.7", catalog["claude"]["models"])
+        self.assertIn("Sonnet 4.6", catalog["claude"]["models"])
+        self.assertIn("Research", catalog["perplexity"]["tools"])
+        self.assertIn("DeepSearch", catalog["grok"]["tools"])
+
+    def test_cmd_models_outputs_provider_catalog(self):
+        module = load_module()
+
+        out = StringIO()
+        with redirect_stdout(out):
+            exit_code = module.main(["models", "--provider", "anthropic"])
+
+        payload = json.loads(out.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["provider"], "claude")
+        self.assertIn("Opus 4.7", payload["models"])
+
+    def test_cmd_launch_args_accepts_provider_alias_and_model(self):
+        module = load_module()
+        original_discover = module.discover_browsers
+        module.discover_browsers = lambda: [
+            {
+                "id": "brave",
+                "display_name": "Brave Browser",
+                "app_path": "/Applications/Brave Browser.app",
+                "binary_path": "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+                "user_data_dir": "/tmp/brave",
+                "default_port": 9222,
+                "profiles": [{"directory": "Default", "name": "Work", "account": ""}],
+            }
+        ]
+        try:
+            out = StringIO()
+            with redirect_stdout(out):
+                exit_code = module.main(
+                    [
+                        "launch-args",
+                        "--browser",
+                        "brave",
+                        "--profile",
+                        "Default",
+                        "--provider",
+                        "google",
+                        "--mode",
+                        "deep-research",
+                        "--model",
+                        "Pro",
+                    ]
+                )
+        finally:
+            module.discover_browsers = original_discover
+
+        payload = json.loads(out.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["provider"], "gemini")
+        self.assertEqual(payload["model"], "Pro")
+        self.assertEqual(payload["model_selection"], "select-in-provider-ui")
+
+    def test_discovers_hidden_signed_in_opera_profile_state(self):
+        module = load_module()
+        root = Path(tempfile.mkdtemp())
+        (root / "Local State").write_text(
+            json.dumps(
+                {
+                    "profile": {
+                        "info_cache": {
+                            "Default": {
+                                "name": "",
+                                "user_name": "",
+                            }
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        profile_dir = root / "Default"
+        profile_dir.mkdir()
+        (profile_dir / "Preferences").write_text(
+            json.dumps(
+                {
+                    "sync": {"gaia_id": "12345"},
+                    "opera": {"anonymous_hidden_account_user_id": "encrypted"},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        profiles = module.discover_profiles(root, browser_id="opera")
+
+        self.assertEqual(profiles[0]["name"], "Opera Default")
+        self.assertEqual(profiles[0]["account_state"], "signed-in-hidden")
 
     def test_parse_account_and_quota_from_visible_text(self):
         module = load_module()
@@ -171,6 +275,29 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertIn("--profile-directory=Profile 2", args)
         self.assertIn("--headless=new", args)
         self.assertIn("https://chatgpt.com/", args)
+
+    def test_launch_plan_includes_model_without_pretending_url_selects_it(self):
+        module = load_module()
+        browser = {
+            "app_path": "/Applications/Brave Browser.app",
+            "binary_path": "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+            "user_data_dir": "/tmp/brave",
+        }
+
+        plan = module.build_launch_plan(
+            browser,
+            profile_directory="Default",
+            port=9444,
+            provider="google",
+            mode="deep-research",
+            model="Pro",
+            headless=True,
+        )
+
+        self.assertEqual(plan["provider"], "gemini")
+        self.assertEqual(plan["model"], "Pro")
+        self.assertEqual(plan["model_selection"], "select-in-provider-ui")
+        self.assertIn("--profile-directory=Default", plan["launch_args"])
 
     def test_detect_launch_blockers_reports_busy_port_and_non_cdp_process(self):
         module = load_module()

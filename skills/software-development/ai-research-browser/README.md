@@ -53,7 +53,19 @@ The CLI currently discovers:
 - Opera
 - ChatGPT Atlas
 
-Profiles are read from Chromium `Local State` and `Preferences`, including display name and account email when Chromium exposes it.
+Profiles are read from Chromium `Local State` and `Preferences`, including display name and account email when Chromium exposes it. Some browsers, notably Opera, hide the account identifier even when sync/session state exists; those profiles are marked with `account_state: signed-in-hidden`.
+
+## Models and Tools
+
+List selectable provider models and tools:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py models
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py models --provider anthropic
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py models --provider google
+```
+
+Provider aliases include `google`/`google-gemini` for Gemini and `anthropic`/`entropic` for Claude. Launch plans can carry the intended model, but the CLI does not fake model selection through URL parameters; it records `model_selection: select-in-provider-ui` so the E2E step must verify the visible provider UI.
 
 ## Account and Quota Capture
 
@@ -148,6 +160,7 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
   --browser brave \
   --profile Default \
   --provider grok \
+  --model "Grok 4.20 Expert" \
   --mode research \
   --headful
 ```

@@ -75,6 +75,13 @@ def provider_registry() -> dict[str, dict[str, Any]]:
             "models": ["Best", "Sonar", "GPT-5.2", "Claude Sonnet", "Gemini Pro"],
             "mode_markers": {"research": ["Research", "Deep Research"], "chat": ["Perplexity"]},
         },
+        "grok": {
+            "url": "https://grok.com/",
+            "aliases": ["grog", "xai"],
+            "modes": ["chat", "research"],
+            "models": ["Auto", "Grok 4.1", "Grok 4.1 Thinking"],
+            "mode_markers": {"research": ["Research", "DeepSearch", "Think"], "chat": ["Grok", "Ask anything"]},
+        },
     }
 
 
@@ -174,9 +181,26 @@ def discover_browsers() -> list[dict[str, Any]]:
 
 def provider_url(provider: str) -> str:
     providers = provider_registry()
+    provider = normalize_provider_name(provider)
     if provider not in providers:
         raise ValueError(f"unknown provider: {provider}")
     return str(providers[provider]["url"])
+
+
+def normalize_provider_name(name: str) -> str:
+    lowered = name.lower()
+    for key, cfg in provider_registry().items():
+        if lowered == key or lowered in cfg.get("aliases", []):
+            return key
+    return lowered
+
+
+def provider_cli_choices() -> list[str]:
+    choices: list[str] = []
+    for key, cfg in provider_registry().items():
+        choices.append(key)
+        choices.extend(str(alias) for alias in cfg.get("aliases", []))
+    return sorted(set(choices))
 
 
 def build_launch_args(
@@ -221,6 +245,7 @@ def parse_visible_status(text: str) -> dict[str, Any]:
 
 def expected_markers(provider: str, mode: str) -> list[str]:
     providers = provider_registry()
+    provider = normalize_provider_name(provider)
     if provider not in providers:
         raise ValueError(f"unknown provider: {provider}")
     markers = providers[provider].get("mode_markers", {}).get(mode)
@@ -309,6 +334,72 @@ def build_artifact_paths(root: Path, *, provider: str, mode: str, browser: str, 
     }
 
 
+def build_test_matrix(browsers: list[dict[str, Any]], providers: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    provider_map = providers or provider_registry()
+    rows: list[dict[str, Any]] = []
+    for browser in browsers:
+        profiles = browser.get("profiles") or [{"directory": "", "name": "", "account": ""}]
+        for profile in profiles:
+            for provider_id, provider in provider_map.items():
+                for mode in provider.get("modes", []):
+                    rows.append(
+                        {
+                            "browser": browser.get("id", ""),
+                            "browser_name": browser.get("display_name", ""),
+                            "profile_directory": profile.get("directory", ""),
+                            "profile_name": profile.get("name", ""),
+                            "profile_account": profile.get("account", ""),
+                            "provider": provider_id,
+                            "feature": mode,
+                            "provider_url": provider.get("url", ""),
+                            "status": "untested",
+                        }
+                    )
+    return rows
+
+
+def render_choice_table(title: str, items: list[dict[str, str]]) -> str:
+    lines = [title]
+    for index, item in enumerate(items, start=1):
+        detail = item.get("detail", "")
+        suffix = f"  {detail}" if detail else ""
+        lines.append(f"[{index}] {item.get('label', item.get('id', ''))}{suffix}")
+    return "\n".join(lines)
+
+
+def select_index(raw: str, count: int) -> int:
+    value = raw.strip()
+    if not value:
+        return 0
+    try:
+        index = int(value) - 1
+    except ValueError as exc:
+        raise ValueError(f"not a number: {raw}") from exc
+    if index < 0 or index >= count:
+        raise ValueError(f"choice out of range: {raw}")
+    return index
+
+
+def account_status_record(
+    *,
+    browser: str,
+    profile: dict[str, str],
+    provider: str,
+    visible_text: str = "",
+) -> dict[str, Any]:
+    visible_status = parse_visible_status(visible_text or "")
+    return {
+        "browser": normalize_browser_name(browser),
+        "profile_directory": profile.get("directory", ""),
+        "profile_name": profile.get("name", ""),
+        "profile_account": profile.get("account", ""),
+        "provider": normalize_provider_name(provider),
+        "provider_account": visible_status.get("account", ""),
+        "model": visible_status.get("model", ""),
+        "quotas": visible_status.get("quotas", {}),
+    }
+
+
 def write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -348,6 +439,119 @@ def cmd_discover(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_matrix(args: argparse.Namespace) -> int:
+    payload = {
+        "browsers": discover_browsers(),
+        "providers": provider_registry(),
+    }
+    payload["matrix"] = build_test_matrix(payload["browsers"], payload["providers"])
+    if args.output:
+        write_json(Path(args.output).expanduser(), payload)
+    print(json.dumps(payload if args.json else payload["matrix"], ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_accounts(args: argparse.Namespace) -> int:
+    browsers = {b["id"]: b for b in discover_browsers()}
+    browser_id = normalize_browser_name(args.browser)
+    if browser_id not in browsers:
+        raise SystemExit(f"browser not discovered: {args.browser}")
+    profile = resolve_profile(browsers[browser_id]["profiles"], args.profile)
+    visible_text = Path(args.text_file).expanduser().read_text(encoding="utf-8") if args.text_file else ""
+    record = account_status_record(
+        browser=browser_id,
+        profile=profile,
+        provider=args.provider,
+        visible_text=visible_text,
+    )
+    print(json.dumps(record, ensure_ascii=False, indent=2))
+    return 0
+
+
+def prompt_choice(title: str, items: list[dict[str, str]]) -> dict[str, str]:
+    if not items:
+        raise SystemExit(f"nothing to choose for {title}")
+    print(render_choice_table(title, items), file=sys.stderr)
+    print("Select [1]: ", end="", file=sys.stderr, flush=True)
+    raw = sys.stdin.readline()
+    return items[select_index(raw, len(items))]
+
+
+def cmd_wizard(args: argparse.Namespace) -> int:
+    browsers = discover_browsers()
+    browser_choice = prompt_choice(
+        "Browser",
+        [
+            {
+                "id": browser["id"],
+                "label": str(browser["display_name"]),
+                "detail": f"{len(browser.get('profiles', []))} profiles",
+            }
+            for browser in browsers
+        ],
+    )
+    browser = next(item for item in browsers if item["id"] == browser_choice["id"])
+    profile_choice = prompt_choice(
+        "Profiles",
+        [
+            {
+                "id": profile["directory"],
+                "label": f"{profile['name']} ({profile['directory']})",
+                "detail": profile.get("account", "") or "account unknown",
+            }
+            for profile in browser.get("profiles", [])
+        ],
+    )
+    providers = provider_registry()
+    provider_choice = prompt_choice(
+        "Providers",
+        [
+            {
+                "id": provider_id,
+                "label": provider_id,
+                "detail": ", ".join(provider.get("modes", [])),
+            }
+            for provider_id, provider in providers.items()
+        ],
+    )
+    provider_id = provider_choice["id"]
+    feature_choice = prompt_choice(
+        "Features",
+        [
+            {
+                "id": mode,
+                "label": mode,
+                "detail": "testable UI marker",
+            }
+            for mode in providers[provider_id].get("modes", [])
+        ],
+    )
+    launch_args = build_launch_args(
+        browser,
+        profile_directory=profile_choice["id"],
+        port=args.port or int(browser["default_port"]),
+        provider=provider_id,
+        mode=feature_choice["id"],
+        headless=not args.headful,
+    )
+    payload = {
+        "selection": {
+            "browser": browser["id"],
+            "profile": profile_choice["id"],
+            "provider": provider_id,
+            "feature": feature_choice["id"],
+        },
+        "account_status": account_status_record(
+            browser=browser["id"],
+            profile=resolve_profile(browser.get("profiles", []), profile_choice["id"]),
+            provider=provider_id,
+        ),
+        "launch_args": launch_args,
+    }
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_preflight(args: argparse.Namespace) -> int:
     browsers = {b["id"]: b for b in discover_browsers()}
     browser_id = normalize_browser_name(args.browser)
@@ -377,7 +581,7 @@ def cmd_record_e2e(args: argparse.Namespace) -> int:
     visible_text = Path(args.text_file).expanduser().read_text(encoding="utf-8") if args.text_file else ""
     paths = write_e2e_record(
         Path(args.artifact_root).expanduser(),
-        provider=args.provider,
+        provider=normalize_provider_name(args.provider),
         mode=args.mode,
         browser=normalize_browser_name(args.browser),
         profile=args.profile,
@@ -394,6 +598,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Discover browser profiles and run AI research/agent workflows with E2E artifacts.")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("discover")
+    matrix = sub.add_parser("matrix")
+    matrix.add_argument("--json", action="store_true", help="Include discovered browsers and provider registry.")
+    matrix.add_argument("--output", default="")
+    accounts = sub.add_parser("accounts")
+    accounts.add_argument("--browser", required=True)
+    accounts.add_argument("--profile", default="Default")
+    accounts.add_argument("--provider", choices=provider_cli_choices(), required=True)
+    accounts.add_argument("--text-file", default="")
+    wizard = sub.add_parser("wizard")
+    wizard.add_argument("--port", type=int)
+    wizard.add_argument("--headful", action="store_true")
     preflight = sub.add_parser("preflight")
     preflight.add_argument("--browser", required=True)
     preflight.add_argument("--profile", default="Default")
@@ -401,18 +616,18 @@ def build_parser() -> argparse.ArgumentParser:
     launch = sub.add_parser("launch-args")
     launch.add_argument("--browser", required=True)
     launch.add_argument("--profile", default="Default")
-    launch.add_argument("--provider", choices=sorted(provider_registry().keys()), required=True)
+    launch.add_argument("--provider", choices=provider_cli_choices(), required=True)
     launch.add_argument("--mode", default="chat")
     launch.add_argument("--port", type=int)
     launch.add_argument("--headful", action="store_true")
     launch.add_argument("--artifact-root", default="")
     verify = sub.add_parser("verify-text")
-    verify.add_argument("--provider", choices=sorted(provider_registry().keys()), required=True)
+    verify.add_argument("--provider", choices=provider_cli_choices(), required=True)
     verify.add_argument("--mode", required=True)
     verify.add_argument("--text-file", default="")
     record = sub.add_parser("record-e2e")
     record.add_argument("--artifact-root", required=True)
-    record.add_argument("--provider", choices=sorted(provider_registry().keys()), required=True)
+    record.add_argument("--provider", choices=provider_cli_choices(), required=True)
     record.add_argument("--mode", required=True)
     record.add_argument("--browser", required=True)
     record.add_argument("--profile", required=True)
@@ -427,6 +642,12 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "discover":
         return cmd_discover(args)
+    if args.command == "matrix":
+        return cmd_matrix(args)
+    if args.command == "accounts":
+        return cmd_accounts(args)
+    if args.command == "wizard":
+        return cmd_wizard(args)
     if args.command == "preflight":
         return cmd_preflight(args)
     if args.command == "launch-args":
@@ -440,14 +661,14 @@ def main(argv: list[str] | None = None) -> int:
             browser,
             profile_directory=profile["directory"],
             port=args.port or int(browser["default_port"]),
-            provider=args.provider,
+            provider=normalize_provider_name(args.provider),
             mode=args.mode,
             headless=not args.headful,
         )
         payload = {
             "browser": browser["id"],
             "profile": profile,
-            "provider": args.provider,
+            "provider": normalize_provider_name(args.provider),
             "mode": args.mode,
             "launch_args": launch_args,
         }

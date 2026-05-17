@@ -80,6 +80,9 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertIn("agent", providers["gemini"]["modes"])
         self.assertIn("models", providers["chatgpt"])
         self.assertIn("models", providers["gemini"])
+        self.assertIn("grok", providers)
+        self.assertIn("research", providers["grok"]["modes"])
+        self.assertEqual(module.normalize_provider_name("grog"), "grok")
 
     def test_parse_account_and_quota_from_visible_text(self):
         module = load_module()
@@ -183,6 +186,70 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertEqual(saved["screenshot"], str(screenshot))
         self.assertTrue(saved["verification"]["detected"])
         self.assertEqual(saved["verification"]["visible_status"]["quotas"]["agent_remaining"], 3)
+
+    def test_build_test_matrix_expands_browsers_profiles_providers_and_features(self):
+        module = load_module()
+        browsers = [
+            {
+                "id": "brave",
+                "display_name": "Brave Browser",
+                "profiles": [
+                    {"directory": "Default", "name": "Work", "account": "work@example.test"},
+                    {"directory": "Profile 2", "name": "Personal", "account": ""},
+                ],
+            }
+        ]
+        providers = {
+            "chatgpt": {"modes": ["chat", "deep-research"]},
+            "grok": {"modes": ["chat"]},
+        }
+
+        matrix = module.build_test_matrix(browsers, providers)
+
+        self.assertEqual(len(matrix), 6)
+        self.assertEqual(matrix[0]["browser"], "brave")
+        self.assertEqual(matrix[0]["profile_directory"], "Default")
+        self.assertEqual(matrix[0]["profile_account"], "work@example.test")
+        self.assertEqual(matrix[0]["provider"], "chatgpt")
+        self.assertEqual(matrix[0]["feature"], "chat")
+
+    def test_render_choice_table_is_human_readable(self):
+        module = load_module()
+
+        table = module.render_choice_table(
+            "Browser",
+            [
+                {"id": "brave", "label": "Brave Browser", "detail": "1 profile"},
+                {"id": "comet", "label": "Comet", "detail": "Default"},
+            ],
+        )
+
+        self.assertIn("Browser", table)
+        self.assertIn("[1] Brave Browser", table)
+        self.assertIn("1 profile", table)
+
+    def test_select_index_defaults_and_rejects_out_of_range(self):
+        module = load_module()
+
+        self.assertEqual(module.select_index("", 3), 0)
+        self.assertEqual(module.select_index("2", 3), 1)
+        with self.assertRaises(ValueError):
+            module.select_index("4", 3)
+
+    def test_account_status_record_combines_profile_and_visible_provider_state(self):
+        module = load_module()
+
+        status = module.account_status_record(
+            browser="brave",
+            profile={"directory": "Default", "name": "Work", "account": "profile@example.test"},
+            provider="chatgpt",
+            visible_text="Signed in as ui@example.test\nDeep research: 4 remaining\nAgent tasks: 2 left",
+        )
+
+        self.assertEqual(status["browser"], "brave")
+        self.assertEqual(status["profile_account"], "profile@example.test")
+        self.assertEqual(status["provider_account"], "ui@example.test")
+        self.assertEqual(status["quotas"]["deep_research_remaining"], 4)
 
 
 if __name__ == "__main__":

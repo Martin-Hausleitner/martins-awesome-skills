@@ -26,7 +26,9 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 - Reads Chromium profile metadata from `Local State` and `Preferences`, including profile directory, display name, and visible account email when available.
 - Resolves profile aliases such as `work` by exact profile/account match first, then by a Work/Arbeit name match.
 - Produces launch arguments for headless or background runs with `--remote-debugging-port`, `--user-data-dir`, and `--profile-directory`.
-- Supports provider modes for ChatGPT chat, ChatGPT Deep Research, ChatGPT Agent, Gemini chat, Gemini Deep Research, Gemini Agent, and Perplexity research.
+- Supports provider modes for ChatGPT chat, ChatGPT Deep Research, ChatGPT Agent, Gemini chat, Gemini Deep Research, Gemini Agent, Perplexity research, and Grok/Grog research.
+- Builds a full browser x profile x provider x feature test matrix for systematic E2E runs.
+- Provides an interactive wizard that lets a human choose the installed browser, profile, provider, and feature before launching or testing.
 - Records E2E evidence as a `status.json` plus screenshot path, so a human can verify whether the provider UI actually entered the requested mode.
 
 ## Safety Rule
@@ -41,6 +43,36 @@ Discover browsers, profiles, providers, modes, and known model labels:
 
 ```bash
 python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py discover
+```
+
+Build the full test matrix:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py matrix --json
+```
+
+Save the matrix for a later E2E run:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py matrix \
+  --json \
+  --output /tmp/ai-research-browser-matrix.json
+```
+
+Use the interactive picker:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py wizard --headful
+```
+
+Capture account/login/quota status from visible provider UI text:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py accounts \
+  --browser brave \
+  --profile work \
+  --provider chatgpt \
+  --text-file /tmp/chatgpt-visible-text.txt
 ```
 
 Check whether a browser/profile can be launched for CDP automation:
@@ -96,6 +128,7 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
    - ChatGPT: `https://chatgpt.com/`
    - Gemini: `https://gemini.google.com/app?hl=de`
    - Perplexity: `https://www.perplexity.ai/`
+   - Grok: `https://grok.com/`
 5. Select the requested mode in the provider UI.
 6. Capture a real screenshot of the browser tab.
 7. Extract visible UI text from Accessibility or the page.
@@ -112,6 +145,12 @@ Gemini Deep Research may be labeled `Deep Research`, `Recherche starten`, or `St
 
 Gemini Agent availability varies by account and region. Record the visible account/model/quota text when it is shown.
 
+Grok may be typed as `grok` or `grog` in the CLI. Availability of research modes depends on the account and current Grok UI.
+
+## Design Notes
+
+This follows the same shape that makes Peter Steinberger's Peekaboo useful for agents: separate discovery/snapshot JSON from actions. The `matrix` command is the snapshot, while `wizard`, `launch-args`, `verify-text`, and `record-e2e` are the action/evidence layer.
+
 ## Testing
 
 Run unit tests from the repository root:
@@ -119,4 +158,3 @@ Run unit tests from the repository root:
 ```bash
 python3 -m unittest discover -s skills/software-development/ai-research-browser/tests -p 'test_*.py'
 ```
-

@@ -1397,8 +1397,18 @@ class AiResearchBrowserTest(unittest.TestCase):
 
         self.assertEqual(plan["backend"], "unbrowser-local")
         self.assertEqual(plan["package"], "@unbrowser/local")
-        self.assertEqual(plan["commands"]["help"], ["npx", "-y", "@unbrowser/local", "--help"])
-        self.assertIn("https://example.test", plan["commands"]["browse"])
+        self.assertEqual(plan["commands"]["mcp_server"], ["npx", "-y", "@unbrowser/local", "--profile=core"])
+        self.assertEqual(plan["json_rpc_call"]["params"]["name"], "quick_fetch")
+        self.assertEqual(plan["json_rpc_call"]["params"]["arguments"]["url"], "https://example.test")
+        self.assertIn("unbrowser-mcp-probe", plan["commands"]["probe"])
+
+    def test_cdp_attachment_upload_rejects_missing_files_before_browser_call(self):
+        module = load_module()
+
+        result = module.set_cdp_file_input_files(9222, [Path("/tmp/definitely-missing-hermes-attachment.png")])
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("No existing attachment files", result.stderr)
 
     def test_render_choice_table_is_human_readable(self):
         module = load_module()
@@ -1712,6 +1722,25 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertEqual(plan["actions"][0]["label"], "open-provider")
         self.assertIn("select-feature", [action["label"] for action in plan["actions"]])
         self.assertIn("confirm-start", [action["label"] for action in plan["actions"]])
+
+    def test_build_workflow_plan_records_attachment_step(self):
+        module = load_module()
+
+        plan = module.build_ai_workflow_plan(
+            browser={"id": "brave", "display_name": "Brave Browser", "binary_path": "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"},
+            profile={"directory": "Profile 2", "name": "work"},
+            provider="gemini",
+            mode="deep-research",
+            prompt="Analyze this image",
+            artifact_root=Path("/tmp/artifacts"),
+            clone_root=Path("/tmp/clones"),
+            attachments=[Path("/tmp/example-image.png")],
+        )
+
+        attachment_actions = [action for action in plan["actions"] if action["label"] == "attach-files"]
+        self.assertEqual(plan["attachments"], ["/tmp/example-image.png"])
+        self.assertEqual(attachment_actions[0]["method"], "cdp-dom-set-file-input-files")
+        self.assertEqual(attachment_actions[0]["file_count"], 1)
 
     def test_snapshot_ref_helpers_prefer_exact_textbox_and_button_refs(self):
         module = load_module()

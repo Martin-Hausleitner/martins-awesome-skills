@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import select
 import shutil
 import socket
 import sqlite3
@@ -1469,6 +1470,7 @@ def build_ai_workflow_plan(
     submit: bool = False,
     confirm_start: bool = False,
     wait_seconds: int = 30,
+    attachments: list[Path] | None = None,
 ) -> dict[str, Any]:
     provider_id = normalize_provider_name(provider)
     browser_id = normalize_browser_name(str(browser.get("id", "")))
@@ -1485,6 +1487,15 @@ def build_ai_workflow_plan(
             actions.append({"label": "open-feature-menu", "triggers": spec.get("menu_triggers", [])})
         actions.append({"label": "select-feature", "triggers": spec["feature_triggers"], "slash_fallbacks": spec.get("slash_triggers", [])})
     actions.append({"label": "fill-prompt", "composer_selector": spec["composer_selector"], "prompt_preview": prompt[:160]})
+    if attachments:
+        actions.append(
+            {
+                "label": "attach-files",
+                "method": "cdp-dom-set-file-input-files",
+                "files": [str(path.expanduser()) for path in attachments],
+                "file_count": len(attachments),
+            }
+        )
     if submit:
         actions.append({"label": "submit-prompt", "key": "Enter"})
     if submit and confirm_start and spec.get("confirmation_triggers"):
@@ -1508,6 +1519,7 @@ def build_ai_workflow_plan(
         "submit": submit,
         "confirm_start": confirm_start,
         "wait_seconds": wait_seconds,
+        "attachments": [str(path.expanduser()) for path in attachments or []],
         "artifact_root": str(artifact_root.expanduser()),
         "clone_root": str(clone_root.expanduser()),
         "isolation": "temporary-profile-clone-cdp",
@@ -2466,6 +2478,111 @@ ws.close();
     return result.returncode == 0 and screenshot.exists() and screenshot.stat().st_size > 0
 
 
+def set_cdp_file_input_files(port: int, files: list[Path], *, timeout: float = 20.0) -> subprocess.CompletedProcess[str]:
+    expanded_files = [str(path.expanduser().resolve()) for path in files if path.expanduser().exists()]
+    script = r"""
+const [port, filesJson] = process.argv.slice(1);
+const files = JSON.parse(filesJson);
+const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
+const target = targets.find((item) => item.type === 'page' && !String(item.url || '').startsWith('about:blank')) || targets.find((item) => item.type === 'page');
+if (!target || !target.webSocketDebuggerUrl) throw new Error('No page target for CDP file upload');
+const ws = new WebSocket(target.webSocketDebuggerUrl);
+let nextId = 0;
+const pending = new Map();
+const send = (method, params = {}) => new Promise((resolve, reject) => {
+  const id = ++nextId;
+  pending.set(id, {resolve, reject});
+  ws.send(JSON.stringify({id, method, params}));
+});
+const done = new Promise((resolve, reject) => {
+  const timer = setTimeout(() => reject(new Error('Timed out waiting for CDP file upload')), 15000);
+  ws.addEventListener('message', (event) => {
+    const payload = JSON.parse(event.data);
+    if (!payload.id || !pending.has(payload.id)) return;
+    const item = pending.get(payload.id);
+    pending.delete(payload.id);
+    if (payload.error) item.reject(new Error(payload.error.message || JSON.stringify(payload.error)));
+    else item.resolve(payload.result || {});
+  });
+  ws.addEventListener('open', async () => {
+    try {
+      const documentResult = await send('DOM.getDocument', {depth: -1, pierce: true});
+      const rootNodeId = documentResult.root && documentResult.root.nodeId;
+      const inputResult = await send('DOM.querySelector', {nodeId: rootNodeId, selector: 'input[type=file]'});
+      if (!inputResult.nodeId) {
+        clearTimeout(timer);
+        resolve({ok: false, reason: 'no-file-input'});
+        ws.close();
+        return;
+      }
+      await send('DOM.setFileInputFiles', {nodeId: inputResult.nodeId, files});
+      clearTimeout(timer);
+      resolve({ok: true, fileCount: files.length});
+      ws.close();
+    } catch (error) {
+      clearTimeout(timer);
+      reject(error);
+      ws.close();
+    }
+  });
+  ws.addEventListener('error', (error) => {
+    clearTimeout(timer);
+    reject(error);
+  });
+});
+const result = await done;
+console.log(JSON.stringify(result));
+"""
+    if not expanded_files:
+        return subprocess.CompletedProcess(["cdp-file-upload", str(port)], 1, "", "No existing attachment files")
+    try:
+        return subprocess.run(["node", "--input-type=module", "-e", script, str(int(port)), json.dumps(expanded_files)], capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        return subprocess.CompletedProcess(
+            ["node", "cdp-file-upload", str(port)],
+            124,
+            stdout=(exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")),
+            stderr=(exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")) + f"\nTimed out after {timeout:.0f}s",
+        )
+
+
+def upload_cdp_attachments(
+    *,
+    port: int,
+    attachments: list[Path] | None,
+    commands: list[dict[str, Any]],
+    workflow_events: list[dict[str, Any]],
+    timeout: float,
+    label: str = "attach-files",
+) -> subprocess.CompletedProcess[str] | None:
+    if not attachments:
+        return None
+    result = set_cdp_file_input_files(port, attachments, timeout=min(timeout, 20.0))
+    file_paths = [str(path.expanduser()) for path in attachments]
+    commands.append(
+        {
+            "label": label,
+            "args": ["cdp-file-upload", str(port), *file_paths],
+            "returncode": result.returncode,
+            "stdout": result.stdout[-4000:],
+            "stderr": result.stderr[-4000:],
+        }
+    )
+    upload_event: dict[str, Any] = {
+        "event": label,
+        "returncode": result.returncode,
+        "files": file_paths,
+        "stdout": result.stdout[-4000:],
+        "stderr": result.stderr[-4000:],
+    }
+    try:
+        upload_event["result"] = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        pass
+    workflow_events.append(upload_event)
+    return result
+
+
 def agent_browser_profile_probe(
     *,
     browser: dict[str, Any],
@@ -2680,6 +2797,7 @@ def agent_browser_profile_workflow_run(
     cache_root: Path | None = None,
     refresh_cache: bool = True,
     include_extension_ids: list[str] | None = None,
+    attachments: list[Path] | None = None,
 ) -> dict[str, Any]:
     provider_id = normalize_provider_name(provider)
     spec = provider_workflow_spec(provider_id, mode)
@@ -2701,6 +2819,7 @@ def agent_browser_profile_workflow_run(
         submit=submit,
         confirm_start=confirm_start,
         wait_seconds=wait_seconds,
+        attachments=attachments,
     )
 
     clone = clone_browser_profile_for_agent_browser(
@@ -2898,6 +3017,14 @@ def agent_browser_profile_workflow_run(
                 label="fill-prompt",
             )
             workflow_events.append({"event": "fill-prompt", "returncode": fill_result.returncode})
+            if fill_result.returncode == 0:
+                upload_cdp_attachments(
+                    port=cdp_port,
+                    attachments=attachments,
+                    commands=commands,
+                    workflow_events=workflow_events,
+                    timeout=timeout,
+                )
             if submit and fill_result.returncode == 0:
                 invoke("submit-prompt", ["press", "Enter"])
                 status = "submitted"
@@ -3080,6 +3207,7 @@ def agent_browser_profile_followup_run(
     refresh_cache: bool = True,
     include_extension_ids: list[str] | None = None,
     export_markdown: Path | None = None,
+    attachments: list[Path] | None = None,
 ) -> dict[str, Any]:
     provider_id = normalize_provider_name(provider)
     spec = provider_workflow_spec(provider_id, "chat")
@@ -3221,6 +3349,15 @@ def agent_browser_profile_followup_run(
                 label="fill-followup",
             )
             workflow_events.append({"event": "fill-followup", "returncode": fill_result.returncode})
+            if fill_result.returncode == 0:
+                upload_cdp_attachments(
+                    port=cdp_port,
+                    attachments=attachments,
+                    commands=commands,
+                    workflow_events=workflow_events,
+                    timeout=timeout,
+                    label="attach-followup-files",
+                )
             if submit and fill_result.returncode == 0:
                 invoke("submit-followup", ["press", "Enter"])
                 status = "submitted"
@@ -3273,6 +3410,7 @@ def agent_browser_profile_followup_run(
         "status": status,
         "chat_url": current_url or chat_url,
         "followup_prompt": prompt,
+        "attachments": [str(path.expanduser()) for path in attachments or []],
         "clone": clone,
         "cdp_port": cdp_port,
         "launch": launch_status,
@@ -4125,6 +4263,7 @@ def resolve_workflow_browser_profile(args: argparse.Namespace) -> tuple[dict[str
 
 def cmd_workflow_plan(args: argparse.Namespace) -> int:
     browser, profile = resolve_workflow_browser_profile(args)
+    attachments = [Path(item).expanduser() for item in getattr(args, "attachment", []) or []]
     payload = build_ai_workflow_plan(
         browser=browser,
         profile=profile,
@@ -4136,6 +4275,7 @@ def cmd_workflow_plan(args: argparse.Namespace) -> int:
         submit=args.submit,
         confirm_start=args.confirm_start,
         wait_seconds=args.wait_seconds,
+        attachments=attachments,
     )
     if args.output:
         write_json(Path(args.output).expanduser(), payload)
@@ -4146,6 +4286,7 @@ def cmd_workflow_plan(args: argparse.Namespace) -> int:
 def cmd_workflow_run(args: argparse.Namespace) -> int:
     browser, profile = resolve_workflow_browser_profile(args)
     extension_ids = requested_extension_ids(getattr(args, "include_extension", None), include_ai_exporter=getattr(args, "include_ai_exporter", False))
+    attachments = [Path(item).expanduser() for item in getattr(args, "attachment", []) or []]
     payload = agent_browser_profile_workflow_run(
         browser=browser,
         profile=profile,
@@ -4161,6 +4302,7 @@ def cmd_workflow_run(args: argparse.Namespace) -> int:
         cache_root=Path(args.cache_root).expanduser() if args.cache else None,
         refresh_cache=not args.no_refresh_cache,
         include_extension_ids=extension_ids,
+        attachments=attachments,
     )
     if args.output:
         write_json(Path(args.output).expanduser(), payload)
@@ -4172,6 +4314,7 @@ def cmd_workflow_followup(args: argparse.Namespace) -> int:
     browser, profile = resolve_workflow_browser_profile(args)
     prompt = workflow_prompt_from_args(args)
     extension_ids = requested_extension_ids(args.include_extension, include_ai_exporter=args.include_ai_exporter)
+    attachments = [Path(item).expanduser() for item in getattr(args, "attachment", []) or []]
     payload = agent_browser_profile_followup_run(
         browser=browser,
         profile=profile,
@@ -4187,6 +4330,7 @@ def cmd_workflow_followup(args: argparse.Namespace) -> int:
         refresh_cache=not args.no_refresh_cache,
         include_extension_ids=extension_ids,
         export_markdown=Path(args.export_markdown).expanduser() if args.export_markdown else None,
+        attachments=attachments,
     )
     if args.output:
         write_json(Path(args.output).expanduser(), payload)
@@ -4194,37 +4338,213 @@ def cmd_workflow_followup(args: argparse.Namespace) -> int:
     return 0 if payload.get("status") in {"opened", "submitted", "started", "verified", "captured"} else 1
 
 
-def build_unbrowser_plan(*, url: str, prompt: str = "", output: str = "", local: bool = True) -> dict[str, Any]:
+def build_unbrowser_plan(
+    *,
+    url: str,
+    prompt: str = "",
+    output: str = "",
+    local: bool = True,
+    profile: str = "core",
+    tool: str = "quick_fetch",
+) -> dict[str, Any]:
     package = "@unbrowser/local" if local else "@unbrowser/cloud"
-    command = ["npx", "-y", package]
+    server_command = ["npx", "-y", package, f"--profile={profile}"]
+    arguments: dict[str, Any] = {}
     if url:
-        command.extend(["browse", url])
+        arguments["url"] = url
+    if tool == "smart_browse":
+        arguments.setdefault("contentType", "main_content")
+        arguments.setdefault("maxChars", 12000)
     if prompt:
-        command.extend(["--prompt", prompt])
-    if output:
-        command.extend(["--output", output])
+        arguments["scope" if tool == "research" else "prompt"] = prompt
     return {
         "backend": "unbrowser-local" if local else "unbrowser-cloud",
         "package": package,
+        "profile": profile,
+        "tool": tool,
         "source": "https://www.unbrowser.ai/",
         "commands": {
-            "help": ["npx", "-y", package, "--help"],
-            "browse": command,
+            "mcp_server": server_command,
+            "probe": [
+                sys.executable,
+                "skills/software-development/ai-research-browser/scripts/ai_research_browser.py",
+                "unbrowser-mcp-probe",
+                "--profile",
+                profile,
+                "--tool",
+                tool,
+                "--url",
+                url,
+                *(["--output", output] if output else []),
+            ],
         },
+        "json_rpc_call": {"method": "tools/call", "params": {"name": tool, "arguments": arguments}},
         "notes": [
-            "Unbrowser Local is useful for extraction/pattern-learning checks around pages.",
+            "Unbrowser Local is an MCP stdio server, not a classic browse subcommand CLI.",
+            "Use unbrowser-mcp-probe to initialize the server, list tools, and optionally call quick_fetch or smart_browse.",
             "Provider UI actions that spend quota or start Deep Research stay in the local CDP workflow so we can verify account, mode, and screenshots.",
-            "Run help first because the published local CLI surface can change.",
         ],
     }
 
 
 def cmd_unbrowser_plan(args: argparse.Namespace) -> int:
-    payload = build_unbrowser_plan(url=args.url, prompt=args.prompt, output=args.output_path, local=not args.cloud)
+    payload = build_unbrowser_plan(url=args.url, prompt=args.prompt, output=args.output_path, local=not args.cloud, profile=args.profile, tool=args.tool)
     if args.output:
         write_json(Path(args.output).expanduser(), payload)
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
+
+
+def mcp_send_json_line(process: subprocess.Popen[bytes], payload: dict[str, Any]) -> None:
+    if not process.stdin:
+        raise RuntimeError("MCP process stdin is closed")
+    process.stdin.write(json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\n")
+    process.stdin.flush()
+
+
+def mcp_read_json_line(
+    process: subprocess.Popen[bytes],
+    *,
+    timeout: float,
+    buffer: bytearray,
+) -> dict[str, Any] | None:
+    if not process.stdout:
+        return None
+    fd = process.stdout.fileno()
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if b"\n" in buffer:
+            line, _, rest = bytes(buffer).partition(b"\n")
+            buffer[:] = rest
+            if not line.strip():
+                continue
+            return json.loads(line.decode("utf-8", errors="replace"))
+        readable, _, _ = select.select([fd], [], [], 0.2)
+        if readable:
+            chunk = os.read(fd, 4096)
+            if not chunk:
+                break
+            buffer.extend(chunk)
+        elif process.poll() is not None:
+            break
+    return None
+
+
+def mcp_read_until_id(
+    process: subprocess.Popen[bytes],
+    request_id: int,
+    *,
+    timeout: float,
+    buffer: bytearray,
+    events: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        payload = mcp_read_json_line(process, timeout=max(0.2, deadline - time.monotonic()), buffer=buffer)
+        if payload is None:
+            return None
+        events.append(payload)
+        if payload.get("id") == request_id:
+            return payload
+    return None
+
+
+def run_unbrowser_mcp_probe(
+    *,
+    url: str,
+    tool: str = "quick_fetch",
+    profile: str = "core",
+    prompt: str = "",
+    artifact_root: Path = Path("/tmp/hermes-unbrowser-mcp-probe"),
+    timeout: float = 90.0,
+    max_chars: int = 12000,
+) -> dict[str, Any]:
+    artifact_root = artifact_root.expanduser()
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    command = ["npx", "-y", "@unbrowser/local", f"--profile={profile}"]
+    events: list[dict[str, Any]] = []
+    started_at = time.time()
+    process = subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=str(artifact_root),
+        start_new_session=True,
+    )
+    stdout_buffer = bytearray()
+    try:
+        initialize = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "ai-research-browser", "version": "0.1"},
+            },
+        }
+        mcp_send_json_line(process, initialize)
+        init_response = mcp_read_until_id(process, 1, timeout=min(timeout, 45.0), buffer=stdout_buffer, events=events)
+        mcp_send_json_line(process, {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}})
+        mcp_send_json_line(process, {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
+        tools_response = mcp_read_until_id(process, 2, timeout=min(timeout, 45.0), buffer=stdout_buffer, events=events)
+        call_response = None
+        if url:
+            arguments: dict[str, Any] = {"url": url}
+            if tool == "smart_browse":
+                arguments.update({"contentType": "main_content", "maxChars": max_chars})
+            elif tool == "quick_fetch":
+                arguments.update({"maxChars": max_chars})
+            elif tool == "research":
+                arguments = {"scope": prompt or url, "maxResults": 5}
+            mcp_send_json_line(process, {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": tool, "arguments": arguments}})
+            call_response = mcp_read_until_id(process, 3, timeout=timeout, buffer=stdout_buffer, events=events)
+    finally:
+        terminate_process(process)
+    stderr = ""
+    if process.stderr:
+        try:
+            stderr = process.stderr.read().decode("utf-8", errors="replace")
+        except Exception:
+            stderr = ""
+    tools = []
+    if isinstance(tools_response, dict):
+        tools = [tool_record.get("name", "") for tool_record in tools_response.get("result", {}).get("tools", [])]
+    payload = {
+        "backend": "unbrowser-local",
+        "status": "ok" if init_response and tools_response and (not url or call_response) else "failed",
+        "command": command,
+        "cwd": str(artifact_root),
+        "profile": profile,
+        "tool": tool,
+        "url": url,
+        "server_info": (init_response or {}).get("result", {}).get("serverInfo", {}),
+        "tools": tools,
+        "call_response": call_response,
+        "events_path": str(artifact_root / "events.json"),
+        "stderr_tail": stderr[-4000:],
+        "duration_seconds": round(time.time() - started_at, 3),
+    }
+    write_json(artifact_root / "events.json", events)
+    write_json(artifact_root / "status.json", payload)
+    return payload
+
+
+def cmd_unbrowser_mcp_probe(args: argparse.Namespace) -> int:
+    payload = run_unbrowser_mcp_probe(
+        url=args.url,
+        tool=args.tool,
+        profile=args.profile,
+        prompt=args.prompt,
+        artifact_root=Path(args.artifact_root).expanduser(),
+        timeout=args.timeout,
+        max_chars=args.max_chars,
+    )
+    if args.output:
+        write_json(Path(args.output).expanduser(), payload)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0 if payload.get("status") == "ok" else 1
 
 
 def cmd_extensions(args: argparse.Namespace) -> int:
@@ -4471,7 +4791,18 @@ def build_parser() -> argparse.ArgumentParser:
     unbrowser_plan.add_argument("--prompt", default="")
     unbrowser_plan.add_argument("--output-path", default="")
     unbrowser_plan.add_argument("--cloud", action="store_true")
+    unbrowser_plan.add_argument("--profile", default="core", choices=["core", "api", "full"])
+    unbrowser_plan.add_argument("--tool", default="quick_fetch", choices=["quick_fetch", "smart_browse", "research"])
     unbrowser_plan.add_argument("--output", default="")
+    unbrowser_probe = sub.add_parser("unbrowser-mcp-probe")
+    unbrowser_probe.add_argument("--url", default="")
+    unbrowser_probe.add_argument("--prompt", default="")
+    unbrowser_probe.add_argument("--profile", default="core", choices=["core", "api", "full"])
+    unbrowser_probe.add_argument("--tool", default="quick_fetch", choices=["quick_fetch", "smart_browse", "research"])
+    unbrowser_probe.add_argument("--artifact-root", default="/tmp/hermes-unbrowser-mcp-probe")
+    unbrowser_probe.add_argument("--timeout", type=float, default=90.0)
+    unbrowser_probe.add_argument("--max-chars", type=int, default=12000)
+    unbrowser_probe.add_argument("--output", default="")
     probe_specs = sub.add_parser("probe-specs")
     probe_specs.add_argument("--provider", choices=provider_cli_choices(), default="")
     oracle_plan = sub.add_parser("oracle-plan")
@@ -4613,6 +4944,7 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_plan.add_argument("--submit", action="store_true")
     workflow_plan.add_argument("--confirm-start", action="store_true")
     workflow_plan.add_argument("--wait-seconds", type=int, default=30)
+    workflow_plan.add_argument("--attachment", action="append", default=[], help="Local file/image path to attach through the provider file input when visible.")
     workflow_plan.add_argument("--output", default="")
     workflow_run = sub.add_parser("workflow-run")
     workflow_run.add_argument("--artifact-root", default="/tmp/hermes-ai-research-workflows")
@@ -4632,6 +4964,7 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_run.add_argument("--no-refresh-cache", action="store_true")
     workflow_run.add_argument("--include-extension", action="append", help="Copy/load an extension id or alias into the temporary clone.")
     workflow_run.add_argument("--include-ai-exporter", action="store_true", help="Copy/load SaveAI / AI Exporter into the temporary clone.")
+    workflow_run.add_argument("--attachment", action="append", default=[], help="Local file/image path to attach through the provider file input when visible.")
     workflow_run.add_argument("--output", default="")
     workflow_followup = sub.add_parser("workflow-followup")
     workflow_followup.add_argument("--artifact-root", default="/tmp/hermes-ai-research-workflow-followups")
@@ -4650,6 +4983,7 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_followup.add_argument("--no-refresh-cache", action="store_true")
     workflow_followup.add_argument("--include-extension", action="append", help="Copy/load an extension id or alias into the temporary clone.")
     workflow_followup.add_argument("--include-ai-exporter", action="store_true", help="Copy/load SaveAI / AI Exporter into the temporary clone.")
+    workflow_followup.add_argument("--attachment", action="append", default=[], help="Local file/image path to attach through the provider file input when visible.")
     workflow_followup.add_argument("--export-markdown", default="")
     workflow_followup.add_argument("--output", default="")
     workflow_suite = sub.add_parser("workflow-suite")
@@ -4718,6 +5052,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_extensions(args)
     if args.command == "unbrowser-plan":
         return cmd_unbrowser_plan(args)
+    if args.command == "unbrowser-mcp-probe":
+        return cmd_unbrowser_mcp_probe(args)
     if args.command == "probe-specs":
         return cmd_probe_specs(args)
     if args.command == "oracle-plan":

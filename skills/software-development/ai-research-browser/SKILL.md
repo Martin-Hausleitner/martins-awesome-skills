@@ -32,6 +32,7 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 - Provides an interactive wizard that lets a human choose the installed browser, profile, provider, and feature before launching or testing.
 - Archives existing provider chats into a local cache so later runs can continue from cached transcripts or intentionally refresh by scraping again.
 - Reopens cached/existing chat URLs with `workflow-followup`, sends a follow-up such as "Fass zusammen", exports Markdown, and refreshes the local cache.
+- Attaches local files/images to `workflow-run` and `workflow-followup` when the provider exposes a visible file input, and records `no-file-input` instead of guessing when the upload path is hidden.
 - Discovers installed SaveAI / AI Exporter extension manifests and can copy/load selected extensions into temporary profile clones for export-oriented tests.
 - Extracts visible provider account, plan/subscription, model, quota, and usage text when a real UI snapshot is supplied.
 - Scans local profile site data for provider session evidence without reading or emitting cookie values.
@@ -89,6 +90,19 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
   --url https://gemini.google.com/app?hl=de \
   --prompt "Extract the visible provider state"
 ```
+
+Run the current Unbrowser Local MCP stdio probe:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py unbrowser-mcp-probe \
+  --url https://www.unbrowser.ai/ \
+  --tool quick_fetch \
+  --profile core \
+  --artifact-root /tmp/hermes-unbrowser-mcp-probe \
+  --output /tmp/hermes-unbrowser-mcp-probe.json
+```
+
+The probe starts `npx -y @unbrowser/local --profile=<profile>`, sends JSON-RPC initialize/tools calls over stdio, and writes `events.json` plus `status.json`. Use it for public-page extraction and Unbrowser capability checks. Keep paid provider workflows in `workflow-run`/`workflow-followup`, where browser profile, provider mode, account state, screenshots, and confirmation controls are recorded.
 
 List model and tool catalogs:
 
@@ -159,6 +173,21 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
   --cache
 ```
 
+Attach an image or file when the provider exposes a file input:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py workflow-run \
+  --browser brave \
+  --profile work \
+  --provider google \
+  --mode chat \
+  --prompt "Analyze the attached image." \
+  --attachment /tmp/example-image.png \
+  --cache
+```
+
+Attachment upload uses CDP `DOM.setFileInputFiles` against the temporary clone only. If the provider hides uploads behind a menu, the workflow records `no-file-input`; inspect the Agent Browser snapshot and add the provider-specific menu path before treating attachment support as verified.
+
 Run the focused workflow suite for the main agentic/research features:
 
 ```bash
@@ -185,6 +214,7 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
   --chat-url https://gemini.google.com/app/example \
   --prompt "Fass den Deep-Research-Report kompakt zusammen." \
   --include-ai-exporter \
+  --attachment /tmp/context-note.pdf \
   --cache \
   --export-markdown /tmp/gemini-followup.md
 ```

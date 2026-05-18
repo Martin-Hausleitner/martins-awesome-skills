@@ -223,7 +223,18 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
   --output-path /tmp/unbrowser-gemini.json
 ```
 
-The current Unbrowser docs point at `npx @unbrowser/local` for the local runner. Run the generated `help` command first because the local CLI surface can change independently of this skill.
+The current Unbrowser site points at `npx @unbrowser/local` for the local runner, and the local package behaves as an MCP stdio server. Use `unbrowser-mcp-probe` to initialize the server, list the advertised tools, and optionally call `quick_fetch`, `smart_browse`, or `research` with JSON-RPC:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py unbrowser-mcp-probe \
+  --url https://www.unbrowser.ai/ \
+  --tool quick_fetch \
+  --profile core \
+  --artifact-root /tmp/hermes-unbrowser-mcp-probe \
+  --output /tmp/hermes-unbrowser-mcp-probe.json
+```
+
+The probe writes `events.json` and `status.json` under the artifact root. It is meant for public-page extraction and pattern-learning checks; provider UI actions that start paid Deep Research or Agent runs stay in the CDP workflow where mode, account state, and screenshots are recorded explicitly.
 
 Show provider-specific probe hints before writing or running selectors:
 
@@ -307,6 +318,21 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
   --output /tmp/gemini-deep-research-workflow.json
 ```
 
+Attach an image or file to a provider composer when a visible file input exists:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py workflow-run \
+  --browser brave \
+  --profile work \
+  --provider google \
+  --mode chat \
+  --prompt "Analyze the attached image and summarize what matters." \
+  --attachment /tmp/example-image.png \
+  --output /tmp/gemini-image-chat-workflow.json
+```
+
+Attachment upload is intentionally evidence-driven: the workflow records a `attach-files` event with `ok: true`, `no-file-input`, or an error. If a provider hides uploads behind a menu, first use Agent Browser snapshots to discover the exact menu path, then add that selector path before relying on automated file upload.
+
 Start Perplexity Research or Grok DeepSearch:
 
 ```bash
@@ -347,12 +373,13 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
   --chat-url https://gemini.google.com/app/example \
   --prompt "Fass den bisherigen Deep-Research-Report kompakt zusammen und nenne die wichtigsten Quellen." \
   --include-ai-exporter \
+  --attachment /tmp/context-note.pdf \
   --cache \
   --export-markdown /tmp/gemini-followup.md \
   --output /tmp/gemini-followup.json
 ```
 
-`workflow-followup` uses the same disposable profile-clone CDP shape as `workflow-run`: it does not close or mutate existing user browser windows, sends the follow-up only when `--no-submit` is not set, records screenshot/text/status artifacts, writes a Markdown export, and refreshes the local chat cache when `--cache` is enabled. This is the intended second phase after a long Gemini or ChatGPT Deep Research run: wait for the research chat URL to finish, send "fass zusammen", then copy/export the final state.
+`workflow-followup` uses the same disposable profile-clone CDP shape as `workflow-run`: it does not close or mutate existing user browser windows, sends the follow-up only when `--no-submit` is not set, records screenshot/text/status artifacts, writes a Markdown export, and refreshes the local chat cache when `--cache` is enabled. This is the intended second phase after a long Gemini or ChatGPT Deep Research run: wait for the research chat URL to finish, send "fass zusammen", optionally attach a file, then copy/export the final state.
 
 When you already have visible UI text from Computer Use, Peekaboo, or another capture, parse it without touching the browser:
 

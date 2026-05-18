@@ -1022,6 +1022,22 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertNotIn("--password-store=basic", args)
         self.assertNotIn("--use-mock-keychain", args)
 
+    def test_clone_cdp_launch_args_can_load_extension_paths(self):
+        module = load_module()
+
+        args = module.build_clone_cdp_launch_args(
+            {"binary_path": "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"},
+            clone_user_data="/tmp/clone/user-data",
+            profile_directory="Default",
+            port=9444,
+            headless=True,
+            initial_url="about:blank",
+            extension_paths=["/tmp/ext/saveai"],
+        )
+
+        self.assertIn("--disable-extensions-except=/tmp/ext/saveai", args)
+        self.assertIn("--load-extension=/tmp/ext/saveai", args)
+
     def test_agent_browser_profile_probe_connects_to_clone_cdp_instead_of_launching_chrome_for_testing(self):
         module = load_module()
         source = Path(tempfile.mkdtemp())
@@ -1208,6 +1224,58 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertFalse((clone_profile / "Extensions" / "big-extension" / "asset").exists())
         self.assertFalse((clone_profile / "IndexedDB" / "https_chatgpt.com_0.indexeddb.leveldb" / "000003.blob").exists())
 
+    def test_clone_can_include_selected_ai_exporter_extension(self):
+        module = load_module()
+        source = Path(tempfile.mkdtemp())
+        profile = source / "Default"
+        extension_id = module.KNOWN_EXTENSION_IDS["ai-exporter"]["ids"][0]
+        extension_dir = profile / "Extensions" / extension_id / "4.2.1_0"
+        extension_dir.mkdir(parents=True)
+        (extension_dir / "manifest.json").write_text(json.dumps({"name": "SaveAI", "version": "4.2.1"}), encoding="utf-8")
+        (profile / "Extensions" / "other" / "1").mkdir(parents=True)
+        (profile / "Extensions" / "other" / "1" / "manifest.json").write_text("{}", encoding="utf-8")
+        (profile / "Preferences").write_text("{}", encoding="utf-8")
+        (source / "Local State").write_text("{}", encoding="utf-8")
+
+        clone = module.clone_browser_profile_for_agent_browser(
+            {"user_data_dir": str(source)},
+            {"directory": "Default"},
+            Path(tempfile.mkdtemp()) / "clones",
+            run_slug="brave-default-chatgpt",
+            include_extension_ids=[extension_id],
+        )
+
+        clone_profile = Path(clone["clone_profile"])
+        self.assertTrue((clone_profile / "Extensions" / extension_id / "4.2.1_0" / "manifest.json").exists())
+        self.assertFalse((clone_profile / "Extensions" / "other" / "1" / "manifest.json").exists())
+
+    def test_discover_extensions_finds_saveai_manifest(self):
+        module = load_module()
+        source = Path(tempfile.mkdtemp())
+        profile = source / "Default"
+        extension_id = module.KNOWN_EXTENSION_IDS["ai-exporter"]["ids"][0]
+        extension_dir = profile / "Extensions" / extension_id / "4.2.1_0"
+        extension_dir.mkdir(parents=True)
+        (extension_dir / "manifest.json").write_text(
+            json.dumps({"name": "SaveAI Popup", "version": "4.2.1", "permissions": ["storage"]}),
+            encoding="utf-8",
+        )
+
+        payload = module.discover_extensions(
+            [
+                {
+                    "id": "brave",
+                    "display_name": "Brave Browser",
+                    "profiles": [{"directory": "Default", "name": "Work", "path": str(profile)}],
+                }
+            ],
+            extension_ids=[extension_id],
+        )
+
+        self.assertEqual(payload["extensions"][0]["extension"]["id"], extension_id)
+        self.assertEqual(payload["extensions"][0]["extension"]["version"], "4.2.1")
+        self.assertIn("storage", payload["extensions"][0]["extension"]["permissions"])
+
     def test_account_audit_matrix_covers_each_provider_and_parses_text_artifacts(self):
         module = load_module()
         text_root = Path(tempfile.mkdtemp())
@@ -1315,10 +1383,22 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertIn("computer-use", backends)
         self.assertIn("oracle", backends)
         self.assertIn("openai-cua", backends)
+        self.assertIn("unbrowser-local", backends)
         self.assertIn("hyperbrowser", backends)
         self.assertEqual(backends["playwright-cdp"]["scope"], "local")
         self.assertIn("@steipete/oracle", backends["oracle"]["aliases"])
+        self.assertIn("@unbrowser/local", backends["unbrowser-local"]["aliases"])
         self.assertIn("Operator", " ".join(backends["openai-cua"]["aliases"]))
+
+    def test_unbrowser_plan_outputs_current_local_package(self):
+        module = load_module()
+
+        plan = module.build_unbrowser_plan(url="https://example.test", prompt="Extract title", output="/tmp/out.json")
+
+        self.assertEqual(plan["backend"], "unbrowser-local")
+        self.assertEqual(plan["package"], "@unbrowser/local")
+        self.assertEqual(plan["commands"]["help"], ["npx", "-y", "@unbrowser/local", "--help"])
+        self.assertIn("https://example.test", plan["commands"]["browse"])
 
     def test_render_choice_table_is_human_readable(self):
         module = load_module()
@@ -1385,6 +1465,13 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertIn(".chatgpt.com", evidence["matched_hosts"])
         self.assertIn("__Secure-next-auth.session-token.0", evidence["session_cookie_names"])
         self.assertIn("https_chatgpt.com_0.indexeddb.leveldb", evidence["indexeddb_origins"])
+
+    def test_url_matches_provider_domains(self):
+        module = load_module()
+
+        self.assertTrue(module.url_matches_provider("https://gemini.google.com/app/abc", "google"))
+        self.assertTrue(module.url_matches_provider("https://auth.openai.com/login", "chatgpt"))
+        self.assertFalse(module.url_matches_provider("https://saveai.net/", "gemini"))
 
     def test_openrouter_session_evidence_detects_clerk_session_cookie(self):
         module = load_module()
@@ -1833,6 +1920,76 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertNotIn("commands", compact)
         self.assertNotIn("text", compact["output"])
         self.assertEqual(compact["output"]["text_length"], 5)
+
+    def test_workflow_followup_reopens_chat_sends_prompt_and_exports_markdown(self):
+        module = load_module()
+        source = Path(tempfile.mkdtemp())
+        profile = source / "Default"
+        profile.mkdir(parents=True)
+        (profile / "Preferences").write_text("{}", encoding="utf-8")
+        (source / "Local State").write_text("{}", encoding="utf-8")
+        root = Path(tempfile.mkdtemp())
+
+        class FakeProcess:
+            pid = 12345
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                self.terminated = True
+
+            def wait(self, timeout=None):
+                return 0
+
+        fake_process = FakeProcess()
+        original_find_port = module.find_available_port
+        original_start = module.start_clone_cdp_browser
+        original_nav = module.run_cdp_navigate
+        original_js = module.run_cdp_javascript
+        original_key = module.run_cdp_keypress
+        original_capture = module.capture_cdp_screenshot
+        module.find_available_port = lambda: 9446
+        module.start_clone_cdp_browser = lambda **kwargs: (
+            fake_process,
+            {"ok": True, "port": kwargs["port"], "launch_args": kwargs["launch_args"], "pid": fake_process.pid},
+        )
+        module.run_cdp_navigate = lambda port, url, timeout=15.0: module.subprocess.CompletedProcess(["nav"], 0, url, "")
+
+        def fake_js(port, script, timeout=15.0):
+            if "location.href" in script:
+                return module.subprocess.CompletedProcess(["js"], 0, "https://chatgpt.com/c/abc", "")
+            if "const text =" in script:
+                return module.subprocess.CompletedProcess(["js"], 0, '{"ok":true}', "")
+            return module.subprocess.CompletedProcess(["js"], 0, "ChatGPT\nIsagi yoichi\nPro\nFinal answer\nKurzfassung", "")
+
+        module.run_cdp_javascript = fake_js
+        module.run_cdp_keypress = lambda port, key, timeout=10.0: module.subprocess.CompletedProcess(["key"], 0, "ok", "")
+        module.capture_cdp_screenshot = lambda port, screenshot, timeout=20.0: (screenshot.write_bytes(b"png") or True)
+        try:
+            payload = module.agent_browser_profile_followup_run(
+                browser={"id": "brave", "binary_path": "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser", "user_data_dir": str(source)},
+                profile={"directory": "Default", "path": str(profile)},
+                provider="chatgpt",
+                chat_url="https://chatgpt.com/c/abc",
+                prompt="Fass zusammen",
+                artifact_root=root / "artifacts",
+                clone_root=root / "clones",
+                wait_seconds=1,
+                cache_root=root / "cache",
+            )
+        finally:
+            module.find_available_port = original_find_port
+            module.start_clone_cdp_browser = original_start
+            module.run_cdp_navigate = original_nav
+            module.run_cdp_javascript = original_js
+            module.run_cdp_keypress = original_key
+            module.capture_cdp_screenshot = original_capture
+
+        self.assertEqual(payload["status"], "verified")
+        self.assertTrue(Path(payload["export_markdown"]).exists())
+        self.assertTrue(Path(payload["cache"]["text_path"]).exists())
+        self.assertTrue(getattr(fake_process, "terminated", False))
 
 
 if __name__ == "__main__":

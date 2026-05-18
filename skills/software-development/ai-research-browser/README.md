@@ -43,6 +43,14 @@ The focused suite checks:
 - Grok chat and DeepSearch/Research
 - Perplexity chat and Research/Advanced Research
 
+List installed SaveAI / AI Exporter extension copies:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py extensions --ai-exporter
+```
+
+The extension command reports browser/profile, extension id, version, popup, permissions, and manifest path. Use `--include-ai-exporter` on `workflow-run`, `workflow-suite`, or `workflow-followup` when a temporary profile clone should copy/load the SaveAI extension for export-oriented tests.
+
 Run Agent Browser against disposable browser-profile clones and write E2E artifacts:
 
 ```bash
@@ -204,7 +212,18 @@ Inspect supported automation backends:
 python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py backends
 ```
 
-The local-first path is `playwright-cdp` for deterministic browser control plus `computer-use` or `peekaboo` for screenshot-backed proof. Peter Steinberger's `@steipete/oracle` is represented as `oracle`: use it for multi-model code review, consults, browser-session reattach, and session artifacts. It is not a replacement for auditing subscriptions inside your own local browser profiles. Managed alternatives such as OpenAI CUA/Operator, Claude Computer Use, Gemini Computer Use, Stagehand, Browser-Use, and Hyperbrowser are represented as comparison backends, not as replacements for your local logged-in profiles.
+The local-first path is `playwright-cdp` for deterministic browser control plus `computer-use` or `peekaboo` for screenshot-backed proof. Peter Steinberger's `@steipete/oracle` is represented as `oracle`: use it for multi-model code review, consults, browser-session reattach, and session artifacts. It is not a replacement for auditing subscriptions inside your own local browser profiles. `unbrowser-local` represents `@unbrowser/local`; use it for extraction and pattern-learning checks around pages, while provider UI actions that spend quota or start Deep Research stay in the CDP workflow so screenshots and mode/account verification remain explicit. Managed alternatives such as OpenAI CUA/Operator, Claude Computer Use, Gemini Computer Use, Stagehand, Browser-Use, and Hyperbrowser are represented as comparison backends, not as replacements for your local logged-in profiles.
+
+Generate an Unbrowser command plan:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py unbrowser-plan \
+  --url https://gemini.google.com/app?hl=de \
+  --prompt "Extract visible provider state" \
+  --output-path /tmp/unbrowser-gemini.json
+```
+
+The current Unbrowser docs point at `npx @unbrowser/local` for the local runner. Run the generated `help` command first because the local CLI surface can change independently of this skill.
 
 Show provider-specific probe hints before writing or running selectors:
 
@@ -317,6 +336,23 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 By default the suite covers ChatGPT Agent, ChatGPT Deep Research, Gemini Deep Research, Perplexity Research, Grok Research/DeepSearch, and Claude Research/Search. Use `--features chatgpt:agent,gemini:deep-research`, `--providers chatgpt,gemini`, `--max-runs 1`, or `--plan-only` to narrow or preview the queue. Use `--all-features` when you want every workflow mode implemented by `workflow-run`.
 
 Each workflow writes `status.json`, `visible-text.txt`, `output.txt`, and a screenshot under the artifact root. The JSON records the clicked feature trigger, confirmation trigger, current URL, extracted output text, account inventory, and cache metadata when `--cache` is set. Confirmation clicks are exact-control only, so generic labels such as `Start` cannot accidentally hit dictation or voice controls; if a provider keeps the feature chip selected but never renders an exact research/agent start control, the run remains `submitted` instead of being reported as started.
+
+Send a follow-up prompt into an existing provider chat, then export/cache the refreshed transcript:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py workflow-followup \
+  --browser brave \
+  --profile work \
+  --provider google \
+  --chat-url https://gemini.google.com/app/example \
+  --prompt "Fass den bisherigen Deep-Research-Report kompakt zusammen und nenne die wichtigsten Quellen." \
+  --include-ai-exporter \
+  --cache \
+  --export-markdown /tmp/gemini-followup.md \
+  --output /tmp/gemini-followup.json
+```
+
+`workflow-followup` uses the same disposable profile-clone CDP shape as `workflow-run`: it does not close or mutate existing user browser windows, sends the follow-up only when `--no-submit` is not set, records screenshot/text/status artifacts, writes a Markdown export, and refreshes the local chat cache when `--cache` is enabled. This is the intended second phase after a long Gemini or ChatGPT Deep Research run: wait for the research chat URL to finish, send "fass zusammen", then copy/export the final state.
 
 When you already have visible UI text from Computer Use, Peekaboo, or another capture, parse it without touching the browser:
 

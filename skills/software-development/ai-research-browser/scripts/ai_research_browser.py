@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 import tempfile
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -62,6 +63,14 @@ BROWSER_CANDIDATES = {
         "user_data_dir": "~/Library/Application Support/com.openai.atlas/browser-data/host",
         "default_port": 9227,
     },
+}
+
+KNOWN_EXTENSION_IDS = {
+    "ai-exporter": {
+        "ids": ["kagjkiiecagemklhmhkabbalfpbianbe"],
+        "aliases": ["saveai", "save-ai", "ai-exporter", "ai exporter"],
+        "description": "SaveAI / AI Exporter browser extension for exporting AI chats, including Notion sync.",
+    }
 }
 
 
@@ -204,6 +213,14 @@ def backend_registry() -> dict[str, dict[str, Any]]:
             "scope": "local-or-managed",
             "aliases": ["browser-use", "Playwright agent"],
             "description": "Open-source Playwright-based browser agent framework.",
+        },
+        "unbrowser-local": {
+            "scope": "local",
+            "aliases": ["Unbrowser Local", "@unbrowser/local", "npx @unbrowser/local"],
+            "description": (
+                "Local Playwright-based Unbrowser runner for page extraction and pattern learning. "
+                "Use as an extraction/check backend around provider pages; keep profile mutation in the local CDP workflow."
+            ),
         },
         "stagehand": {
             "scope": "local-or-managed",
@@ -487,6 +504,89 @@ def discover_browsers() -> list[dict[str, Any]]:
             }
         )
     return out
+
+
+def known_extension_ids(name_or_id: str) -> list[str]:
+    value = name_or_id.strip().lower()
+    if not value:
+        return []
+    for extension_name, spec in KNOWN_EXTENSION_IDS.items():
+        aliases = [extension_name, *[str(alias) for alias in spec.get("aliases", [])]]
+        if value in [alias.lower() for alias in aliases]:
+            return [str(item) for item in spec.get("ids", [])]
+    return [name_or_id.strip()]
+
+
+def extension_manifest_name(extension_version_dir: Path, manifest: dict[str, Any]) -> str:
+    raw_name = str(manifest.get("name") or "")
+    match = re.fullmatch(r"__MSG_(.+)__", raw_name)
+    if not match:
+        return raw_name
+    default_locale = str(manifest.get("default_locale") or "en")
+    messages = read_json(extension_version_dir / "_locales" / default_locale / "messages.json")
+    message = messages.get(match.group(1), {})
+    if isinstance(message, dict) and message.get("message"):
+        return str(message["message"])
+    return raw_name
+
+
+def discover_profile_extensions(
+    profile: dict[str, str],
+    *,
+    extension_ids: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    profile_root = Path(profile.get("path", "")).expanduser()
+    extension_root = profile_root / "Extensions"
+    wanted = {item.lower() for item in extension_ids or []}
+    if not extension_root.exists():
+        return []
+    records: list[dict[str, Any]] = []
+    for extension_dir in sorted(child for child in extension_root.iterdir() if child.is_dir()):
+        extension_id = extension_dir.name
+        if wanted and extension_id.lower() not in wanted:
+            continue
+        version_dirs = sorted([child for child in extension_dir.iterdir() if child.is_dir()], key=lambda p: p.name, reverse=True)
+        for version_dir in version_dirs:
+            manifest_path = version_dir / "manifest.json"
+            if not manifest_path.exists():
+                continue
+            manifest = read_json(manifest_path)
+            records.append(
+                {
+                    "id": extension_id,
+                    "name": extension_manifest_name(version_dir, manifest),
+                    "version": str(manifest.get("version") or version_dir.name),
+                    "manifest_path": str(manifest_path),
+                    "path": str(version_dir),
+                    "default_popup": str((manifest.get("action") or {}).get("default_popup") or ""),
+                    "permissions": [str(item) for item in manifest.get("permissions", []) if isinstance(item, str)],
+                    "host_permissions": [str(item) for item in manifest.get("host_permissions", []) if isinstance(item, str)],
+                }
+            )
+            break
+    return records
+
+
+def discover_extensions(
+    browsers: list[dict[str, Any]] | None = None,
+    *,
+    extension_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    for browser in browsers or discover_browsers():
+        for profile in browser.get("profiles") or []:
+            for extension in discover_profile_extensions(profile, extension_ids=extension_ids):
+                rows.append(
+                    {
+                        "browser": browser.get("id", ""),
+                        "browser_name": browser.get("display_name", ""),
+                        "profile_directory": profile.get("directory", ""),
+                        "profile_name": profile.get("name", ""),
+                        "profile_account_state": profile.get("account_state", ""),
+                        "extension": extension,
+                    }
+                )
+    return {"extensions": rows}
 
 
 def provider_url(provider: str) -> str:
@@ -2141,7 +2241,24 @@ PROFILE_CLONE_EXCLUDES = {
 }
 
 
-def should_exclude_profile_path(path: Path) -> bool:
+def is_allowed_extension_profile_path(path: Path, extension_ids: set[str]) -> bool:
+    if not extension_ids:
+        return False
+    parts = list(path.parts)
+    lower_ids = {item.lower() for item in extension_ids}
+    for root_name in ["Extensions", "Local Extension Settings", "Sync Extension Settings", "Managed Extension Settings"]:
+        if root_name in parts:
+            index = parts.index(root_name)
+            return len(parts) > index + 1 and parts[index + 1].lower() in lower_ids
+    if parts and parts[0] == "Extension State":
+        return True
+    return False
+
+
+def should_exclude_profile_path(path: Path, *, extension_ids: set[str] | None = None) -> bool:
+    allowed_extension_ids = extension_ids or set()
+    if is_allowed_extension_profile_path(path, allowed_extension_ids):
+        return False
     parts = set(path.parts)
     name = path.name
     if name.startswith("Singleton"):
@@ -2157,20 +2274,23 @@ def should_exclude_profile_path(path: Path) -> bool:
     return False
 
 
-def copy_profile_tree(src: Path, dst: Path) -> None:
+def copy_profile_tree(src: Path, dst: Path, *, extension_ids: set[str] | None = None) -> None:
     if dst.exists():
         shutil.rmtree(dst)
     dst.mkdir(parents=True, exist_ok=True)
     for item in src.rglob("*"):
         relative = item.relative_to(src)
         target = dst / relative
-        if should_exclude_profile_path(relative):
+        if should_exclude_profile_path(relative, extension_ids=extension_ids):
             continue
         if item.is_dir():
-            target.mkdir(parents=True, exist_ok=True)
+            try:
+                target.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                continue
             continue
-        target.parent.mkdir(parents=True, exist_ok=True)
         try:
+            target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(item, target)
         except OSError:
             continue
@@ -2182,6 +2302,7 @@ def clone_browser_profile_for_agent_browser(
     clone_root: Path,
     *,
     run_slug: str,
+    include_extension_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     source_user_data = Path(str(browser.get("user_data_dir", ""))).expanduser()
     profile_directory = str(profile.get("directory", "Default"))
@@ -2196,7 +2317,8 @@ def clone_browser_profile_for_agent_browser(
             "clone_profile": str(clone_profile),
         }
     clone_user_data.mkdir(parents=True, exist_ok=True)
-    copy_profile_tree(source_profile, clone_profile)
+    extension_ids = {item.lower() for item in include_extension_ids or []}
+    copy_profile_tree(source_profile, clone_profile, extension_ids=extension_ids)
     for filename in ["Local State", "First Run"]:
         source_file = source_user_data / filename
         if source_file.exists():
@@ -2210,6 +2332,7 @@ def clone_browser_profile_for_agent_browser(
         "clone_user_data": str(clone_user_data),
         "clone_profile": str(clone_profile),
         "profile_directory": profile_directory,
+        "included_extension_ids": sorted(extension_ids),
     }
 
 
@@ -2238,6 +2361,7 @@ def build_clone_cdp_launch_args(
     port: int,
     headless: bool = True,
     initial_url: str = "about:blank",
+    extension_paths: list[str] | None = None,
 ) -> list[str]:
     args = [
         str(browser.get("binary_path", "")),
@@ -2252,6 +2376,10 @@ def build_clone_cdp_launch_args(
     ]
     if headless:
         args.append("--headless=new")
+    if extension_paths:
+        extension_arg = ",".join(str(path) for path in extension_paths if path)
+        if extension_arg:
+            args.extend([f"--disable-extensions-except={extension_arg}", f"--load-extension={extension_arg}"])
     args.append(initial_url)
     return args
 
@@ -2551,6 +2679,7 @@ def agent_browser_profile_workflow_run(
     timeout: float = 90.0,
     cache_root: Path | None = None,
     refresh_cache: bool = True,
+    include_extension_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     provider_id = normalize_provider_name(provider)
     spec = provider_workflow_spec(provider_id, mode)
@@ -2574,7 +2703,13 @@ def agent_browser_profile_workflow_run(
         wait_seconds=wait_seconds,
     )
 
-    clone = clone_browser_profile_for_agent_browser(browser, profile, clone_root, run_slug=run_name)
+    clone = clone_browser_profile_for_agent_browser(
+        browser,
+        profile,
+        clone_root,
+        run_slug=run_name,
+        include_extension_ids=include_extension_ids,
+    )
     if not clone.get("ok"):
         payload = {
             **plan,
@@ -2595,6 +2730,7 @@ def agent_browser_profile_workflow_run(
         port=cdp_port,
         headless=True,
         initial_url="about:blank",
+        extension_paths=[item["path"] for item in discover_profile_extensions(profile, extension_ids=include_extension_ids)] if include_extension_ids else None,
     )
     browser_process, launch_status = start_clone_cdp_browser(
         launch_args=launch_args,
@@ -2674,6 +2810,11 @@ def agent_browser_profile_workflow_run(
     try:
         invoke("open-provider", ["open", spec["url"]])
         invoke("wait-initial", ["wait", "4000"])
+        first_url = invoke("get-url-after-open", ["get", "url"]).stdout.strip()
+        if first_url and not url_matches_provider(first_url, provider_id):
+            workflow_events.append({"event": "provider-url-retry", "from_url": first_url, "to_url": spec["url"]})
+            invoke("open-provider-retry", ["open", spec["url"]])
+            invoke("wait-initial-retry", ["wait", "4000"])
         before_eval = invoke("eval-before-text", ["eval", browser_eval_visible_text_script()])
         visible_text_parts.append(before_eval.stdout)
         before_snapshot = invoke("snapshot-before", ["snapshot", "-i", "-c"])
@@ -2923,6 +3064,237 @@ def agent_browser_profile_workflow_run(
     }
 
 
+def agent_browser_profile_followup_run(
+    *,
+    browser: dict[str, Any],
+    profile: dict[str, str],
+    provider: str,
+    chat_url: str,
+    prompt: str,
+    artifact_root: Path,
+    clone_root: Path,
+    submit: bool = True,
+    wait_seconds: int = 30,
+    timeout: float = 90.0,
+    cache_root: Path | None = None,
+    refresh_cache: bool = True,
+    include_extension_ids: list[str] | None = None,
+    export_markdown: Path | None = None,
+) -> dict[str, Any]:
+    provider_id = normalize_provider_name(provider)
+    spec = provider_workflow_spec(provider_id, "chat")
+    browser_id = normalize_browser_name(str(browser.get("id", "")))
+    profile_directory = str(profile.get("directory", "Default"))
+    run_name = f"{browser_id}-{slug(profile_directory)}-{provider_id}-followup"
+    paths = build_artifact_paths(artifact_root.expanduser(), provider=provider_id, mode="followup", browser=browser_id, profile=profile_directory)
+    paths["run_dir"].mkdir(parents=True, exist_ok=True)
+    commands: list[dict[str, Any]] = []
+    workflow_events: list[dict[str, Any]] = []
+    extension_ids = include_extension_ids or []
+    clone = clone_browser_profile_for_agent_browser(
+        browser,
+        profile,
+        clone_root,
+        run_slug=run_name,
+        include_extension_ids=extension_ids,
+    )
+    if not clone.get("ok"):
+        payload = {
+            "provider": provider_id,
+            "browser": browser_id,
+            "profile": profile_directory,
+            "chat_url": chat_url,
+            "status": "blocked",
+            "blocker": clone.get("error", "profile clone failed"),
+            "clone": clone,
+            "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        }
+        write_json(paths["status_json"], payload)
+        return {**payload, "status_json": str(paths["status_json"])}
+
+    session = f"ai-followup-{run_name}"
+    cdp_port = find_available_port()
+    launch_args = build_clone_cdp_launch_args(
+        browser,
+        clone_user_data=str(clone["clone_user_data"]),
+        profile_directory=profile_directory,
+        port=cdp_port,
+        headless=True,
+        initial_url="about:blank",
+        extension_paths=[item["path"] for item in discover_profile_extensions(profile, extension_ids=extension_ids)] if extension_ids else None,
+    )
+    browser_process, launch_status = start_clone_cdp_browser(
+        launch_args=launch_args,
+        port=cdp_port,
+        log_path=paths["run_dir"] / "browser-cdp.log",
+    )
+    if not launch_status.get("ok"):
+        terminate_process(browser_process)
+        payload = {
+            "provider": provider_id,
+            "browser": browser_id,
+            "profile": profile_directory,
+            "chat_url": chat_url,
+            "status": "blocked",
+            "blocker": "browser clone CDP launch failed",
+            "clone": clone,
+            "launch": launch_status,
+            "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        }
+        write_json(paths["status_json"], payload)
+        return {**payload, "status_json": str(paths["status_json"])}
+
+    def command_timeout(label: str, extra_args: list[str]) -> float:
+        if extra_args[:1] == ["open"]:
+            return min(timeout, 20.0)
+        if extra_args[:1] == ["eval"]:
+            return min(timeout, 15.0)
+        if extra_args[:1] == ["snapshot"]:
+            return min(timeout, 18.0)
+        if extra_args[:1] == ["wait"] and len(extra_args) > 1:
+            try:
+                return max(8.0, (int(str(extra_args[1])) / 1000.0) + 5.0)
+            except ValueError:
+                return min(timeout, 15.0)
+        return timeout
+
+    def invoke(label: str, extra_args: list[str]) -> subprocess.CompletedProcess[str]:
+        if extra_args[:1] == ["open"] and len(extra_args) > 1:
+            result = run_cdp_navigate(cdp_port, str(extra_args[1]), timeout=command_timeout(label, extra_args))
+        elif extra_args[:1] == ["wait"] and len(extra_args) > 1:
+            try:
+                milliseconds = int(str(extra_args[1]))
+            except ValueError:
+                milliseconds = 1000
+            time.sleep(max(0, milliseconds) / 1000.0)
+            result = subprocess.CompletedProcess(["sleep", str(milliseconds)], 0, f"waited {milliseconds}ms", "")
+        elif extra_args[:1] == ["eval"] and len(extra_args) > 1:
+            result = run_cdp_javascript(cdp_port, extra_args[1], timeout=command_timeout(label, extra_args))
+        elif extra_args[:1] == ["press"] and len(extra_args) > 1 and str(extra_args[1]).lower() in {"enter", "return"}:
+            result = run_cdp_keypress(cdp_port, str(extra_args[1]), timeout=command_timeout(label, extra_args))
+        elif extra_args == ["get", "url"]:
+            result = run_cdp_javascript(cdp_port, "location.href", timeout=command_timeout(label, extra_args))
+        elif extra_args[:1] == ["screenshot"] and len(extra_args) > 1:
+            ok = capture_cdp_screenshot(cdp_port, Path(extra_args[1]), timeout=min(timeout, 20.0))
+            result = subprocess.CompletedProcess(["cdp-screenshot", str(cdp_port), extra_args[1]], 0 if ok else 1, str(extra_args[1]) if ok else "", "")
+        elif extra_args[:1] == ["close"]:
+            result = subprocess.CompletedProcess(["skip-close-temp-page"], 0, "skipped: browser process terminates in finally", "")
+        else:
+            result = run_agent_browser(["--cdp", str(cdp_port), *extra_args], session=session, timeout=command_timeout(label, extra_args))
+        commands.append(
+            {
+                "label": label,
+                "args": ["agent-browser", "--session", session, "--cdp", str(cdp_port), *extra_args],
+                "returncode": result.returncode,
+                "stdout": result.stdout[-4000:],
+                "stderr": result.stderr[-4000:],
+            }
+        )
+        return result
+
+    visible_text_parts: list[str] = []
+    screenshot = paths["screenshot_png"]
+    current_url = ""
+    status = "opened"
+    try:
+        invoke("open-chat", ["open", chat_url])
+        invoke("wait-chat", ["wait", "5000"])
+        first_url = invoke("get-url-after-open", ["get", "url"]).stdout.strip()
+        if first_url and not url_matches_provider(first_url, provider_id):
+            workflow_events.append({"event": "provider-url-retry", "from_url": first_url, "to_url": chat_url})
+            invoke("open-chat-retry", ["open", chat_url])
+            invoke("wait-chat-retry", ["wait", "5000"])
+        before_eval = invoke("eval-before-text", ["eval", browser_eval_visible_text_script()])
+        visible_text_parts.append(before_eval.stdout)
+        before_snapshot = invoke("snapshot-before", ["snapshot", "-i", "-c"])
+        current_snapshot_text = before_snapshot.stdout
+        visible_text_parts.append(current_snapshot_text)
+        inventory = extract_provider_inventory(provider_id, "\n".join(visible_text_parts))
+        if inventory.get("login_state") == "signed-out-or-wall":
+            status = "signed-out-or-wall"
+        else:
+            fill_result = fill_agent_browser_composer(
+                invoke,
+                snapshot=current_snapshot_text,
+                selector=spec["composer_selector"],
+                text=prompt,
+                label="fill-followup",
+            )
+            workflow_events.append({"event": "fill-followup", "returncode": fill_result.returncode})
+            if submit and fill_result.returncode == 0:
+                invoke("submit-followup", ["press", "Enter"])
+                status = "submitted"
+                invoke("wait-after-followup", ["wait", str(max(1000, wait_seconds * 1000))])
+        after_snapshot = invoke("snapshot-after", ["snapshot", "-i", "-c"])
+        visible_text_parts.append(after_snapshot.stdout)
+        output_eval = invoke("extract-output", ["eval", browser_eval_body_and_report_script(list(spec.get("output_selectors", [])))])
+        visible_text_parts.append(output_eval.stdout)
+        current_url = invoke("get-url", ["get", "url"]).stdout.strip()
+        invoke("screenshot", ["screenshot", str(screenshot)])
+        invoke("close-temp-page", ["close"])
+    finally:
+        terminate_process(browser_process)
+
+    visible_text = "\n".join(part for part in visible_text_parts if part)
+    output = extract_workflow_output_from_text(visible_text, provider=provider_id, mode="chat")
+    if output["status"] in {"running", "complete"} and status == "submitted":
+        status = "verified" if output["status"] == "complete" else "started"
+    final_inventory = extract_provider_inventory(provider_id, visible_text)
+    if status in {"submitted", "started", "verified"} and final_inventory.get("login_state") == "signed-out-or-wall":
+        final_inventory["login_state"] = "signed-in-or-ready"
+    cache_payload = None
+    if cache_root and visible_text.strip():
+        record = save_chat_record(
+            cache_root=cache_root,
+            browser=browser_id,
+            profile=profile_directory,
+            provider=provider_id,
+            chat_url=current_url or chat_url,
+            title=f"{provider_id} follow-up",
+            text=visible_text,
+            source="agent-browser-profile-clone-followup",
+            refresh=refresh_cache,
+        )
+        cache_payload = {
+            "key": record["key"],
+            "metadata_path": str(record["metadata_path"]),
+            "text_path": str(record["text_path"]),
+            "cache_hit": record["cache_hit"],
+        }
+    (paths["run_dir"] / "visible-text.txt").write_text(visible_text, encoding="utf-8")
+    (paths["run_dir"] / "output.txt").write_text(output["text"], encoding="utf-8")
+    export_path = export_markdown.expanduser() if export_markdown else paths["run_dir"] / "chat-export.md"
+    export_path.parent.mkdir(parents=True, exist_ok=True)
+    export_path.write_text(output["text"] or visible_text, encoding="utf-8")
+    payload = {
+        "provider": provider_id,
+        "browser": browser_id,
+        "profile": profile_directory,
+        "status": status,
+        "chat_url": current_url or chat_url,
+        "followup_prompt": prompt,
+        "clone": clone,
+        "cdp_port": cdp_port,
+        "launch": launch_status,
+        "screenshot": str(screenshot) if screenshot.exists() else "",
+        "inventory": final_inventory,
+        "workflow_events": workflow_events,
+        "output": output,
+        "cache": cache_payload,
+        "export_markdown": str(export_path),
+        "extension_ids": extension_ids,
+        "commands": commands,
+        "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    }
+    write_json(paths["status_json"], payload)
+    return {
+        **payload,
+        "status_json": str(paths["status_json"]),
+        "visible_text_path": str(paths["run_dir"] / "visible-text.txt"),
+        "output_text_path": str(paths["run_dir"] / "output.txt"),
+    }
+
+
 def requested_provider_ids(raw: str = "") -> list[str]:
     providers = provider_registry()
     if not raw:
@@ -2934,6 +3306,19 @@ def requested_provider_ids(raw: str = "") -> list[str]:
             if provider_id not in providers:
                 raise ValueError(f"unknown provider: {item}")
             ids.append(provider_id)
+    return ids
+
+
+def requested_extension_ids(raw_values: list[str] | None = None, *, include_ai_exporter: bool = False) -> list[str]:
+    ids: list[str] = []
+    values = list(raw_values or [])
+    if include_ai_exporter:
+        values.append("ai-exporter")
+    for raw in values:
+        for item in str(raw).split(","):
+            for extension_id in known_extension_ids(item.strip()):
+                if extension_id and extension_id not in ids:
+                    ids.append(extension_id)
     return ids
 
 
@@ -2950,6 +3335,16 @@ def provider_session_domains(provider: str) -> list[str]:
         "grok": ["grok.com", "x.com", "x.ai"],
         "openrouter": ["openrouter.ai", "clerk.openrouter.ai"],
     }.get(normalize_provider_name(provider), [])
+
+
+def url_matches_provider(url: str, provider: str) -> bool:
+    provider_id = normalize_provider_name(provider)
+    try:
+        hostname = urllib.parse.urlparse(url).hostname or ""
+    except Exception:
+        return False
+    hostname = hostname.lower()
+    return any(hostname == domain or hostname.endswith(f".{domain}") for domain in provider_session_domains(provider_id))
 
 
 def provider_session_cookie_names(provider: str) -> list[str]:
@@ -3750,6 +4145,7 @@ def cmd_workflow_plan(args: argparse.Namespace) -> int:
 
 def cmd_workflow_run(args: argparse.Namespace) -> int:
     browser, profile = resolve_workflow_browser_profile(args)
+    extension_ids = requested_extension_ids(getattr(args, "include_extension", None), include_ai_exporter=getattr(args, "include_ai_exporter", False))
     payload = agent_browser_profile_workflow_run(
         browser=browser,
         profile=profile,
@@ -3764,11 +4160,84 @@ def cmd_workflow_run(args: argparse.Namespace) -> int:
         timeout=args.timeout,
         cache_root=Path(args.cache_root).expanduser() if args.cache else None,
         refresh_cache=not args.no_refresh_cache,
+        include_extension_ids=extension_ids,
     )
     if args.output:
         write_json(Path(args.output).expanduser(), payload)
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0 if payload.get("status") in {"opened", "submitted", "started", "verified", "captured"} else 1
+
+
+def cmd_workflow_followup(args: argparse.Namespace) -> int:
+    browser, profile = resolve_workflow_browser_profile(args)
+    prompt = workflow_prompt_from_args(args)
+    extension_ids = requested_extension_ids(args.include_extension, include_ai_exporter=args.include_ai_exporter)
+    payload = agent_browser_profile_followup_run(
+        browser=browser,
+        profile=profile,
+        provider=args.provider,
+        chat_url=args.chat_url,
+        prompt=prompt,
+        artifact_root=Path(args.artifact_root).expanduser(),
+        clone_root=Path(args.clone_root).expanduser(),
+        submit=not args.no_submit,
+        wait_seconds=args.wait_seconds,
+        timeout=args.timeout,
+        cache_root=Path(args.cache_root).expanduser() if args.cache else None,
+        refresh_cache=not args.no_refresh_cache,
+        include_extension_ids=extension_ids,
+        export_markdown=Path(args.export_markdown).expanduser() if args.export_markdown else None,
+    )
+    if args.output:
+        write_json(Path(args.output).expanduser(), payload)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0 if payload.get("status") in {"opened", "submitted", "started", "verified", "captured"} else 1
+
+
+def build_unbrowser_plan(*, url: str, prompt: str = "", output: str = "", local: bool = True) -> dict[str, Any]:
+    package = "@unbrowser/local" if local else "@unbrowser/cloud"
+    command = ["npx", "-y", package]
+    if url:
+        command.extend(["browse", url])
+    if prompt:
+        command.extend(["--prompt", prompt])
+    if output:
+        command.extend(["--output", output])
+    return {
+        "backend": "unbrowser-local" if local else "unbrowser-cloud",
+        "package": package,
+        "source": "https://www.unbrowser.ai/",
+        "commands": {
+            "help": ["npx", "-y", package, "--help"],
+            "browse": command,
+        },
+        "notes": [
+            "Unbrowser Local is useful for extraction/pattern-learning checks around pages.",
+            "Provider UI actions that spend quota or start Deep Research stay in the local CDP workflow so we can verify account, mode, and screenshots.",
+            "Run help first because the published local CLI surface can change.",
+        ],
+    }
+
+
+def cmd_unbrowser_plan(args: argparse.Namespace) -> int:
+    payload = build_unbrowser_plan(url=args.url, prompt=args.prompt, output=args.output_path, local=not args.cloud)
+    if args.output:
+        write_json(Path(args.output).expanduser(), payload)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_extensions(args: argparse.Namespace) -> int:
+    extension_ids: list[str] = []
+    if args.extension:
+        extension_ids = requested_extension_ids(args.extension)
+    if args.ai_exporter:
+        extension_ids = requested_extension_ids(extension_ids, include_ai_exporter=True)
+    payload = discover_extensions(extension_ids=extension_ids or None)
+    if args.output:
+        write_json(Path(args.output).expanduser(), payload)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
 
 
 def compact_workflow_run_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -3829,6 +4298,7 @@ def cmd_workflow_suite(args: argparse.Namespace) -> int:
     )
     artifact_root = Path(args.artifact_root).expanduser()
     clone_root = Path(args.clone_root).expanduser()
+    extension_ids = requested_extension_ids(getattr(args, "include_extension", None), include_ai_exporter=getattr(args, "include_ai_exporter", False))
     plan_payload = {
         "status": "planned",
         "artifact_root": str(artifact_root),
@@ -3880,6 +4350,7 @@ def cmd_workflow_suite(args: argparse.Namespace) -> int:
                 timeout=args.timeout,
                 cache_root=Path(args.cache_root).expanduser() if args.cache else None,
                 refresh_cache=not args.no_refresh_cache,
+                include_extension_ids=extension_ids,
             )
             run_status = str(run_payload.get("status", "unknown"))
             compact_payload = compact_workflow_run_payload(run_payload)
@@ -3991,6 +4462,16 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("discover")
     sub.add_parser("backends")
+    extensions = sub.add_parser("extensions")
+    extensions.add_argument("--extension", action="append", help="Extension id or known alias. Can be repeated or comma-separated.")
+    extensions.add_argument("--ai-exporter", action="store_true", help="Filter for the known SaveAI / AI Exporter extension id.")
+    extensions.add_argument("--output", default="")
+    unbrowser_plan = sub.add_parser("unbrowser-plan")
+    unbrowser_plan.add_argument("--url", default="")
+    unbrowser_plan.add_argument("--prompt", default="")
+    unbrowser_plan.add_argument("--output-path", default="")
+    unbrowser_plan.add_argument("--cloud", action="store_true")
+    unbrowser_plan.add_argument("--output", default="")
     probe_specs = sub.add_parser("probe-specs")
     probe_specs.add_argument("--provider", choices=provider_cli_choices(), default="")
     oracle_plan = sub.add_parser("oracle-plan")
@@ -4149,7 +4630,28 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_run.add_argument("--cache", action="store_true")
     workflow_run.add_argument("--cache-root", default=str(default_chat_cache_root()))
     workflow_run.add_argument("--no-refresh-cache", action="store_true")
+    workflow_run.add_argument("--include-extension", action="append", help="Copy/load an extension id or alias into the temporary clone.")
+    workflow_run.add_argument("--include-ai-exporter", action="store_true", help="Copy/load SaveAI / AI Exporter into the temporary clone.")
     workflow_run.add_argument("--output", default="")
+    workflow_followup = sub.add_parser("workflow-followup")
+    workflow_followup.add_argument("--artifact-root", default="/tmp/hermes-ai-research-workflow-followups")
+    workflow_followup.add_argument("--clone-root", default="/tmp/hermes-ai-research-workflow-followup-clones")
+    workflow_followup.add_argument("--browser", default="brave")
+    workflow_followup.add_argument("--profile", default="work")
+    workflow_followup.add_argument("--provider", choices=provider_cli_choices(), required=True)
+    workflow_followup.add_argument("--chat-url", required=True)
+    workflow_followup.add_argument("--prompt", default="Fass den bisherigen Deep-Research-Report kompakt zusammen und nenne die wichtigsten Quellen.")
+    workflow_followup.add_argument("--prompt-file", default="")
+    workflow_followup.add_argument("--no-submit", action="store_true", help="Fill the follow-up prompt but do not press Enter.")
+    workflow_followup.add_argument("--wait-seconds", type=int, default=30)
+    workflow_followup.add_argument("--timeout", type=float, default=90.0)
+    workflow_followup.add_argument("--cache", action="store_true")
+    workflow_followup.add_argument("--cache-root", default=str(default_chat_cache_root()))
+    workflow_followup.add_argument("--no-refresh-cache", action="store_true")
+    workflow_followup.add_argument("--include-extension", action="append", help="Copy/load an extension id or alias into the temporary clone.")
+    workflow_followup.add_argument("--include-ai-exporter", action="store_true", help="Copy/load SaveAI / AI Exporter into the temporary clone.")
+    workflow_followup.add_argument("--export-markdown", default="")
+    workflow_followup.add_argument("--output", default="")
     workflow_suite = sub.add_parser("workflow-suite")
     workflow_suite.add_argument("--artifact-root", default="/tmp/hermes-ai-research-workflow-suite")
     workflow_suite.add_argument("--clone-root", default="/tmp/hermes-ai-research-workflow-suite-clones")
@@ -4170,6 +4672,8 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_suite.add_argument("--cache", action="store_true")
     workflow_suite.add_argument("--cache-root", default=str(default_chat_cache_root()))
     workflow_suite.add_argument("--no-refresh-cache", action="store_true")
+    workflow_suite.add_argument("--include-extension", action="append", help="Copy/load an extension id or alias into each temporary clone.")
+    workflow_suite.add_argument("--include-ai-exporter", action="store_true", help="Copy/load SaveAI / AI Exporter into each temporary clone.")
     workflow_suite.add_argument("--keep-clones", action="store_true", help="Keep temporary profile clones after each suite row for debugging.")
     workflow_suite.add_argument("--output", default="")
     save_chat = sub.add_parser("save-chat")
@@ -4210,6 +4714,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_discover(args)
     if args.command == "backends":
         return cmd_backends(args)
+    if args.command == "extensions":
+        return cmd_extensions(args)
+    if args.command == "unbrowser-plan":
+        return cmd_unbrowser_plan(args)
     if args.command == "probe-specs":
         return cmd_probe_specs(args)
     if args.command == "oracle-plan":
@@ -4278,6 +4786,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_workflow_plan(args)
     if args.command == "workflow-run":
         return cmd_workflow_run(args)
+    if args.command == "workflow-followup":
+        return cmd_workflow_followup(args)
     if args.command == "workflow-suite":
         return cmd_workflow_suite(args)
     if args.command == "save-chat":

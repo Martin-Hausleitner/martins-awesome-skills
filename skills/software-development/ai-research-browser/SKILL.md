@@ -31,6 +31,8 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 - Builds a full browser x profile x provider x feature test matrix for systematic E2E runs.
 - Provides an interactive wizard that lets a human choose the installed browser, profile, provider, and feature before launching or testing.
 - Archives existing provider chats into a local cache so later runs can continue from cached transcripts or intentionally refresh by scraping again.
+- Reopens cached/existing chat URLs with `workflow-followup`, sends a follow-up such as "Fass zusammen", exports Markdown, and refreshes the local cache.
+- Discovers installed SaveAI / AI Exporter extension manifests and can copy/load selected extensions into temporary profile clones for export-oriented tests.
 - Extracts visible provider account, plan/subscription, model, quota, and usage text when a real UI snapshot is supplied.
 - Scans local profile site data for provider session evidence without reading or emitting cookie values.
 - Runs Agent Browser backed E2E probes against a CDP-enabled browser profile and records provider inventory artifacts.
@@ -39,7 +41,7 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 - Builds a focused primary feature suite for ChatGPT chat/model selection, ChatGPT Deep Research, ChatGPT Agent, Gemini Deep Research, Claude Opus, Grok chat/research, and Perplexity chat/research.
 - Runs Agent Browser against disposable browser-profile clones and records `signed-out-or-wall` when the cloned session hits login or anti-automation pages.
 - Exposes provider-specific probe hints for account menus, model selectors, tool controls, and usage/limit text.
-- Lists automation backends such as Playwright/CDP, Codex Computer Use, Peekaboo, OpenAI CUA/Operator, Claude Computer Use, Gemini Computer Use, Stagehand, Browser-Use, and Hyperbrowser.
+- Lists automation backends such as Playwright/CDP, Codex Computer Use, Peekaboo, Unbrowser Local, OpenAI CUA/Operator, Claude Computer Use, Gemini Computer Use, Stagehand, Browser-Use, and Hyperbrowser.
 - Lists Peter Steinberger's Oracle as an optional consult backend for multi-model review, browser-session reattach, Deep Research, and session artifacts.
 - Lists selectable model/tool catalogs for ChatGPT, Gemini/Google, Claude/Anthropic, Perplexity, and Grok/xAI.
 - Marks profiles as `signed-in-hidden` when browser metadata indicates account/session state but no email is exposed.
@@ -72,6 +74,20 @@ List automation backends:
 
 ```bash
 python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py backends
+```
+
+List installed SaveAI / AI Exporter extension copies:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py extensions --ai-exporter
+```
+
+Generate the current Unbrowser Local command plan:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py unbrowser-plan \
+  --url https://gemini.google.com/app?hl=de \
+  --prompt "Extract the visible provider state"
 ```
 
 List model and tool catalogs:
@@ -158,6 +174,20 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 The default suite covers ChatGPT Agent, ChatGPT Deep Research, Gemini Deep Research, Perplexity Research, Grok Research/DeepSearch, and Claude Research/Search. Use `--plan-only` before a long run, `--max-runs 1` for smoke tests, `--features provider:mode` for a hand-picked queue, and `--all-features` for every workflow mode implemented by the script.
 
 `workflow-run` launches the real browser binary headless against a disposable copy of the selected profile, connects Agent Browser through CDP, selects the provider feature, fills the custom prompt, optionally confirms the provider start/research plan, writes screenshot/text/status artifacts, and terminates only the clone process. Confirmation must use exact visible controls; do not let generic labels such as `Start` match dictation, voice, or unrelated UI. If no exact start/research control or running marker appears, keep the status at `submitted`. Do not wire workflow automation to a live user browser window unless the user explicitly requests live mutation.
+
+After a long Deep Research run has produced a chat URL, send a follow-up summary request and export/cache the current chat:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py workflow-followup \
+  --browser brave \
+  --profile work \
+  --provider google \
+  --chat-url https://gemini.google.com/app/example \
+  --prompt "Fass den Deep-Research-Report kompakt zusammen." \
+  --include-ai-exporter \
+  --cache \
+  --export-markdown /tmp/gemini-followup.md
+```
 
 Use the interactive picker:
 

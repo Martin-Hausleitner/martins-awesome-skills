@@ -531,6 +531,7 @@ def build_launch_args(
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-session-crashed-bubble",
+        "--disable-remote-fonts",
     ]
     if headless:
         args.append("--headless=new")
@@ -668,9 +669,24 @@ def execute_background_launch(plan: dict[str, Any], *, dry_run: bool = False) ->
     return {"started": True, "dry_run": False, "pid": process.pid}
 
 
+def expand_agent_browser_eval_text(text: str) -> str:
+    chunks = [text or ""]
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if len(stripped) >= 2 and stripped[0] == '"' and stripped[-1] == '"':
+            try:
+                decoded = json.loads(stripped)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(decoded, str) and decoded not in chunks:
+                chunks.append(decoded)
+    return "\n".join(chunks)
+
+
 def parse_visible_status(text: str) -> dict[str, Any]:
-    text = text or ""
+    text = expand_agent_browser_eval_text(text or "")
     account_match = re.search(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", text)
+    lines = [line.strip().strip('"') for line in text.splitlines() if line.strip()]
     model_match = re.search(r"Model:\s*([^\n]+)", text, flags=re.I)
     if not model_match:
         model_match = re.search(
@@ -693,20 +709,40 @@ def parse_visible_status(text: str) -> dict[str, Any]:
             text,
             flags=re.I,
         )
+    standalone_plan = ""
+    account_name = account_match.group(0) if account_match else ""
+    if not plan_match:
+        plan_labels = {"free", "plus", "pro", "team", "enterprise", "max", "advanced", "ultra", "supergrok", "premium", "premium+"}
+        generic_previous = {"chatgpt", "claude", "gemini", "grok", "perplexity", "recents", "more", "projects", "history"}
+        for index, line in enumerate(lines):
+            normalized = line.casefold()
+            if normalized in plan_labels:
+                standalone_plan = line
+                if not account_name and index > 0:
+                    previous = lines[index - 1].strip()
+                    if previous.casefold() not in generic_previous and not re.search(r"^(new chat|search|home|skip to content)$", previous, flags=re.I):
+                        account_name = previous
+                break
+    for index, line in enumerate(lines):
+        if line.casefold() == "create team" and index + 1 < len(lines):
+            candidate = lines[index + 1].strip()
+            if re.fullmatch(r"[A-Za-z0-9_.-]{3,40}", candidate):
+                account_name = candidate
+                break
     used_percent_match = re.search(r"(?:used|verwendet|genutzt)\D{0,20}(\d{1,3})\s*%", text, flags=re.I)
     if not used_percent_match:
         used_percent_match = re.search(r"(\d{1,3})\s*%\s*(?:used|verwendet|genutzt)", text, flags=re.I)
     remaining_percent_match = re.search(r"(\d{1,3})\s*%\s*(?:remaining|left|übrig|verbleibend)", text, flags=re.I)
     count_match = re.search(r"(\d+)\s*/\s*(\d+)\s*(?:left|remaining|übrig|verbleibend)", text, flags=re.I)
     reset_match = re.search(r"(?:resets?|reset|erneuert|setzt zurück)\s+([^\n.]+)", text, flags=re.I)
-    deep_match = re.search(r"(?:Deep research|Rechercheberichte?|Research)\D{0,40}(\d+)\s*(?:remaining|left|übrig|verbleibend)?", text, flags=re.I)
-    agent_match = re.search(r"(?:Agent tasks?|Agent)\D{0,40}(\d+)\s*(?:remaining|left|übrig|verbleibend)?", text, flags=re.I)
-    raw_plan = plan_match.group(2 if plan_match.lastindex and plan_match.lastindex >= 2 else 1).strip() if plan_match else ""
+    deep_match = re.search(r"(?:Deep research|Rechercheberichte?|Research)[^\n]{0,40}?(\d+)\s*(?:remaining|left|übrig|verbleibend)", text, flags=re.I)
+    agent_match = re.search(r"(?:Agent tasks?|Agent)[^\n]{0,40}?(\d+)\s*(?:remaining|left|übrig|verbleibend)", text, flags=re.I)
+    raw_plan = plan_match.group(2 if plan_match.lastindex and plan_match.lastindex >= 2 else 1).strip() if plan_match else standalone_plan
     plan = raw_plan
     for prefix in ["ChatGPT ", "Gemini ", "Perplexity ", "Claude ", "Google AI ", "Google One AI ", "X "]:
         plan = plan.replace(prefix, "")
     return {
-        "account": account_match.group(0) if account_match else "",
+        "account": account_name,
         "model": model_match.group(1).strip() if model_match else "",
         "plan": plan,
         "quotas": {
@@ -767,65 +803,82 @@ def extract_usage_lines(text: str) -> list[str]:
 
 
 def infer_login_state(text: str, provider: str) -> str:
-    lowered = (text or "").casefold()
-    signed_out = [
-        "sign in",
-        "log in",
-        "login",
-        "anmelden",
-        "registrieren",
-        "create account",
+    expanded = expand_agent_browser_eval_text(text or "")
+    lowered = expanded.casefold()
+    wall_markers = [
         "just a moment",
         "checking if the site connection is secure",
         "verify you are human",
         "enable javascript and cookies",
         "cloudflare",
     ]
-    if any(marker in lowered for marker in signed_out):
+    if any(marker in lowered for marker in wall_markers):
         return "signed-out-or-wall"
-    provider_markers = provider_registry().get(normalize_provider_name(provider), {}).get("mode_markers", {})
-    flattened = [marker for markers in provider_markers.values() for marker in markers]
-    if any(str(marker).casefold() in lowered for marker in flattened):
+    visible_status = parse_visible_status(expanded)
+    if visible_status.get("account") or visible_status.get("plan"):
         return "signed-in-or-ready"
-    if parse_visible_status(text).get("account") or parse_visible_status(text).get("plan"):
+    signed_out_lines = {"sign in", "log in", "login", "sign up", "anmelden", "registrieren", "create account"}
+    for raw in expanded.splitlines():
+        line = raw.strip().strip('"')
+        line = re.sub(r"^-?\s*(?:button|link)\s+", "", line, flags=re.I).strip()
+        line = re.sub(r"\s+\[ref=.*$", "", line).strip()
+        line = line.strip('"')
+        if line.casefold() in signed_out_lines:
+            return "signed-out-or-wall"
+    provider_markers = provider_registry().get(normalize_provider_name(provider), {}).get("mode_markers", {})
+    weak_brand_markers = {
+        "chatgpt",
+        "claude",
+        "gemini",
+        "grok",
+        "perplexity",
+    }
+    flattened = [
+        marker
+        for markers in provider_markers.values()
+        for marker in markers
+        if str(marker).casefold() not in weak_brand_markers
+    ]
+    if any(str(marker).casefold() in lowered for marker in flattened):
         return "signed-in-or-ready"
     return "unknown"
 
 
 def extract_provider_inventory(provider: str, text: str) -> dict[str, Any]:
     provider_id = normalize_provider_name(provider)
+    text = expand_agent_browser_eval_text(text or "")
     catalog = model_catalog().get(provider_id, {"models": [], "tools": [], "modes": []})
     specs = provider_probe_specs().get(provider_id, {})
-    visible_status = parse_visible_status(text or "")
+    visible_status = parse_visible_status(text)
     models = [
         model
         for model in catalog.get("models", [])
-        if model != "Auto" and normalized_contains(text or "", str(model))
+        if model != "Auto" and normalized_contains(text, str(model))
     ]
     tools = [
         tool
         for tool in catalog.get("tools", [])
-        if normalized_contains(text or "", str(tool))
+        if normalized_contains(text, str(tool))
     ]
     modes = {}
     for mode in provider_registry().get(provider_id, {}).get("modes", []):
         try:
-            modes[mode] = verify_visible_text(text or "", provider=provider_id, mode=str(mode))["detected"]
+            modes[mode] = verify_visible_text(text, provider=provider_id, mode=str(mode))["detected"]
         except ValueError:
             modes[mode] = False
     matched_hints = {
-        key: [hint for hint in values if normalized_contains(text or "", str(hint))]
+        key: [hint for hint in values if normalized_contains(text, str(hint))]
         for key, values in specs.items()
     }
     return {
         "provider": provider_id,
-        "login_state": infer_login_state(text or "", provider_id),
+        "login_state": infer_login_state(text, provider_id),
         "visible_status": visible_status,
         "available_models": models,
         "available_tools": tools,
         "available_modes": modes,
         "matched_hints": matched_hints,
-        "usage_lines": extract_usage_lines(text or ""),
+        "usage_lines": extract_usage_lines(text),
     }
 
 
@@ -1336,7 +1389,7 @@ def should_exclude_profile_path(path: Path) -> bool:
         return True
     if name in {"Lock", "lockfile"}:
         return True
-    if any(part in {"Crashpad", "Code Cache", "DawnCache", "GrShaderCache", "GraphiteDawnCache", "GPUCache", "ShaderCache", "Cache", "Media Cache"} for part in parts):
+    if any(part in {"Crashpad", "Code Cache", "DawnCache", "GrShaderCache", "GraphiteDawnCache", "GPUCache", "ShaderCache", "Cache", "Media Cache", "Extensions", "Extension State"} for part in parts):
         return True
     if "Service Worker" in parts and "CacheStorage" in parts:
         return True
@@ -1412,6 +1465,120 @@ def agent_browser_profile_global_args(browser: dict[str, Any], clone_user_data: 
     ]
 
 
+def find_available_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def build_clone_cdp_launch_args(
+    browser: dict[str, Any],
+    *,
+    clone_user_data: str,
+    profile_directory: str,
+    port: int,
+    headless: bool = True,
+    initial_url: str = "about:blank",
+) -> list[str]:
+    args = [
+        str(browser.get("binary_path", "")),
+        "--remote-debugging-address=127.0.0.1",
+        f"--remote-debugging-port={int(port)}",
+        f"--user-data-dir={clone_user_data}",
+        f"--profile-directory={profile_directory}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-session-crashed-bubble",
+        "--disable-remote-fonts",
+    ]
+    if headless:
+        args.append("--headless=new")
+    args.append(initial_url)
+    return args
+
+
+def start_clone_cdp_browser(
+    *,
+    launch_args: list[str],
+    port: int,
+    log_path: Path,
+    startup_timeout: float = 12.0,
+) -> tuple[subprocess.Popen[str] | None, dict[str, Any]]:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_file = log_path.open("w", encoding="utf-8")
+    try:
+        process = subprocess.Popen(launch_args, stdout=log_file, stderr=log_file, text=True, start_new_session=True)
+    except OSError as exc:
+        log_file.close()
+        return None, {"ok": False, "error": str(exc), "launch_args": launch_args, "port": port}
+    deadline = time.time() + startup_timeout
+    while time.time() < deadline:
+        if is_port_open(port):
+            log_file.close()
+            return process, {"ok": True, "pid": process.pid, "port": port, "launch_args": launch_args, "log_path": str(log_path)}
+        if process.poll() is not None:
+            break
+        time.sleep(0.2)
+    exit_code = process.poll()
+    if exit_code is None:
+        process.terminate()
+    log_file.close()
+    return process, {"ok": False, "pid": process.pid, "port": port, "exit_code": exit_code, "launch_args": launch_args, "log_path": str(log_path)}
+
+
+def terminate_process(process: subprocess.Popen[str] | None) -> None:
+    if process is None or process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+
+
+def capture_cdp_screenshot(port: int, screenshot: Path, *, timeout: float = 20.0) -> bool:
+    screenshot.parent.mkdir(parents=True, exist_ok=True)
+    script = r"""
+const [port, out] = process.argv.slice(1);
+const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
+const target = targets.find((item) => item.type === 'page' && !String(item.url || '').startsWith('about:blank')) || targets.find((item) => item.type === 'page');
+if (!target || !target.webSocketDebuggerUrl) throw new Error('No page target for CDP screenshot');
+const ws = new WebSocket(target.webSocketDebuggerUrl);
+let nextId = 0;
+const pending = new Map();
+const timer = setTimeout(() => {
+  console.error('Timed out waiting for CDP screenshot');
+  process.exit(2);
+}, 15000);
+ws.addEventListener('message', (event) => {
+  const payload = JSON.parse(event.data);
+  if (!payload.id || !pending.has(payload.id)) return;
+  const {resolve, reject} = pending.get(payload.id);
+  pending.delete(payload.id);
+  if (payload.error) reject(new Error(JSON.stringify(payload.error)));
+  else resolve(payload.result || {});
+});
+function send(method, params = {}) {
+  const id = ++nextId;
+  ws.send(JSON.stringify({id, method, params}));
+  return new Promise((resolve, reject) => pending.set(id, {resolve, reject}));
+}
+await new Promise((resolve, reject) => {
+  ws.addEventListener('open', resolve, {once: true});
+  ws.addEventListener('error', reject, {once: true});
+});
+await send('Page.enable');
+const result = await send('Page.captureScreenshot', {format: 'png', fromSurface: true, captureBeyondViewport: false});
+const fs = await import('node:fs');
+fs.writeFileSync(out, Buffer.from(result.data, 'base64'));
+clearTimeout(timer);
+ws.close();
+"""
+    result = subprocess.run(["node", "--input-type=module", "-e", script, str(int(port)), str(screenshot)], capture_output=True, text=True, timeout=timeout)
+    return result.returncode == 0 and screenshot.exists() and screenshot.stat().st_size > 0
+
+
 def agent_browser_profile_probe(
     *,
     browser: dict[str, Any],
@@ -1449,14 +1616,44 @@ def agent_browser_profile_probe(
         return {**payload, "status_json": str(paths["status_json"])}
 
     session = f"ai-{run_name}"
-    global_args = agent_browser_profile_global_args(browser, str(clone["clone_user_data"]), profile_directory)
+    cdp_port = find_available_port()
+    launch_args = build_clone_cdp_launch_args(
+        browser,
+        clone_user_data=str(clone["clone_user_data"]),
+        profile_directory=profile_directory,
+        port=cdp_port,
+        headless=True,
+        initial_url="about:blank",
+    )
+    browser_process, launch_status = start_clone_cdp_browser(
+        launch_args=launch_args,
+        port=cdp_port,
+        log_path=paths["run_dir"] / "browser-cdp.log",
+    )
+    if not launch_status.get("ok"):
+        terminate_process(browser_process)
+        payload = {
+            "provider": provider_id,
+            "mode": mode,
+            "model": model,
+            "browser": browser_id,
+            "profile": profile_directory,
+            "status": "blocked",
+            "blocker": "browser clone CDP launch failed",
+            "clone": clone,
+            "cdp_port": cdp_port,
+            "launch": launch_status,
+            "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        }
+        write_json(paths["status_json"], payload)
+        return {**payload, "status_json": str(paths["status_json"])}
 
     def invoke(label: str, extra_args: list[str], *, use_globals: bool = False) -> subprocess.CompletedProcess[str]:
-        result = run_agent_browser([*(global_args if use_globals else []), *extra_args], session=session, timeout=timeout)
+        result = run_agent_browser(["--cdp", str(cdp_port), *extra_args], session=session, timeout=timeout)
         commands.append(
             {
                 "label": label,
-                "args": ["agent-browser", "--session", session, *(global_args if use_globals else []), *extra_args],
+                "args": ["agent-browser", "--session", session, "--cdp", str(cdp_port), *extra_args],
                 "returncode": result.returncode,
                 "stdout": result.stdout[-4000:],
                 "stderr": result.stderr[-4000:],
@@ -1465,31 +1662,51 @@ def agent_browser_profile_probe(
         return result
 
     visible_text = ""
-    open_result = invoke("open", ["open", provider_url(provider_id)], use_globals=True)
-    if open_result.stdout:
-        visible_text += open_result.stdout
-    invoke("wait", ["wait", "3000"])
-    snapshot = invoke("snapshot-interactive", ["snapshot", "-i", "-c"])
-    visible_text += "\n" + snapshot.stdout
-    if open_controls:
-        hints = provider_probe_specs().get(provider_id, {})
-        for label in [*hints.get("model_hints", [])[:2], *hints.get("tool_hints", [])[:2]]:
-            invoke(f"try-open-control:{label}", ["find", "text", str(label), "click"])
-            control_snapshot = invoke(f"snapshot-after:{label}", ["snapshot", "-i", "-c"])
-            visible_text += "\n" + control_snapshot.stdout
-    screenshot = paths["screenshot_png"]
-    screenshot_result = invoke("screenshot", ["screenshot", str(screenshot)])
-    invoke("close", ["close"])
+    try:
+        open_result = invoke("open", ["open", provider_url(provider_id)], use_globals=True)
+        if open_result.stdout:
+            visible_text += open_result.stdout
+        invoke("wait", ["wait", "3000"])
+        snapshot = invoke("snapshot-interactive", ["snapshot", "-i", "-c"])
+        if snapshot.stdout:
+            visible_text += "\n" + snapshot.stdout
+        eval_text_result = invoke("eval-visible-text", ["eval", "document.body.innerText"])
+        if eval_text_result.stdout:
+            visible_text += "\n" + eval_text_result.stdout
+        if open_controls:
+            hints = provider_probe_specs().get(provider_id, {})
+            for label in [*hints.get("model_hints", [])[:2], *hints.get("tool_hints", [])[:2]]:
+                invoke(f"try-open-control:{label}", ["find", "text", str(label), "click"])
+                control_snapshot = invoke(f"snapshot-after:{label}", ["snapshot", "-i", "-c"])
+                visible_text += "\n" + control_snapshot.stdout
+        screenshot = paths["screenshot_png"]
+        screenshot_result = invoke("screenshot", ["screenshot", str(screenshot)])
+        if screenshot_result.returncode != 0:
+            cdp_screenshot_ok = capture_cdp_screenshot(cdp_port, screenshot)
+            commands.append(
+                {
+                    "label": "cdp-screenshot-fallback",
+                    "args": ["node", "Page.captureScreenshot", str(cdp_port), str(screenshot)],
+                    "returncode": 0 if cdp_screenshot_ok else 1,
+                    "stdout": str(screenshot) if cdp_screenshot_ok else "",
+                    "stderr": "",
+                }
+            )
+        invoke("close", ["close"])
+    finally:
+        terminate_process(browser_process)
 
     inventory = extract_provider_inventory(provider_id, visible_text)
     login_state = inventory.get("login_state", "unknown")
     status = "captured"
     if any(command.get("returncode") == 124 for command in commands):
         status = "timeout"
-    elif open_result.returncode != 0 or snapshot.returncode != 0:
+    elif open_result.returncode != 0 or (snapshot.returncode != 0 and not visible_text.strip()):
         status = "failed"
     elif login_state == "signed-out-or-wall":
         status = "signed-out-or-wall"
+    elif not screenshot.exists():
+        status = "captured-without-screenshot"
     payload = {
         "provider": provider_id,
         "mode": mode,
@@ -1499,7 +1716,9 @@ def agent_browser_profile_probe(
         "status": status,
         "session": session,
         "clone": clone,
-        "screenshot": str(screenshot) if screenshot.exists() and screenshot_result.returncode == 0 else "",
+        "cdp_port": cdp_port,
+        "launch": launch_status,
+        "screenshot": str(screenshot) if screenshot.exists() else "",
         "inventory": inventory,
         "verification": verify_visible_text(visible_text, provider=provider_id, mode=mode) if visible_text else None,
         "commands": commands,
@@ -2210,7 +2429,7 @@ def cmd_agent_browser_suite(args: argparse.Namespace) -> int:
     if args.output:
         write_json(Path(args.output).expanduser(), payload)
     print(json.dumps(payload, ensure_ascii=False, indent=2))
-    return 0 if all((result.get("probe_result") or {}).get("status") in {"captured", "signed-out-or-wall"} for result in results) else 1
+    return 0 if all((result.get("probe_result") or {}).get("status") in {"captured", "captured-without-screenshot", "signed-out-or-wall"} for result in results) else 1
 
 
 def cmd_agent_browser_live_suite(args: argparse.Namespace) -> int:

@@ -257,6 +257,14 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertEqual(status["quotas"]["agent_remaining"], 3)
         self.assertEqual(status["model"], "GPT-5.2 Thinking")
 
+    def test_parse_quota_ignores_accessibility_ref_ids(self):
+        module = load_module()
+
+        status = module.parse_visible_status('- link "KI Modelle für Voice-Agent" [ref=e14]\n- button "Advanced research" [ref=e53]')
+
+        self.assertIsNone(status["quotas"]["agent_remaining"])
+        self.assertIsNone(status["quotas"]["deep_research_remaining"])
+
     def test_parse_plan_and_usage_from_provider_visible_text(self):
         module = load_module()
 
@@ -290,6 +298,38 @@ class AiResearchBrowserTest(unittest.TestCase):
         for text, plan in examples.items():
             with self.subTest(text=text):
                 self.assertEqual(module.parse_visible_status(text)["plan"], plan)
+
+    def test_parse_chatgpt_profile_name_followed_by_plan(self):
+        module = load_module()
+
+        status = module.parse_visible_status("Isagi yoichi\nPro\nWhere should we begin?\nInstant")
+
+        self.assertEqual(status["account"], "Isagi yoichi")
+        self.assertEqual(status["plan"], "Pro")
+
+    def test_extract_provider_inventory_decodes_agent_browser_eval_strings(self):
+        module = load_module()
+
+        inventory = module.extract_provider_inventory(
+            "chatgpt",
+            '"Skip to content\\nChatGPT\\nIsagi yoichi\\nPro\\nWhat’s on your mind today?\\n\\nInstant"',
+        )
+
+        self.assertEqual(inventory["visible_status"]["account"], "Isagi yoichi")
+        self.assertEqual(inventory["visible_status"]["plan"], "Pro")
+        self.assertEqual(inventory["login_state"], "signed-in-or-ready")
+
+    def test_login_words_inside_history_urls_do_not_force_signed_out(self):
+        module = load_module()
+
+        inventory = module.extract_provider_inventory(
+            "perplexity",
+            "https://developer.nvidia.com/login [a@servas.ai](mailto:a@servas.ai)\n"
+            "Create team\nam5150\nDiscover\nSearch\nComputer\nModel",
+        )
+
+        self.assertEqual(inventory["login_state"], "signed-in-or-ready")
+        self.assertEqual(inventory["visible_status"]["account"], "am5150")
 
     def test_launch_args_include_selected_profile_headless_and_provider_url(self):
         module = load_module()
@@ -568,6 +608,13 @@ class AiResearchBrowserTest(unittest.TestCase):
         inventory = module.extract_provider_inventory("chatgpt", "Just a moment...\nhttps://chatgpt.com/\n(no interactive elements)")
 
         self.assertEqual(inventory["login_state"], "signed-out-or-wall")
+
+    def test_provider_title_alone_is_not_enough_to_mark_login_ready(self):
+        module = load_module()
+
+        inventory = module.extract_provider_inventory("chatgpt", "✓ ChatGPT\n  https://chatgpt.com/\n")
+
+        self.assertEqual(inventory["login_state"], "unknown")
 
     def test_cmd_probe_specs_outputs_provider_paths(self):
         module = load_module()
@@ -907,6 +954,174 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertIn("--profile-directory=Default", args[-1])
         self.assertNotIn("--user-data-dir", " ".join(args))
 
+    def test_clone_cdp_launch_args_use_real_browser_binary_and_disposable_profile(self):
+        module = load_module()
+
+        args = module.build_clone_cdp_launch_args(
+            {"binary_path": "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"},
+            clone_user_data="/tmp/clone/user-data",
+            profile_directory="Default",
+            port=9444,
+            headless=True,
+            initial_url="about:blank",
+        )
+
+        self.assertEqual(args[0], "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser")
+        self.assertIn("--remote-debugging-address=127.0.0.1", args)
+        self.assertIn("--remote-debugging-port=9444", args)
+        self.assertIn("--user-data-dir=/tmp/clone/user-data", args)
+        self.assertIn("--profile-directory=Default", args)
+        self.assertIn("--headless=new", args)
+        self.assertIn("--disable-remote-fonts", args)
+        self.assertIn("about:blank", args)
+        self.assertNotIn("--password-store=basic", args)
+        self.assertNotIn("--use-mock-keychain", args)
+
+    def test_agent_browser_profile_probe_connects_to_clone_cdp_instead_of_launching_chrome_for_testing(self):
+        module = load_module()
+        source = Path(tempfile.mkdtemp())
+        profile = source / "Default"
+        profile.mkdir(parents=True)
+        (profile / "Preferences").write_text("{}", encoding="utf-8")
+        (source / "Local State").write_text("{}", encoding="utf-8")
+        root = Path(tempfile.mkdtemp())
+
+        class FakeProcess:
+            pid = 12345
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                self.terminated = True
+
+            def wait(self, timeout=None):
+                return 0
+
+        fake_process = FakeProcess()
+        original_find_port = module.find_available_port
+        original_start = module.start_clone_cdp_browser
+        original_run = module.run_agent_browser
+        module.find_available_port = lambda: 9444
+        module.start_clone_cdp_browser = lambda **kwargs: (
+            fake_process,
+            {"ok": True, "port": kwargs["port"], "launch_args": kwargs["launch_args"], "pid": fake_process.pid},
+        )
+
+        def fake_run(args, *, session="", timeout=45.0):
+            command = ["agent-browser", *args]
+            self.assertEqual(args[:2], ["--cdp", "9444"])
+            if "snapshot" in args:
+                return module.subprocess.CompletedProcess(command, 0, stdout="ChatGPT\nSigned in as work@example.test\nMessage ChatGPT", stderr="")
+            if "screenshot" in args:
+                Path(args[-1]).write_bytes(b"png")
+            return module.subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        module.run_agent_browser = fake_run
+        try:
+            payload = module.agent_browser_profile_probe(
+                browser={
+                    "id": "brave",
+                    "binary_path": "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+                    "user_data_dir": str(source),
+                },
+                profile={"directory": "Default"},
+                provider="chatgpt",
+                mode="chat",
+                model="GPT-5.5",
+                artifact_root=root / "artifacts",
+                clone_root=root / "clones",
+            )
+        finally:
+            module.find_available_port = original_find_port
+            module.start_clone_cdp_browser = original_start
+            module.run_agent_browser = original_run
+
+        self.assertEqual(payload["status"], "captured")
+        self.assertEqual(payload["cdp_port"], 9444)
+        self.assertTrue(getattr(fake_process, "terminated", False))
+        self.assertTrue(all("--executable-path" not in " ".join(command["args"]) for command in payload["commands"]))
+
+    def test_agent_browser_profile_probe_uses_eval_text_when_snapshot_times_out(self):
+        module = load_module()
+        source = Path(tempfile.mkdtemp())
+        profile = source / "Default"
+        profile.mkdir(parents=True)
+        (profile / "Preferences").write_text("{}", encoding="utf-8")
+        (source / "Local State").write_text("{}", encoding="utf-8")
+        root = Path(tempfile.mkdtemp())
+
+        class FakeProcess:
+            pid = 12345
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                pass
+
+            def wait(self, timeout=None):
+                return 0
+
+        original_find_port = module.find_available_port
+        original_start = module.start_clone_cdp_browser
+        original_run = module.run_agent_browser
+        original_capture = module.capture_cdp_screenshot
+        module.find_available_port = lambda: 9445
+        module.start_clone_cdp_browser = lambda **kwargs: (FakeProcess(), {"ok": True, "port": kwargs["port"]})
+        module.capture_cdp_screenshot = lambda port, screenshot: False
+
+        def fake_run(args, *, session="", timeout=45.0):
+            command = ["agent-browser", *args]
+            if "snapshot" in args:
+                return module.subprocess.CompletedProcess(command, 1, stdout="", stderr="Timeout")
+            if "eval" in args:
+                return module.subprocess.CompletedProcess(command, 0, stdout="ChatGPT\nSigned in as work@example.test\nMessage ChatGPT", stderr="")
+            if "screenshot" in args:
+                return module.subprocess.CompletedProcess(command, 1, stdout="", stderr="Timeout")
+            return module.subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        module.run_agent_browser = fake_run
+        try:
+            payload = module.agent_browser_profile_probe(
+                browser={
+                    "id": "brave",
+                    "binary_path": "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+                    "user_data_dir": str(source),
+                },
+                profile={"directory": "Default"},
+                provider="chatgpt",
+                mode="chat",
+                model="GPT-5.5",
+                artifact_root=root / "artifacts",
+                clone_root=root / "clones",
+            )
+        finally:
+            module.find_available_port = original_find_port
+            module.start_clone_cdp_browser = original_start
+            module.run_agent_browser = original_run
+            module.capture_cdp_screenshot = original_capture
+
+        self.assertEqual(payload["status"], "captured-without-screenshot")
+        self.assertEqual(payload["inventory"]["visible_status"]["account"], "work@example.test")
+        self.assertTrue(any(command["label"] == "eval-visible-text" for command in payload["commands"]))
+
+    def test_cdp_screenshot_fallback_invokes_node_and_detects_output(self):
+        module = load_module()
+        root = Path(tempfile.mkdtemp())
+        screenshot = root / "screen.png"
+
+        def fake_run(command, capture_output=True, text=True, timeout=20):
+            screenshot.write_bytes(b"png")
+            return module.subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+        with mock.patch.object(module.subprocess, "run", side_effect=fake_run) as run_mock:
+            ok = module.capture_cdp_screenshot(9444, screenshot)
+
+        self.assertTrue(ok)
+        self.assertTrue(screenshot.exists())
+        self.assertIn("node", run_mock.call_args.args[0][0])
+
     def test_run_agent_browser_returns_timeout_completed_process(self):
         module = load_module()
 
@@ -924,10 +1139,12 @@ class AiResearchBrowserTest(unittest.TestCase):
         source = Path(tempfile.mkdtemp())
         profile = source / "Default"
         (profile / "Cache").mkdir(parents=True)
+        (profile / "Extensions" / "big-extension").mkdir(parents=True)
         (profile / "IndexedDB" / "https_chatgpt.com_0.indexeddb.leveldb").mkdir(parents=True)
         (profile / "Preferences").write_text("{}", encoding="utf-8")
         (profile / "SingletonLock").write_text("locked", encoding="utf-8")
         (profile / "Cache" / "entry").write_text("cache", encoding="utf-8")
+        (profile / "Extensions" / "big-extension" / "asset").write_text("extension", encoding="utf-8")
         (profile / "IndexedDB" / "https_chatgpt.com_0.indexeddb.leveldb" / "000003.blob").write_text("blob", encoding="utf-8")
         (source / "Local State").write_text("{}", encoding="utf-8")
 
@@ -943,6 +1160,7 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertTrue((Path(clone["clone_user_data"]) / "Local State").exists())
         self.assertFalse((clone_profile / "SingletonLock").exists())
         self.assertFalse((clone_profile / "Cache" / "entry").exists())
+        self.assertFalse((clone_profile / "Extensions" / "big-extension" / "asset").exists())
         self.assertFalse((clone_profile / "IndexedDB" / "https_chatgpt.com_0.indexeddb.leveldb" / "000003.blob").exists())
 
     def test_account_audit_matrix_covers_each_provider_and_parses_text_artifacts(self):

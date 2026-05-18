@@ -24,6 +24,34 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
   --output /tmp/ai-research-browser-matrix.json
 ```
 
+Build the focused paid-feature suite for the workflows that usually matter most:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py feature-suite \
+  --providers chatgpt,gemini,anthropic \
+  --json \
+  --output /tmp/hermes-ai-feature-suite-plan.json
+```
+
+The focused suite checks:
+
+- ChatGPT normal chat/model picker
+- ChatGPT Deep Research
+- ChatGPT Agent
+- Gemini Deep Research
+- Claude Opus
+
+Run Agent Browser against disposable browser-profile clones and write E2E artifacts:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py agent-browser-suite \
+  --providers chatgpt,gemini,anthropic \
+  --artifact-root /tmp/hermes-ai-research-agent-browser-e2e \
+  --clone-root /tmp/hermes-ai-research-agent-browser-clones
+```
+
+Use `--plan-only` to see the complete queue first, `--max-runs 1` for a smoke test, and `--timeout 15` to keep flaky browser clones from hanging. The clone runner records `status.json`, `visible-text.txt`, and a screenshot for each probe. It reports automation walls such as ChatGPT `Just a moment...` as `signed-out-or-wall` even when the local profile contains session cookies, so clone success is not confused with a real usable login.
+
 Use the interactive picker:
 
 ```bash
@@ -65,6 +93,7 @@ Current provider registry:
 - Claude: `chat`, `research`, `artifacts`
 - Perplexity: `chat`, `research`
 - Grok: `chat`, `research`
+- OpenRouter: `chat`, `models`, `credits`
 
 `grog` and `xai` are accepted aliases for `grok`.
 
@@ -166,6 +195,8 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 ```
 
 `e2e-probe` opens the provider URL, captures an Agent Browser accessibility snapshot, optionally opens known model/tool controls, takes a screenshot, and writes `status.json` plus `visible-text.txt`. The inventory includes inferred login state, visible account/email, plan, selected model, matched model/tool labels, available mode markers, and usage/limit lines.
+
+For non-CDP browsers, `agent-browser-suite` creates a disposable clone of the selected Chromium profile and launches Agent Browser with `--profile <clone-user-data>` plus the browser executable. This is useful as a repeatable E2E smoke test, but it is intentionally conservative: if provider cookies are present yet the cloned/headless browser lands on a sign-in or anti-automation page, the result is recorded as `signed-out-or-wall`. Use a real running browser plus Computer Use or a CDP-enabled hidden launch for final account, plan, model, and quota proof.
 
 When you already have visible UI text from Computer Use, Peekaboo, or another capture, parse it without touching the browser:
 

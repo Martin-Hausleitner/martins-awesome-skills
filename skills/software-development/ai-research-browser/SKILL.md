@@ -34,6 +34,8 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 - Extracts visible provider account, plan/subscription, model, quota, and usage text when a real UI snapshot is supplied.
 - Scans local profile site data for provider session evidence without reading or emitting cookie values.
 - Runs Agent Browser backed E2E probes against a CDP-enabled browser profile and records provider inventory artifacts.
+- Builds a focused primary feature suite for ChatGPT chat/model selection, ChatGPT Deep Research, ChatGPT Agent, Gemini Deep Research, and Claude Opus.
+- Runs Agent Browser against disposable browser-profile clones and records `signed-out-or-wall` when the cloned session hits login or anti-automation pages.
 - Exposes provider-specific probe hints for account menus, model selectors, tool controls, and usage/limit text.
 - Lists automation backends such as Playwright/CDP, Codex Computer Use, Peekaboo, OpenAI CUA/Operator, Claude Computer Use, Gemini Computer Use, Stagehand, Browser-Use, and Hyperbrowser.
 - Lists Peter Steinberger's Oracle as an optional consult backend for multi-model review, browser-session reattach, Deep Research, and session artifacts.
@@ -91,6 +93,26 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
   --json \
   --output /tmp/ai-research-browser-matrix.json
 ```
+
+Build the focused primary feature suite:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py feature-suite \
+  --providers chatgpt,gemini,anthropic \
+  --json \
+  --output /tmp/hermes-ai-feature-suite-plan.json
+```
+
+Run Agent Browser against disposable profile clones:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py agent-browser-suite \
+  --providers chatgpt,gemini,anthropic \
+  --artifact-root /tmp/hermes-ai-research-agent-browser-e2e \
+  --clone-root /tmp/hermes-ai-research-agent-browser-clones
+```
+
+Use `--plan-only` to inspect the queue first, `--max-runs 1` for a smoke test, and `--timeout 15` when a cloned browser is flaky. Treat `signed-out-or-wall` and `timeout` as real failed-login/automation-wall findings, not as success. For final account, plan, model, and quota proof, verify with a real running browser through Computer Use or a hidden CDP launch.
 
 Use the interactive picker:
 

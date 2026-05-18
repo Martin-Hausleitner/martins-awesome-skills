@@ -5,6 +5,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from unittest import mock
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
@@ -561,6 +562,13 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertTrue(inventory["available_modes"]["deep-research"])
         self.assertTrue(any("remaining" in line for line in inventory["usage_lines"]))
 
+    def test_extract_provider_inventory_classifies_cloudflare_wall_as_not_ready(self):
+        module = load_module()
+
+        inventory = module.extract_provider_inventory("chatgpt", "Just a moment...\nhttps://chatgpt.com/\n(no interactive elements)")
+
+        self.assertEqual(inventory["login_state"], "signed-out-or-wall")
+
     def test_cmd_probe_specs_outputs_provider_paths(self):
         module = load_module()
 
@@ -758,6 +766,105 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertEqual(matrix[0]["backend"], "playwright-cdp")
         self.assertEqual(matrix[0]["account_status"]["plan"], "Pro")
         self.assertEqual(matrix[0]["account_status"]["usage"]["used_percent"], 20)
+
+    def test_primary_feature_suite_focuses_requested_provider_workflows(self):
+        module = load_module()
+        root = Path(tempfile.mkdtemp())
+        con = sqlite3.connect(root / "Cookies")
+        con.execute("create table cookies(host_key text, name text)")
+        con.execute("insert into cookies(host_key, name) values (?, ?)", (".chatgpt.com", "__Secure-next-auth.session-token.0"))
+        con.commit()
+        con.close()
+        browsers = [
+            {
+                "id": "brave",
+                "display_name": "Brave Browser",
+                "profiles": [{"directory": "Default", "name": "Work", "account": "", "account_state": "signed-in-hidden", "path": str(root)}],
+            }
+        ]
+
+        suite = module.build_primary_feature_suite(browsers, providers=["chatgpt"])
+
+        self.assertEqual([row["feature"] for row in suite], ["chat", "deep-research", "agent"])
+        self.assertEqual(suite[1]["model"], "GPT-5.5 Pro")
+        self.assertIn("deep-research-tool", suite[1]["must_verify"])
+        self.assertEqual(suite[0]["status"], "queued")
+
+    def test_cmd_feature_suite_outputs_primary_targets(self):
+        module = load_module()
+        original_discover = module.discover_browsers
+        module.discover_browsers = lambda: [
+            {
+                "id": "opera",
+                "display_name": "Opera",
+                "profiles": [{"directory": "Default", "name": "Opera Default", "account": "", "account_state": "signed-in-hidden", "path": "/tmp/missing"}],
+            }
+        ]
+        try:
+            out = StringIO()
+            with redirect_stdout(out):
+                exit_code = module.main(["feature-suite", "--providers", "anthropic"])
+        finally:
+            module.discover_browsers = original_discover
+
+        payload = json.loads(out.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(len(payload), 1)
+        self.assertEqual(payload[0]["provider"], "claude")
+        self.assertEqual(payload[0]["model"], "Opus 4.7")
+
+    def test_agent_browser_profile_global_args_use_profile_not_user_data_dir_arg(self):
+        module = load_module()
+
+        args = module.agent_browser_profile_global_args(
+            {"binary_path": "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"},
+            "/tmp/clone/user-data",
+            "Default",
+        )
+
+        self.assertIn("--profile", args)
+        self.assertIn("/tmp/clone/user-data", args)
+        self.assertIn("--executable-path", args)
+        self.assertIn("--profile-directory=Default", args[-1])
+        self.assertNotIn("--user-data-dir", " ".join(args))
+
+    def test_run_agent_browser_returns_timeout_completed_process(self):
+        module = load_module()
+
+        timeout = module.subprocess.TimeoutExpired(["agent-browser"], 5)
+        timeout.stdout = b"partial"
+        with mock.patch.object(module.subprocess, "run", side_effect=timeout):
+            result = module.run_agent_browser(["snapshot"], session="test", timeout=5)
+
+        self.assertEqual(result.returncode, 124)
+        self.assertIn("partial", result.stdout)
+        self.assertIn("Timed out after 5s", result.stderr)
+
+    def test_clone_browser_profile_for_agent_browser_skips_locks_and_caches(self):
+        module = load_module()
+        source = Path(tempfile.mkdtemp())
+        profile = source / "Default"
+        (profile / "Cache").mkdir(parents=True)
+        (profile / "IndexedDB" / "https_chatgpt.com_0.indexeddb.leveldb").mkdir(parents=True)
+        (profile / "Preferences").write_text("{}", encoding="utf-8")
+        (profile / "SingletonLock").write_text("locked", encoding="utf-8")
+        (profile / "Cache" / "entry").write_text("cache", encoding="utf-8")
+        (profile / "IndexedDB" / "https_chatgpt.com_0.indexeddb.leveldb" / "000003.blob").write_text("blob", encoding="utf-8")
+        (source / "Local State").write_text("{}", encoding="utf-8")
+
+        clone = module.clone_browser_profile_for_agent_browser(
+            {"user_data_dir": str(source)},
+            {"directory": "Default"},
+            Path(tempfile.mkdtemp()) / "clones",
+            run_slug="brave-default-chatgpt",
+        )
+
+        clone_profile = Path(clone["clone_profile"])
+        self.assertTrue((clone_profile / "Preferences").exists())
+        self.assertTrue((Path(clone["clone_user_data"]) / "Local State").exists())
+        self.assertFalse((clone_profile / "SingletonLock").exists())
+        self.assertFalse((clone_profile / "Cache" / "entry").exists())
+        self.assertFalse((clone_profile / "IndexedDB" / "https_chatgpt.com_0.indexeddb.leveldb" / "000003.blob").exists())
 
     def test_account_audit_matrix_covers_each_provider_and_parses_text_artifacts(self):
         module = load_module()

@@ -259,6 +259,46 @@ def provider_probe_specs() -> dict[str, dict[str, Any]]:
     }
 
 
+def primary_feature_targets() -> list[dict[str, Any]]:
+    return [
+        {
+            "provider": "chatgpt",
+            "mode": "chat",
+            "model": "GPT-5.5",
+            "must_verify": ["login", "model-selector"],
+            "notes": "Normal ChatGPT model picker and composer readiness.",
+        },
+        {
+            "provider": "chatgpt",
+            "mode": "deep-research",
+            "model": "GPT-5.5 Pro",
+            "must_verify": ["login", "deep-research-tool", "review-plan-or-start-research"],
+            "notes": "Select Deep Research; do not spend quota unless explicitly confirmed.",
+        },
+        {
+            "provider": "chatgpt",
+            "mode": "agent",
+            "model": "GPT-5.5 Pro",
+            "must_verify": ["login", "agent-tool", "agent-review-or-take-control"],
+            "notes": "Select ChatGPT Agent/Agent tool; verify availability before execution.",
+        },
+        {
+            "provider": "gemini",
+            "mode": "deep-research",
+            "model": "Pro",
+            "must_verify": ["login", "tools-menu", "deep-research-tool", "source-settings"],
+            "notes": "Gemini Deep Research through Tools with Pro/Thinking mode when available.",
+        },
+        {
+            "provider": "claude",
+            "mode": "chat",
+            "model": "Opus 4.7",
+            "must_verify": ["login", "model-selector", "opus-selected", "usage-limit"],
+            "notes": "Claude Opus availability and plan/usage banner.",
+        },
+    ]
+
+
 def build_oracle_plan(
     *,
     prompt: str,
@@ -700,7 +740,19 @@ def extract_usage_lines(text: str) -> list[str]:
 
 def infer_login_state(text: str, provider: str) -> str:
     lowered = (text or "").casefold()
-    signed_out = ["sign in", "log in", "login", "anmelden", "registrieren", "create account"]
+    signed_out = [
+        "sign in",
+        "log in",
+        "login",
+        "anmelden",
+        "registrieren",
+        "create account",
+        "just a moment",
+        "checking if the site connection is secure",
+        "verify you are human",
+        "enable javascript and cookies",
+        "cloudflare",
+    ]
     if any(marker in lowered for marker in signed_out):
         return "signed-out-or-wall"
     provider_markers = provider_registry().get(normalize_provider_name(provider), {}).get("mode_markers", {})
@@ -749,12 +801,20 @@ def extract_provider_inventory(provider: str, text: str) -> dict[str, Any]:
     }
 
 
-def run_agent_browser(args: list[str], *, session: str = "") -> subprocess.CompletedProcess[str]:
+def run_agent_browser(args: list[str], *, session: str = "", timeout: float = 45.0) -> subprocess.CompletedProcess[str]:
     command = ["agent-browser"]
     if session:
         command.extend(["--session", session])
     command.extend(args)
-    return subprocess.run(command, capture_output=True, text=True)
+    try:
+        return subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        return subprocess.CompletedProcess(
+            command,
+            124,
+            stdout=(exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")),
+            stderr=(exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")) + f"\nTimed out after {timeout:.0f}s",
+        )
 
 
 def agent_browser_probe(
@@ -1037,6 +1097,263 @@ def build_test_matrix(
                         }
                     )
     return rows
+
+
+def build_primary_feature_suite(
+    browsers: list[dict[str, Any]],
+    *,
+    providers: list[str] | None = None,
+    include_all_features: bool = False,
+    backend: str = "agent-browser",
+) -> list[dict[str, Any]]:
+    provider_filter = {normalize_provider_name(provider) for provider in providers or []}
+    targets: list[dict[str, Any]] = []
+    if include_all_features:
+        for provider_id, provider in provider_registry().items():
+            if provider_filter and provider_id not in provider_filter:
+                continue
+            for mode in provider.get("modes", []):
+                targets.append(
+                    {
+                        "provider": provider_id,
+                        "mode": str(mode),
+                        "model": str((provider.get("models") or ["Auto"])[0]),
+                        "must_verify": ["login", "mode-marker"],
+                        "notes": "Full provider registry feature target.",
+                    }
+                )
+    else:
+        targets = [
+            target
+            for target in primary_feature_targets()
+            if not provider_filter or target["provider"] in provider_filter
+        ]
+
+    rows: list[dict[str, Any]] = []
+    for browser in browsers:
+        profiles = browser.get("profiles") or []
+        for profile in profiles:
+            for target in targets:
+                session_evidence = provider_session_evidence(profile, str(target["provider"]))
+                rows.append(
+                    {
+                        "browser": browser.get("id", ""),
+                        "browser_name": browser.get("display_name", ""),
+                        "profile_directory": profile.get("directory", ""),
+                        "profile_name": profile.get("name", ""),
+                        "profile_account": profile.get("account", ""),
+                        "profile_account_state": profile.get("account_state", ""),
+                        "provider": target["provider"],
+                        "feature": target["mode"],
+                        "model": target["model"],
+                        "provider_url": provider_url(str(target["provider"])),
+                        "backend": backend,
+                        "must_verify": target["must_verify"],
+                        "notes": target["notes"],
+                        "session_evidence": session_evidence,
+                        "status": "queued" if session_evidence.get("confidence") != "none" else "needs-login",
+                    }
+                )
+    return rows
+
+
+PROFILE_CLONE_EXCLUDES = {
+    "Singleton*",
+    "Lock",
+    "lockfile",
+    "Crashpad",
+    "Code Cache",
+    "DawnCache",
+    "GrShaderCache",
+    "GraphiteDawnCache",
+    "GPUCache",
+    "ShaderCache",
+    "Cache",
+    "Media Cache",
+    "Service Worker/CacheStorage",
+    "IndexedDB/*.blob",
+}
+
+
+def should_exclude_profile_path(path: Path) -> bool:
+    parts = set(path.parts)
+    name = path.name
+    if name.startswith("Singleton"):
+        return True
+    if name in {"Lock", "lockfile"}:
+        return True
+    if any(part in {"Crashpad", "Code Cache", "DawnCache", "GrShaderCache", "GraphiteDawnCache", "GPUCache", "ShaderCache", "Cache", "Media Cache"} for part in parts):
+        return True
+    if "Service Worker" in parts and "CacheStorage" in parts:
+        return True
+    if path.suffix == ".blob" and "IndexedDB" in parts:
+        return True
+    return False
+
+
+def copy_profile_tree(src: Path, dst: Path) -> None:
+    if dst.exists():
+        shutil.rmtree(dst)
+    dst.mkdir(parents=True, exist_ok=True)
+    for item in src.rglob("*"):
+        relative = item.relative_to(src)
+        target = dst / relative
+        if should_exclude_profile_path(relative):
+            continue
+        if item.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copy2(item, target)
+        except OSError:
+            continue
+
+
+def clone_browser_profile_for_agent_browser(
+    browser: dict[str, Any],
+    profile: dict[str, str],
+    clone_root: Path,
+    *,
+    run_slug: str,
+) -> dict[str, Any]:
+    source_user_data = Path(str(browser.get("user_data_dir", ""))).expanduser()
+    profile_directory = str(profile.get("directory", "Default"))
+    source_profile = source_user_data / profile_directory
+    clone_user_data = clone_root.expanduser() / run_slug / "user-data"
+    clone_profile = clone_user_data / profile_directory
+    if not source_profile.exists():
+        return {
+            "ok": False,
+            "error": f"profile source does not exist: {source_profile}",
+            "clone_user_data": str(clone_user_data),
+            "clone_profile": str(clone_profile),
+        }
+    clone_user_data.mkdir(parents=True, exist_ok=True)
+    copy_profile_tree(source_profile, clone_profile)
+    for filename in ["Local State", "First Run"]:
+        source_file = source_user_data / filename
+        if source_file.exists():
+            try:
+                shutil.copy2(source_file, clone_user_data / filename)
+            except OSError:
+                pass
+    return {
+        "ok": True,
+        "source_profile": str(source_profile),
+        "clone_user_data": str(clone_user_data),
+        "clone_profile": str(clone_profile),
+        "profile_directory": profile_directory,
+    }
+
+
+def agent_browser_profile_global_args(browser: dict[str, Any], clone_user_data: str, profile_directory: str) -> list[str]:
+    return [
+        "--profile",
+        clone_user_data,
+        "--executable-path",
+        str(browser.get("binary_path", "")),
+        "--args",
+        f"--profile-directory={profile_directory},--no-first-run,--no-default-browser-check",
+    ]
+
+
+def agent_browser_profile_probe(
+    *,
+    browser: dict[str, Any],
+    profile: dict[str, str],
+    provider: str,
+    mode: str,
+    model: str,
+    artifact_root: Path,
+    clone_root: Path,
+    open_controls: bool = False,
+    timeout: float = 45.0,
+) -> dict[str, Any]:
+    provider_id = normalize_provider_name(provider)
+    browser_id = normalize_browser_name(str(browser.get("id", "")))
+    profile_directory = str(profile.get("directory", "Default"))
+    run_name = f"{browser_id}-{slug(profile_directory)}-{provider_id}-{slug(mode)}"
+    paths = build_artifact_paths(artifact_root.expanduser(), provider=provider_id, mode=mode, browser=browser_id, profile=profile_directory)
+    paths["run_dir"].mkdir(parents=True, exist_ok=True)
+    commands: list[dict[str, Any]] = []
+
+    clone = clone_browser_profile_for_agent_browser(browser, profile, clone_root, run_slug=run_name)
+    if not clone.get("ok"):
+        payload = {
+            "provider": provider_id,
+            "mode": mode,
+            "model": model,
+            "browser": browser_id,
+            "profile": profile_directory,
+            "status": "blocked",
+            "blocker": clone.get("error", "profile clone failed"),
+            "clone": clone,
+            "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        }
+        write_json(paths["status_json"], payload)
+        return {**payload, "status_json": str(paths["status_json"])}
+
+    session = f"ai-{run_name}"
+    global_args = agent_browser_profile_global_args(browser, str(clone["clone_user_data"]), profile_directory)
+
+    def invoke(label: str, extra_args: list[str], *, use_globals: bool = False) -> subprocess.CompletedProcess[str]:
+        result = run_agent_browser([*(global_args if use_globals else []), *extra_args], session=session, timeout=timeout)
+        commands.append(
+            {
+                "label": label,
+                "args": ["agent-browser", "--session", session, *(global_args if use_globals else []), *extra_args],
+                "returncode": result.returncode,
+                "stdout": result.stdout[-4000:],
+                "stderr": result.stderr[-4000:],
+            }
+        )
+        return result
+
+    visible_text = ""
+    open_result = invoke("open", ["open", provider_url(provider_id)], use_globals=True)
+    if open_result.stdout:
+        visible_text += open_result.stdout
+    invoke("wait", ["wait", "3000"])
+    snapshot = invoke("snapshot-interactive", ["snapshot", "-i", "-c"])
+    visible_text += "\n" + snapshot.stdout
+    if open_controls:
+        hints = provider_probe_specs().get(provider_id, {})
+        for label in [*hints.get("model_hints", [])[:2], *hints.get("tool_hints", [])[:2]]:
+            invoke(f"try-open-control:{label}", ["find", "text", str(label), "click"])
+            control_snapshot = invoke(f"snapshot-after:{label}", ["snapshot", "-i", "-c"])
+            visible_text += "\n" + control_snapshot.stdout
+    screenshot = paths["screenshot_png"]
+    screenshot_result = invoke("screenshot", ["screenshot", str(screenshot)])
+    invoke("close", ["close"])
+
+    inventory = extract_provider_inventory(provider_id, visible_text)
+    login_state = inventory.get("login_state", "unknown")
+    status = "captured"
+    if any(command.get("returncode") == 124 for command in commands):
+        status = "timeout"
+    elif open_result.returncode != 0 or snapshot.returncode != 0:
+        status = "failed"
+    elif login_state == "signed-out-or-wall":
+        status = "signed-out-or-wall"
+    payload = {
+        "provider": provider_id,
+        "mode": mode,
+        "model": model,
+        "browser": browser_id,
+        "profile": profile_directory,
+        "status": status,
+        "session": session,
+        "clone": clone,
+        "screenshot": str(screenshot) if screenshot.exists() and screenshot_result.returncode == 0 else "",
+        "inventory": inventory,
+        "verification": verify_visible_text(visible_text, provider=provider_id, mode=mode) if visible_text else None,
+        "commands": commands,
+        "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    }
+    write_json(paths["status_json"], payload)
+    (paths["run_dir"] / "visible-text.txt").write_text(visible_text, encoding="utf-8")
+    return {**payload, "status_json": str(paths["status_json"]), "visible_text_path": str(paths["run_dir"] / "visible-text.txt")}
 
 
 def requested_provider_ids(raw: str = "") -> list[str]:
@@ -1334,6 +1651,24 @@ def cmd_matrix(args: argparse.Namespace) -> int:
     if args.output:
         write_json(Path(args.output).expanduser(), payload)
     print(json.dumps(payload if args.json else payload["matrix"], ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_feature_suite(args: argparse.Namespace) -> int:
+    providers = requested_provider_ids(args.providers) if args.providers else []
+    payload = {
+        "targets": primary_feature_targets(),
+        "browsers": discover_browsers(),
+        "suite": build_primary_feature_suite(
+            discover_browsers(),
+            providers=providers,
+            include_all_features=args.all_features,
+            backend=args.backend,
+        ),
+    }
+    if args.output:
+        write_json(Path(args.output).expanduser(), payload)
+    print(json.dumps(payload if args.json else payload["suite"], ensure_ascii=False, indent=2))
     return 0
 
 
@@ -1664,6 +1999,63 @@ def cmd_e2e_probe(args: argparse.Namespace) -> int:
     return 0 if payload["status"] == "captured" else 1
 
 
+def cmd_agent_browser_suite(args: argparse.Namespace) -> int:
+    providers = requested_provider_ids(args.providers) if args.providers else ["chatgpt", "gemini", "claude"]
+    browsers = discover_browsers()
+    selected_browser_ids = {normalize_browser_name(item.strip()) for item in args.browsers.split(",") if item.strip()}
+    if selected_browser_ids:
+        browsers = [browser for browser in browsers if browser.get("id") in selected_browser_ids]
+    rows = build_primary_feature_suite(
+        browsers,
+        providers=providers,
+        include_all_features=args.all_features,
+        backend="agent-browser-profile-clone",
+    )
+    if args.plan_only:
+        payload = {
+            "status": "planned",
+            "artifact_root": str(Path(args.artifact_root).expanduser()),
+            "clone_root": str(Path(args.clone_root).expanduser()),
+            "suite": rows,
+        }
+        if args.output:
+            write_json(Path(args.output).expanduser(), payload)
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+
+    browser_map = {browser["id"]: browser for browser in browsers}
+    results = []
+    for index, row in enumerate(rows, start=1):
+        if args.max_runs and len(results) >= args.max_runs:
+            break
+        browser = browser_map.get(str(row["browser"]))
+        if not browser:
+            continue
+        profile = resolve_profile(browser.get("profiles", []), str(row["profile_directory"]))
+        result = agent_browser_profile_probe(
+            browser=browser,
+            profile=profile,
+            provider=str(row["provider"]),
+            mode=str(row["feature"]),
+            model=str(row["model"]),
+            artifact_root=Path(args.artifact_root).expanduser(),
+            clone_root=Path(args.clone_root).expanduser(),
+            open_controls=args.open_controls,
+            timeout=args.timeout,
+        )
+        results.append({**row, "probe_result": result, "run_index": index})
+    payload = {
+        "status": "completed",
+        "artifact_root": str(Path(args.artifact_root).expanduser()),
+        "clone_root": str(Path(args.clone_root).expanduser()),
+        "results": results,
+    }
+    if args.output:
+        write_json(Path(args.output).expanduser(), payload)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0 if all((result.get("probe_result") or {}).get("status") in {"captured", "signed-out-or-wall"} for result in results) else 1
+
+
 def cmd_save_chat(args: argparse.Namespace) -> int:
     text = Path(args.text_file).expanduser().read_text(encoding="utf-8") if args.text_file else sys.stdin.read()
     record = save_chat_record(
@@ -1743,6 +2135,12 @@ def build_parser() -> argparse.ArgumentParser:
     matrix.add_argument("--json", action="store_true", help="Include discovered browsers and provider registry.")
     matrix.add_argument("--output", default="")
     matrix.add_argument("--backend", default="manual", choices=sorted(backend_registry().keys()))
+    feature_suite = sub.add_parser("feature-suite")
+    feature_suite.add_argument("--providers", default="chatgpt,gemini,claude", help="Comma-separated providers. Defaults to primary ChatGPT/Gemini/Claude targets.")
+    feature_suite.add_argument("--all-features", action="store_true", help="Use every mode in the provider registry instead of the focused primary suite.")
+    feature_suite.add_argument("--backend", default="agent-browser", choices=sorted([*backend_registry().keys(), "agent-browser", "agent-browser-profile-clone"]))
+    feature_suite.add_argument("--json", action="store_true", help="Include discovered browsers and target definitions.")
+    feature_suite.add_argument("--output", default="")
     accounts = sub.add_parser("accounts")
     accounts.add_argument("--browser", required=True)
     accounts.add_argument("--profile", default="Default")
@@ -1814,6 +2212,17 @@ def build_parser() -> argparse.ArgumentParser:
     e2e_probe.add_argument("--text-file", default="")
     e2e_probe.add_argument("--screenshot", default="")
     e2e_probe.add_argument("--open-controls", action="store_true", help="Best-effort click known model/tool controls and resnapshot.")
+    agent_suite = sub.add_parser("agent-browser-suite")
+    agent_suite.add_argument("--artifact-root", default="/tmp/hermes-ai-research-agent-browser-e2e")
+    agent_suite.add_argument("--clone-root", default="/tmp/hermes-ai-research-agent-browser-clones")
+    agent_suite.add_argument("--providers", default="chatgpt,gemini,claude")
+    agent_suite.add_argument("--browsers", default="", help="Comma-separated browser ids. Defaults to every discovered browser.")
+    agent_suite.add_argument("--all-features", action="store_true")
+    agent_suite.add_argument("--open-controls", action="store_true")
+    agent_suite.add_argument("--plan-only", action="store_true")
+    agent_suite.add_argument("--max-runs", type=int, default=0, help="Limit probe count for smoke tests.")
+    agent_suite.add_argument("--timeout", type=float, default=45.0, help="Per Agent Browser command timeout in seconds.")
+    agent_suite.add_argument("--output", default="")
     save_chat = sub.add_parser("save-chat")
     save_chat.add_argument("--cache-root", default=str(default_chat_cache_root()))
     save_chat.add_argument("--browser", required=True)
@@ -1860,6 +2269,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_models(args)
     if args.command == "matrix":
         return cmd_matrix(args)
+    if args.command == "feature-suite":
+        return cmd_feature_suite(args)
     if args.command == "accounts":
         return cmd_accounts(args)
     if args.command == "wizard":
@@ -1908,6 +2319,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_record_e2e(args)
     if args.command == "e2e-probe":
         return cmd_e2e_probe(args)
+    if args.command == "agent-browser-suite":
+        return cmd_agent_browser_suite(args)
     if args.command == "save-chat":
         return cmd_save_chat(args)
     if args.command == "chat-cache":

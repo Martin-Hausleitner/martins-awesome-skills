@@ -1002,17 +1002,21 @@ def provider_workflow_specs() -> dict[str, dict[str, dict[str, Any]]]:
             "deep-research": {
                 "feature_triggers": ["Deep research", "Deep Research"],
                 "menu_triggers": ["Add files and more", "Tools"],
+                "pre_prompt_triggers": [],
                 "slash_triggers": ["/Deepresearch", "/deep research"],
                 "confirmation_triggers": ["Start research", "Create report", "Start", "Begin"],
-                "running_markers": ["Researching", "Searching", "Creating report", "Sources"],
-                "completion_markers": ["Research complete", "Sources", "Final answer", "Done"],
+                "pre_confirm_wait_seconds": 45,
+                "running_markers": ["Researching", "Searching", "Creating report"],
+                "completion_markers": ["Research complete", "Final answer", "Done"],
                 "output_selectors": ["main", "[data-testid='conversation-turn']", "article"],
             },
             "agent": {
                 "feature_triggers": ["Agent", "ChatGPT agent", "Use agent"],
                 "menu_triggers": ["Add files and more", "Tools"],
+                "pre_prompt_triggers": [],
                 "slash_triggers": ["/agent"],
                 "confirmation_triggers": ["Start", "Take control", "Allow", "Confirm"],
+                "pre_confirm_wait_seconds": 12,
                 "running_markers": ["Agent", "Taking action", "Working", "Running"],
                 "completion_markers": ["Done", "Finished", "Completed", "Task complete"],
                 "output_selectors": ["main", "[data-testid='conversation-turn']", "article"],
@@ -1030,8 +1034,10 @@ def provider_workflow_specs() -> dict[str, dict[str, dict[str, Any]]]:
             "deep-research": {
                 "feature_triggers": ["Deep Research", "Deep research", "Recherche"],
                 "menu_triggers": ["Tools", "Canvas"],
+                "pre_prompt_triggers": [],
                 "slash_triggers": [],
                 "confirmation_triggers": ["Start research", "Recherche starten", "Starten", "Create plan"],
+                "pre_confirm_wait_seconds": 45,
                 "running_markers": ["Creating plan", "Plan erstellen", "Researching", "Analysiere Ergebnisse", "Erstelle Bericht"],
                 "completion_markers": ["Research complete", "Recherche fertig", "Ich bin mit deiner Recherche fertig", "Abgeschlossen"],
                 "output_selectors": ["#extended-response-markdown-content", "message-content", "main"],
@@ -1039,8 +1045,10 @@ def provider_workflow_specs() -> dict[str, dict[str, dict[str, Any]]]:
             "agent": {
                 "feature_triggers": ["Agent"],
                 "menu_triggers": ["Tools", "Canvas"],
+                "pre_prompt_triggers": [],
                 "slash_triggers": [],
                 "confirmation_triggers": ["Confirm", "Bestätigen", "Start", "Allow"],
+                "pre_confirm_wait_seconds": 20,
                 "running_markers": ["Agent", "Plan", "Working"],
                 "completion_markers": ["Done", "Fertig", "Completed"],
                 "output_selectors": ["message-content", "main"],
@@ -1058,8 +1066,10 @@ def provider_workflow_specs() -> dict[str, dict[str, dict[str, Any]]]:
             "research": {
                 "feature_triggers": ["Research", "Deep Research", "Pro Search"],
                 "menu_triggers": ["Search", "Focus", "Sources"],
+                "pre_prompt_triggers": [],
                 "slash_triggers": [],
                 "confirmation_triggers": ["Start", "Submit"],
+                "pre_confirm_wait_seconds": 12,
                 "running_markers": ["Researching", "Searching", "Sources"],
                 "completion_markers": ["Sources", "Answer", "Completed"],
                 "output_selectors": ["main", "article"],
@@ -1076,9 +1086,11 @@ def provider_workflow_specs() -> dict[str, dict[str, dict[str, Any]]]:
             },
             "research": {
                 "feature_triggers": ["DeepSearch", "Deep Search", "Search", "Think"],
-                "menu_triggers": ["Search", "Tools"],
+                "menu_triggers": [],
+                "pre_prompt_triggers": ["New Chat"],
                 "slash_triggers": [],
                 "confirmation_triggers": ["Start", "Submit"],
+                "pre_confirm_wait_seconds": 12,
                 "running_markers": ["DeepSearch", "Searching", "Thinking"],
                 "completion_markers": ["Sources", "Answer", "Completed"],
                 "output_selectors": ["main", "article"],
@@ -1095,8 +1107,10 @@ def provider_workflow_specs() -> dict[str, dict[str, dict[str, Any]]]:
             },
             "research": {
                 "feature_triggers": ["Research", "Search"],
+                "pre_prompt_triggers": [],
                 "slash_triggers": [],
                 "confirmation_triggers": ["Start", "Continue"],
+                "pre_confirm_wait_seconds": 20,
                 "running_markers": ["Research", "Searching", "Sources"],
                 "completion_markers": ["Sources", "Done", "Completed"],
                 "output_selectors": ["main", "article"],
@@ -1123,6 +1137,9 @@ def provider_workflow_spec(provider: str, mode: str) -> dict[str, Any]:
     spec = dict(provider_specs[mode_id])
     spec["provider"] = provider_id
     spec["mode"] = mode_id
+    spec.setdefault("menu_triggers", [])
+    spec.setdefault("pre_prompt_triggers", [])
+    spec.setdefault("pre_confirm_wait_seconds", 12)
     spec["composer_selector"] = provider_composer_selector(provider_id)
     spec["url"] = provider_url(provider_id)
     return spec
@@ -1150,13 +1167,23 @@ def build_ai_workflow_plan(
         {"label": "capture-before", "tool": "snapshot+visible-text+screenshot"},
     ]
     if spec.get("feature_triggers"):
-        actions.append({"label": "open-feature-menu", "triggers": spec.get("menu_triggers", [])})
+        if spec.get("pre_prompt_triggers"):
+            actions.append({"label": "pre-prompt-trigger", "triggers": spec.get("pre_prompt_triggers", [])})
+        if spec.get("menu_triggers"):
+            actions.append({"label": "open-feature-menu", "triggers": spec.get("menu_triggers", [])})
         actions.append({"label": "select-feature", "triggers": spec["feature_triggers"], "slash_fallbacks": spec.get("slash_triggers", [])})
     actions.append({"label": "fill-prompt", "composer_selector": spec["composer_selector"], "prompt_preview": prompt[:160]})
     if submit:
         actions.append({"label": "submit-prompt", "key": "Enter"})
     if submit and confirm_start and spec.get("confirmation_triggers"):
-        actions.append({"label": "confirm-start", "triggers": spec["confirmation_triggers"]})
+        actions.append(
+            {
+                "label": "confirm-start",
+                "triggers": spec["confirmation_triggers"],
+                "poll_seconds": spec.get("pre_confirm_wait_seconds", 12),
+                "exact_controls_only": True,
+            }
+        )
     actions.append({"label": "wait-for-run", "seconds": wait_seconds, "markers": spec.get("running_markers", [])})
     actions.append({"label": "extract-output", "selectors": spec.get("output_selectors", [])})
     return {
@@ -1228,6 +1255,55 @@ def browser_eval_body_and_report_script(selectors: list[str]) -> str:
     )
 
 
+def wait_milliseconds(seconds: float, *, minimum_ms: int = 1000, maximum_ms: int | None = None) -> str:
+    milliseconds = int(round(seconds * 1000))
+    if maximum_ms is not None:
+        milliseconds = min(milliseconds, maximum_ms)
+    return str(max(minimum_ms, milliseconds))
+
+
+def composer_js_fill_script(text: str) -> str:
+    text_json = json.dumps(text)
+    return (
+        "(() => {"
+        f"const text = {text_json};"
+        "const selectors = ['textarea', 'input[type=\"text\"]', '[contenteditable=\"true\"]', '[role=\"textbox\"]'];"
+        "const seen = new Set();"
+        "const candidates = [];"
+        "for (const selector of selectors) {"
+        "  for (const el of document.querySelectorAll(selector)) {"
+        "    if (seen.has(el)) continue;"
+        "    seen.add(el);"
+        "    const rect = el.getBoundingClientRect();"
+        "    const style = window.getComputedStyle(el);"
+        "    const visible = rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';"
+        "    const disabled = el.disabled || el.getAttribute('aria-disabled') === 'true';"
+        "    if (visible && !disabled) candidates.push({el, rect});"
+        "  }"
+        "}"
+        "if (!candidates.length) return {ok:false, reason:'no-composer'};"
+        "candidates.sort((a, b) => (b.rect.bottom - a.rect.bottom) || ((b.rect.width * b.rect.height) - (a.rect.width * a.rect.height)));"
+        "const el = candidates[0].el;"
+        "el.focus();"
+        "if (el.isContentEditable) {"
+        "  el.innerText = text;"
+        "  const range = document.createRange();"
+        "  range.selectNodeContents(el);"
+        "  range.collapse(false);"
+        "  const selection = window.getSelection();"
+        "  selection.removeAllRanges();"
+        "  selection.addRange(range);"
+        "} else {"
+        "  el.value = text;"
+        "  if (typeof el.setSelectionRange === 'function') el.setSelectionRange(text.length, text.length);"
+        "}"
+        "el.dispatchEvent(new InputEvent('input', {bubbles:true, inputType:'insertText', data:text}));"
+        "el.dispatchEvent(new Event('change', {bubbles:true}));"
+        "return {ok:true, tag:el.tagName, role:el.getAttribute('role') || '', textLength:text.length};"
+        "})()"
+    )
+
+
 def find_snapshot_ref(
     snapshot: str,
     label: str,
@@ -1252,6 +1328,19 @@ def find_snapshot_ref(
             if any(blocked in full_label for blocked in ["dictation", "voice"]):
                 continue
             return match.group(1)
+    return ""
+
+
+def find_confirmation_ref(snapshot: str, labels: list[str]) -> str:
+    for label in labels:
+        ref = find_snapshot_ref(
+            snapshot,
+            str(label),
+            roles=("button", "menuitem", "menuitemradio", "option"),
+            exact_only=True,
+        )
+        if ref:
+            return ref
     return ""
 
 
@@ -2044,8 +2133,13 @@ def fill_agent_browser_composer(
 ) -> subprocess.CompletedProcess[str]:
     ref = find_composer_ref(snapshot)
     if ref:
-        return invoke(label, ["fill", f"@{ref}", text])
-    return invoke(label, ["fill", selector, text])
+        result = invoke(label, ["fill", f"@{ref}", text])
+        if result.returncode == 0:
+            return result
+    result = invoke(label, ["fill", selector, text])
+    if result.returncode == 0:
+        return result
+    return invoke(f"{label}-js-fallback", ["eval", composer_js_fill_script(text)])
 
 
 def agent_browser_profile_workflow_run(
@@ -2157,6 +2251,19 @@ def agent_browser_profile_workflow_run(
         else:
             status = "opened"
             feature_result = {"clicked": False, "label": "", "attempts": []}
+            if spec.get("pre_prompt_triggers"):
+                pre_prompt_result = click_first_agent_browser_text(
+                    invoke,
+                    list(spec.get("pre_prompt_triggers", [])),
+                    command_log_label="pre-prompt-trigger",
+                    snapshot=current_snapshot_text,
+                )
+                workflow_events.append({"event": "pre-prompt-trigger", **pre_prompt_result})
+                if pre_prompt_result.get("clicked"):
+                    invoke("wait-after-pre-prompt-trigger", ["wait", "1000"])
+                    pre_prompt_snapshot = invoke("snapshot-after-pre-prompt-trigger", ["snapshot", "-i", "-c"])
+                    current_snapshot_text = pre_prompt_snapshot.stdout or current_snapshot_text
+                    visible_text_parts.append(current_snapshot_text)
             if spec.get("feature_triggers"):
                 menu_result = click_first_agent_browser_text(
                     invoke,
@@ -2204,19 +2311,70 @@ def agent_browser_profile_workflow_run(
             if submit and fill_result.returncode == 0:
                 invoke("submit-prompt", ["press", "Enter"])
                 status = "submitted"
-                invoke("wait-after-submit", ["wait", str(max(1000, min(wait_seconds, 12) * 1000))])
+                pre_confirm_wait_seconds = int(spec.get("pre_confirm_wait_seconds", 12))
+                invoke("wait-after-submit", ["wait", str(max(1000, min(wait_seconds, 8) * 1000))])
                 if confirm_start and spec.get("confirmation_triggers"):
-                    confirm_snapshot = invoke("snapshot-before-confirm", ["snapshot", "-i", "-c"])
-                    current_snapshot_text = confirm_snapshot.stdout or current_snapshot_text
-                    visible_text_parts.append(current_snapshot_text)
-                    confirm_result = click_first_agent_browser_text(
-                        invoke,
-                        list(spec["confirmation_triggers"]),
-                        command_log_label="confirm-start",
-                        snapshot=current_snapshot_text,
-                    )
+                    confirm_attempts: list[dict[str, Any]] = []
+                    confirm_result: dict[str, Any] = {"clicked": False, "label": "", "ref": "", "attempts": confirm_attempts}
+                    confirm_deadline = time.monotonic() + max(1, pre_confirm_wait_seconds)
+                    confirm_index = 0
+                    while True:
+                        confirm_snapshot = invoke(f"snapshot-before-confirm-{confirm_index}", ["snapshot", "-i", "-c"])
+                        current_snapshot_text = confirm_snapshot.stdout or current_snapshot_text
+                        visible_text_parts.append(current_snapshot_text)
+                        exact_ref = find_confirmation_ref(current_snapshot_text, list(spec["confirmation_triggers"]))
+                        exact_label = ""
+                        if exact_ref:
+                            for trigger_label in spec["confirmation_triggers"]:
+                                if find_snapshot_ref(
+                                    current_snapshot_text,
+                                    str(trigger_label),
+                                    roles=("button", "menuitem", "menuitemradio", "option"),
+                                    exact_only=True,
+                                ) == exact_ref:
+                                    exact_label = str(trigger_label)
+                                    break
+                            click_result = invoke(f"confirm-start:{exact_label or exact_ref}", ["click", f"@{exact_ref}"])
+                            confirm_attempts.append({"label": exact_label, "ref": exact_ref, "returncode": click_result.returncode})
+                            if click_result.returncode == 0:
+                                confirm_result = {
+                                    "clicked": True,
+                                    "label": exact_label,
+                                    "ref": exact_ref,
+                                    "attempts": confirm_attempts,
+                                }
+                                break
+                        else:
+                            marker_probe = extract_workflow_output_from_text(
+                                current_snapshot_text,
+                                provider=provider_id,
+                                mode=spec["mode"],
+                            )
+                            confirm_attempts.append(
+                                {
+                                    "label": "",
+                                    "returncode": 1,
+                                    "skipped": "no-exact-confirmation-control",
+                                    "marker_status": marker_probe["status"],
+                                    "running_markers_found": marker_probe.get("running_markers_found", []),
+                                }
+                            )
+                            if marker_probe["status"] == "running" and marker_probe.get("running_markers_found"):
+                                confirm_result = {
+                                    "clicked": False,
+                                    "label": "",
+                                    "ref": "",
+                                    "running_marker_seen": True,
+                                    "attempts": confirm_attempts,
+                                }
+                                break
+                        remaining = confirm_deadline - time.monotonic()
+                        if remaining <= 0:
+                            break
+                        confirm_index += 1
+                        invoke(f"wait-before-confirm-{confirm_index}", ["wait", wait_milliseconds(remaining, maximum_ms=3000)])
                     workflow_events.append({"event": "confirm-start", **confirm_result})
-                    if confirm_result.get("clicked"):
+                    if confirm_result.get("clicked") or confirm_result.get("running_marker_seen"):
                         status = "started"
                         invoke("wait-after-confirm", ["wait", str(max(1000, min(wait_seconds, 30) * 1000))])
 

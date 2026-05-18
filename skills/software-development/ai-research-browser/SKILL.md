@@ -143,7 +143,7 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
   --cache
 ```
 
-`workflow-run` launches the real browser binary headless against a disposable copy of the selected profile, connects Agent Browser through CDP, selects the provider feature, fills the custom prompt, optionally confirms the provider start/research plan, writes screenshot/text/status artifacts, and terminates only the clone process. Do not wire workflow automation to a live user browser window unless the user explicitly requests live mutation.
+`workflow-run` launches the real browser binary headless against a disposable copy of the selected profile, connects Agent Browser through CDP, selects the provider feature, fills the custom prompt, optionally confirms the provider start/research plan, writes screenshot/text/status artifacts, and terminates only the clone process. Confirmation must use exact visible controls; do not let generic labels such as `Start` match dictation, voice, or unrelated UI. If no exact start/research control or running marker appears, keep the status at `submitted`. Do not wire workflow automation to a live user browser window unless the user explicitly requests live mutation.
 
 Use the interactive picker:
 

@@ -1542,14 +1542,18 @@ class AiResearchBrowserTest(unittest.TestCase):
         chatgpt_agent = module.provider_workflow_spec("chatgpt", "agent")
         gemini_research = module.provider_workflow_spec("google", "deep-research")
         perplexity_research = module.provider_workflow_spec("perplexity", "research")
+        grok_research = module.provider_workflow_spec("grok", "research")
 
         self.assertIn("Deep research", chatgpt_research["feature_triggers"])
         self.assertIn("/Deepresearch", chatgpt_research["slash_triggers"])
+        self.assertGreaterEqual(chatgpt_research["pre_confirm_wait_seconds"], 30)
         self.assertIn("Agent", chatgpt_agent["feature_triggers"])
         self.assertIn("/agent", chatgpt_agent["slash_triggers"])
         self.assertIn("Deep Research", gemini_research["feature_triggers"])
         self.assertIn("Start research", gemini_research["confirmation_triggers"])
         self.assertIn("Research", perplexity_research["feature_triggers"])
+        self.assertIn("New Chat", grok_research["pre_prompt_triggers"])
+        self.assertEqual(grok_research["menu_triggers"], [])
 
     def test_build_workflow_plan_uses_clone_cdp_and_preserves_live_browser(self):
         module = load_module()
@@ -1603,6 +1607,33 @@ class AiResearchBrowserTest(unittest.TestCase):
 
         self.assertEqual(module.find_snapshot_ref(snapshot, "Start", roles=("button",)), "")
 
+    def test_exact_confirmation_ref_accepts_only_real_start_controls(self):
+        module = load_module()
+        snapshot = "\n".join(
+            [
+                '- button "Start dictation" [ref=e47]',
+                '- button "Start research" [ref=e51]',
+            ]
+        )
+
+        self.assertEqual(module.find_confirmation_ref(snapshot, ["Start research", "Start"]), "e51")
+
+    def test_composer_js_fill_script_includes_prompt_and_dispatches_input(self):
+        module = load_module()
+
+        script = module.composer_js_fill_script("hello")
+
+        self.assertIn("hello", script)
+        self.assertIn("InputEvent", script)
+        self.assertIn("contenteditable", script)
+
+    def test_wait_milliseconds_returns_integer_agent_browser_wait_arg(self):
+        module = load_module()
+
+        self.assertEqual(module.wait_milliseconds(1.671, maximum_ms=3000), "1671")
+        self.assertEqual(module.wait_milliseconds(0.2, maximum_ms=3000), "1000")
+        self.assertEqual(module.wait_milliseconds(9.0, maximum_ms=3000), "3000")
+
     def test_extract_workflow_output_prefers_provider_report_selectors(self):
         module = load_module()
 
@@ -1619,6 +1650,18 @@ class AiResearchBrowserTest(unittest.TestCase):
 
         self.assertEqual(extracted["status"], "complete")
         self.assertIn("The result text", extracted["text"])
+
+    def test_chatgpt_deep_research_sources_ui_alone_is_not_complete(self):
+        module = load_module()
+
+        extracted = module.extract_workflow_output_from_text(
+            "Deep research\nSites, search the web, no sites saved\nSources",
+            provider="chatgpt",
+            mode="deep-research",
+        )
+
+        self.assertEqual(extracted["status"], "captured")
+        self.assertEqual(extracted["completion_markers_found"], [])
 
     def test_cmd_workflow_plan_outputs_safe_json(self):
         module = load_module()

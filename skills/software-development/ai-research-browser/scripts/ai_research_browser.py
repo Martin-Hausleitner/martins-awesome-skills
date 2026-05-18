@@ -914,13 +914,193 @@ def extract_provider_inventory(provider: str, text: str) -> dict[str, Any]:
     }
 
 
+def agent_browser_command() -> str:
+    configured = os.environ.get("HERMES_AGENT_BROWSER") or os.environ.get("AGENT_BROWSER")
+    if configured:
+        return configured
+    resolved = shutil.which("agent-browser")
+    if resolved:
+        return resolved
+    for candidate in [
+        "/opt/homebrew/bin/agent-browser",
+        "/usr/local/bin/agent-browser",
+        str(Path.home() / ".local/bin/agent-browser"),
+        str(Path.home() / ".hermes/hermes-agent/node_modules/agent-browser/bin/agent-browser-darwin-arm64"),
+    ]:
+        if Path(candidate).exists():
+            return candidate
+    return "agent-browser"
+
+
 def run_agent_browser(args: list[str], *, session: str = "", timeout: float = 45.0) -> subprocess.CompletedProcess[str]:
-    command = ["agent-browser"]
+    command = [agent_browser_command()]
     if session:
         command.extend(["--session", session])
     command.extend(args)
     try:
         return subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+    except FileNotFoundError as exc:
+        return subprocess.CompletedProcess(command, 127, "", str(exc))
+    except subprocess.TimeoutExpired as exc:
+        return subprocess.CompletedProcess(
+            command,
+            124,
+            stdout=(exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")),
+            stderr=(exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")) + f"\nTimed out after {timeout:.0f}s",
+        )
+
+
+def run_cdp_javascript(port: int, javascript: str, *, timeout: float = 15.0) -> subprocess.CompletedProcess[str]:
+    bridge = r"""
+const [port, expression] = process.argv.slice(1);
+const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
+const target = targets.find((item) => item.type === 'page' && !String(item.url || '').startsWith('about:blank')) || targets.find((item) => item.type === 'page');
+if (!target || !target.webSocketDebuggerUrl) throw new Error('No page target for CDP eval');
+const ws = new WebSocket(target.webSocketDebuggerUrl);
+let nextId = 0;
+const pending = new Map();
+const timer = setTimeout(() => {
+  console.error('Timed out waiting for CDP eval');
+  process.exit(2);
+}, Math.max(1000, Math.floor(Number(process.env.HERMES_CDP_TIMEOUT_MS || '15000'))));
+ws.addEventListener('message', (event) => {
+  const payload = JSON.parse(event.data);
+  if (!payload.id || !pending.has(payload.id)) return;
+  const {resolve, reject} = pending.get(payload.id);
+  pending.delete(payload.id);
+  if (payload.error) reject(new Error(JSON.stringify(payload.error)));
+  else resolve(payload.result || {});
+});
+function send(method, params = {}) {
+  const id = ++nextId;
+  ws.send(JSON.stringify({id, method, params}));
+  return new Promise((resolve, reject) => pending.set(id, {resolve, reject}));
+}
+await new Promise((resolve, reject) => {
+  ws.addEventListener('open', resolve, {once: true});
+  ws.addEventListener('error', reject, {once: true});
+});
+await send('Runtime.enable');
+const result = await send('Runtime.evaluate', {
+  expression,
+  awaitPromise: true,
+  returnByValue: true,
+  userGesture: true,
+});
+clearTimeout(timer);
+ws.close();
+const remote = result.result || {};
+if (remote.subtype === 'error') {
+  console.error(remote.description || remote.value || 'CDP evaluation error');
+  process.exit(1);
+}
+const value = Object.prototype.hasOwnProperty.call(remote, 'value') ? remote.value : remote.description;
+process.stdout.write(typeof value === 'string' ? value : JSON.stringify(value ?? null));
+"""
+    env = {**os.environ, "HERMES_CDP_TIMEOUT_MS": str(max(1000, int(timeout * 1000)))}
+    command = ["node", "--input-type=module", "-e", bridge, str(int(port)), javascript]
+    try:
+        return subprocess.run(command, capture_output=True, text=True, timeout=timeout + 2, env=env)
+    except subprocess.TimeoutExpired as exc:
+        return subprocess.CompletedProcess(
+            command,
+            124,
+            stdout=(exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")),
+            stderr=(exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")) + f"\nTimed out after {timeout:.0f}s",
+        )
+
+
+def run_cdp_keypress(port: int, key: str, *, timeout: float = 10.0) -> subprocess.CompletedProcess[str]:
+    key_name = "Enter" if key.lower() in {"enter", "return"} else key
+    bridge = r"""
+const [port, key] = process.argv.slice(1);
+const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
+const target = targets.find((item) => item.type === 'page' && !String(item.url || '').startsWith('about:blank')) || targets.find((item) => item.type === 'page');
+if (!target || !target.webSocketDebuggerUrl) throw new Error('No page target for CDP keypress');
+const ws = new WebSocket(target.webSocketDebuggerUrl);
+let nextId = 0;
+const pending = new Map();
+const timer = setTimeout(() => {
+  console.error('Timed out waiting for CDP keypress');
+  process.exit(2);
+}, Math.max(1000, Math.floor(Number(process.env.HERMES_CDP_TIMEOUT_MS || '10000'))));
+ws.addEventListener('message', (event) => {
+  const payload = JSON.parse(event.data);
+  if (!payload.id || !pending.has(payload.id)) return;
+  const {resolve, reject} = pending.get(payload.id);
+  pending.delete(payload.id);
+  if (payload.error) reject(new Error(JSON.stringify(payload.error)));
+  else resolve(payload.result || {});
+});
+function send(method, params = {}) {
+  const id = ++nextId;
+  ws.send(JSON.stringify({id, method, params}));
+  return new Promise((resolve, reject) => pending.set(id, {resolve, reject}));
+}
+await new Promise((resolve, reject) => {
+  ws.addEventListener('open', resolve, {once: true});
+  ws.addEventListener('error', reject, {once: true});
+});
+const vk = key === 'Enter' ? 13 : 0;
+await send('Input.dispatchKeyEvent', {type: 'rawKeyDown', key, code: key, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk});
+await send('Input.dispatchKeyEvent', {type: 'keyUp', key, code: key, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk});
+clearTimeout(timer);
+ws.close();
+process.stdout.write(JSON.stringify({ok: true, key}));
+"""
+    env = {**os.environ, "HERMES_CDP_TIMEOUT_MS": str(max(1000, int(timeout * 1000)))}
+    command = ["node", "--input-type=module", "-e", bridge, str(int(port)), key_name]
+    try:
+        return subprocess.run(command, capture_output=True, text=True, timeout=timeout + 2, env=env)
+    except subprocess.TimeoutExpired as exc:
+        return subprocess.CompletedProcess(
+            command,
+            124,
+            stdout=(exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")),
+            stderr=(exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")) + f"\nTimed out after {timeout:.0f}s",
+        )
+
+
+def run_cdp_navigate(port: int, url: str, *, timeout: float = 15.0) -> subprocess.CompletedProcess[str]:
+    bridge = r"""
+const [port, url] = process.argv.slice(1);
+const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
+const target = targets.find((item) => item.type === 'page') || targets[0];
+if (!target || !target.webSocketDebuggerUrl) throw new Error('No page target for CDP navigation');
+const ws = new WebSocket(target.webSocketDebuggerUrl);
+let nextId = 0;
+const pending = new Map();
+const timer = setTimeout(() => {
+  console.error('Timed out waiting for CDP navigation');
+  process.exit(2);
+}, Math.max(1000, Math.floor(Number(process.env.HERMES_CDP_TIMEOUT_MS || '15000'))));
+ws.addEventListener('message', (event) => {
+  const payload = JSON.parse(event.data);
+  if (!payload.id || !pending.has(payload.id)) return;
+  const {resolve, reject} = pending.get(payload.id);
+  pending.delete(payload.id);
+  if (payload.error) reject(new Error(JSON.stringify(payload.error)));
+  else resolve(payload.result || {});
+});
+function send(method, params = {}) {
+  const id = ++nextId;
+  ws.send(JSON.stringify({id, method, params}));
+  return new Promise((resolve, reject) => pending.set(id, {resolve, reject}));
+}
+await new Promise((resolve, reject) => {
+  ws.addEventListener('open', resolve, {once: true});
+  ws.addEventListener('error', reject, {once: true});
+});
+await send('Page.enable');
+await send('Page.navigate', {url});
+clearTimeout(timer);
+ws.close();
+process.stdout.write(url);
+"""
+    env = {**os.environ, "HERMES_CDP_TIMEOUT_MS": str(max(1000, int(timeout * 1000)))}
+    command = ["node", "--input-type=module", "-e", bridge, str(int(port)), url]
+    try:
+        return subprocess.run(command, capture_output=True, text=True, timeout=timeout + 2, env=env)
     except subprocess.TimeoutExpired as exc:
         return subprocess.CompletedProcess(
             command,
@@ -1274,15 +1454,27 @@ def browser_eval_body_and_report_script(selectors: list[str]) -> str:
         "(() => {"
         f"const selectors = {selectors_json};"
         "const parts = [];"
+        "const pushText = (text) => {"
+        "  const clean = String(text || '').trim();"
+        "  if (clean && !parts.includes(clean)) parts.push(clean.slice(0, 20000));"
+        "};"
         "for (const selector of selectors) {"
-        "  for (const el of document.querySelectorAll(selector)) {"
-        "    const text = (el.innerText || el.textContent || '').trim();"
-        "    if (text && !parts.includes(text)) parts.push(text);"
+        "  for (const el of Array.from(document.querySelectorAll(selector)).slice(-8)) {"
+        "    pushText(el.innerText || el.textContent || '');"
         "  }"
         "}"
-        "const body = (document.body && document.body.innerText || '').trim();"
-        "if (body && !parts.includes(body)) parts.push(body);"
-        "return parts.join('\\n\\n--- BODY ---\\n\\n');"
+        "pushText(document.body && document.body.innerText || '');"
+        "return parts.join('\\n\\n--- BODY ---\\n\\n').slice(0, 60000);"
+        "})()"
+    )
+
+
+def browser_eval_visible_text_script(max_chars: int = 60000) -> str:
+    return (
+        "(() => {"
+        "const root = document.querySelector('main') || document.body;"
+        "const text = (root && (root.innerText || root.textContent) || '').trim();"
+        f"return text.slice(0, {int(max_chars)});"
         "})()"
     )
 
@@ -1374,6 +1566,31 @@ def find_confirmation_ref(snapshot: str, labels: list[str]) -> str:
         if ref:
             return ref
     return ""
+
+
+def click_text_js_script(label: str) -> str:
+    label_json = json.dumps(label)
+    return (
+        "(() => {"
+        f"const wanted = {label_json}.trim().toLowerCase();"
+        "const blocked = ['dictation', 'voice'];"
+        "const candidates = Array.from(document.querySelectorAll('button, [role=\"button\"], [role=\"menuitem\"], [role=\"menuitemradio\"], [role=\"option\"], a, [aria-label], [data-testid]'));"
+        "for (const el of candidates) {"
+        "  const text = (el.innerText || el.textContent || el.getAttribute('aria-label') || '').trim();"
+        "  if (!text) continue;"
+        "  const lower = text.toLowerCase();"
+        "  if (blocked.some(item => lower.includes(item))) continue;"
+        "  if (lower === wanted || lower.includes(wanted)) {"
+        "    const rect = el.getBoundingClientRect();"
+        "    const style = window.getComputedStyle(el);"
+        "    if (rect.width <= 0 || rect.height <= 0 || style.visibility === 'hidden' || style.display === 'none') continue;"
+        "    el.click();"
+        "    return {ok:true, text, tag:el.tagName, role:el.getAttribute('role') || ''};"
+        "  }"
+        "}"
+        "return {ok:false, reason:'not-found', label:wanted};"
+        "})()"
+    )
 
 
 def find_composer_ref(snapshot: str) -> str:
@@ -1757,6 +1974,148 @@ def build_primary_feature_suite(
                         "backend": backend,
                         "must_verify": target["must_verify"],
                         "notes": target["notes"],
+                        "session_evidence": session_evidence,
+                        "status": "queued" if session_evidence.get("confidence") != "none" else "needs-login",
+                    }
+                )
+    return rows
+
+
+def default_workflow_prompt(provider: str, mode: str) -> str:
+    provider_id = normalize_provider_name(provider)
+    prompts = {
+        ("chatgpt", "agent"): "E2E smoke test: confirm ChatGPT Agent mode is active and respond with one short sentence saying the workflow started.",
+        ("chatgpt", "deep-research"): "Use ChatGPT Deep Research to research safe browser automation practices in 2026. Create a concise report with sources. If a plan appears, start the research.",
+        ("chatgpt", "chat"): "E2E smoke test: answer one short sentence confirming ChatGPT chat is usable.",
+        ("gemini", "deep-research"): "Use Gemini Deep Research to research safe browser automation practices in 2026. Create a concise report with sources. If a plan appears, start the research.",
+        ("gemini", "agent"): "E2E smoke test: confirm whether Gemini Agent mode is available and respond with one short sentence.",
+        ("gemini", "chat"): "E2E smoke test: answer one short sentence confirming Gemini chat is usable.",
+        ("perplexity", "research"): "E2E smoke test: use research mode for one concise note on safe browser automation with sources.",
+        ("perplexity", "chat"): "E2E smoke test: answer one short sentence confirming Perplexity chat is usable.",
+        ("grok", "research"): "E2E smoke test: use the strongest available search or research mode and write one short sentence on safe browser automation.",
+        ("grok", "chat"): "E2E smoke test: answer one short sentence confirming Grok chat is usable.",
+        ("claude", "research"): "E2E smoke test: use Claude research or search mode and answer one sentence about safe browser automation.",
+        ("claude", "artifacts"): "E2E smoke test: create a tiny artifact or explain in one sentence whether artifacts are available.",
+        ("claude", "chat"): "E2E smoke test: answer one short sentence confirming Claude chat is usable.",
+    }
+    return prompts.get((provider_id, mode), f"E2E smoke test: confirm {provider_id} {mode} is usable in one short sentence.")
+
+
+def workflow_suite_targets(
+    *,
+    providers: list[str] | None = None,
+    features: str = "",
+    include_all_features: bool = False,
+) -> list[dict[str, Any]]:
+    provider_filter = {normalize_provider_name(provider) for provider in providers or []}
+    supported_specs = provider_workflow_specs()
+    if features:
+        targets = []
+        for raw in features.split(","):
+            item = raw.strip()
+            if not item:
+                continue
+            if ":" in item:
+                provider_id, mode = item.split(":", 1)
+            else:
+                provider_id, mode = "", item
+            provider_id = normalize_provider_name(provider_id) if provider_id else ""
+            for candidate_provider, modes in supported_specs.items():
+                if provider_id and candidate_provider != provider_id:
+                    continue
+                if mode in modes:
+                    targets.append({"provider": candidate_provider, "mode": mode})
+        return [
+            {
+                **target,
+                "prompt": default_workflow_prompt(str(target["provider"]), str(target["mode"])),
+            }
+            for target in targets
+            if not provider_filter or target["provider"] in provider_filter
+        ]
+
+    if include_all_features:
+        targets = [
+            {"provider": provider_id, "mode": mode, "prompt": default_workflow_prompt(provider_id, mode)}
+            for provider_id, modes in supported_specs.items()
+            if not provider_filter or provider_id in provider_filter
+            for mode in modes
+        ]
+        return targets
+
+    preferred = [
+        ("chatgpt", "agent"),
+        ("chatgpt", "deep-research"),
+        ("gemini", "deep-research"),
+        ("perplexity", "research"),
+        ("grok", "research"),
+        ("claude", "research"),
+    ]
+    return [
+        {"provider": provider_id, "mode": mode, "prompt": default_workflow_prompt(provider_id, mode)}
+        for provider_id, mode in preferred
+        if provider_id in supported_specs and mode in supported_specs[provider_id] and (not provider_filter or provider_id in provider_filter)
+    ]
+
+
+def build_workflow_suite_rows(
+    browsers: list[dict[str, Any]],
+    *,
+    providers: list[str] | None = None,
+    browser_ids: set[str] | None = None,
+    profile_selector: str = "work",
+    all_profiles: bool = False,
+    features: str = "",
+    include_all_features: bool = False,
+) -> list[dict[str, Any]]:
+    targets = workflow_suite_targets(providers=providers, features=features, include_all_features=include_all_features)
+    rows: list[dict[str, Any]] = []
+    for browser in browsers:
+        browser_id = normalize_browser_name(str(browser.get("id", "")))
+        if browser_ids and browser_id not in browser_ids:
+            continue
+        profiles = list(browser.get("profiles") or [])
+        if not profiles:
+            rows.append(
+                {
+                    "browser": browser_id,
+                    "browser_name": browser.get("display_name", ""),
+                    "profile_directory": "",
+                    "profile_name": "",
+                    "status": "skipped",
+                    "skip_reason": "no profiles discovered",
+                }
+            )
+            continue
+        if not all_profiles:
+            try:
+                profiles = [resolve_profile(profiles, profile_selector)]
+            except ValueError:
+                rows.append(
+                    {
+                        "browser": browser_id,
+                        "browser_name": browser.get("display_name", ""),
+                        "profile_directory": profile_selector,
+                        "profile_name": "",
+                        "status": "skipped",
+                        "skip_reason": f"profile not found: {profile_selector}",
+                    }
+                )
+                continue
+        for profile in profiles:
+            for target in targets:
+                session_evidence = provider_session_evidence(profile, str(target["provider"]))
+                rows.append(
+                    {
+                        "browser": browser_id,
+                        "browser_name": browser.get("display_name", ""),
+                        "profile_directory": profile.get("directory", ""),
+                        "profile_name": profile.get("name", ""),
+                        "profile_account": profile.get("account", ""),
+                        "profile_account_state": profile.get("account_state", ""),
+                        "provider": target["provider"],
+                        "mode": target["mode"],
+                        "prompt": target["prompt"],
                         "session_evidence": session_evidence,
                         "status": "queued" if session_evidence.get("confidence") != "none" else "needs-login",
                     }
@@ -2148,9 +2507,9 @@ def click_first_agent_browser_text(
         if str(label).lower() in {"start", "confirm", "allow", "begin"}:
             attempts.append({"label": label, "returncode": 1, "skipped": "generic-label-without-exact-ref"})
             continue
-        result = invoke(f"{command_log_label}:{label}", ["find", "text", str(label), "click"])
+        result = invoke(f"{command_log_label}:{label}:js-click", ["eval", click_text_js_script(str(label))])
         attempts.append({"label": label, "returncode": result.returncode})
-        if result.returncode == 0:
+        if result.returncode == 0 and '"ok":false' not in result.stdout and "not-found" not in result.stdout:
             return {"clicked": True, "label": label, "attempts": attempts}
     return {"clicked": False, "label": "", "attempts": attempts}
 
@@ -2163,6 +2522,9 @@ def fill_agent_browser_composer(
     text: str,
     label: str,
 ) -> subprocess.CompletedProcess[str]:
+    js_result = invoke(f"{label}-js", ["eval", composer_js_fill_script(text)])
+    if js_result.returncode == 0:
+        return js_result
     ref = find_composer_ref(snapshot)
     if ref:
         result = invoke(label, ["fill", f"@{ref}", text])
@@ -2252,8 +2614,49 @@ def agent_browser_profile_workflow_run(
         write_json(paths["status_json"], payload)
         return {**payload, "status_json": str(paths["status_json"])}
 
+    snapshot_timeout = max(8.0, min(timeout, 18.0))
+
+    def command_timeout(label: str, extra_args: list[str]) -> float:
+        if extra_args[:1] == ["snapshot"]:
+            return snapshot_timeout
+        if extra_args[:1] == ["open"]:
+            return min(timeout, 15.0)
+        if extra_args[:1] == ["eval"]:
+            return min(timeout, 15.0)
+        if extra_args == ["get", "url"]:
+            return min(timeout, 8.0)
+        if extra_args[:1] == ["press"]:
+            return min(timeout, 10.0)
+        if extra_args[:1] == ["wait"] and len(extra_args) > 1:
+            try:
+                return max(8.0, (int(str(extra_args[1])) / 1000.0) + 5.0)
+            except ValueError:
+                return min(timeout, 15.0)
+        return timeout
+
     def invoke(label: str, extra_args: list[str]) -> subprocess.CompletedProcess[str]:
-        result = run_agent_browser(["--cdp", str(cdp_port), *extra_args], session=session, timeout=timeout)
+        if extra_args[:1] == ["open"] and len(extra_args) > 1:
+            result = run_cdp_navigate(cdp_port, str(extra_args[1]), timeout=command_timeout(label, extra_args))
+        elif extra_args[:1] == ["wait"] and len(extra_args) > 1:
+            try:
+                milliseconds = int(str(extra_args[1]))
+            except ValueError:
+                milliseconds = 1000
+            time.sleep(max(0, milliseconds) / 1000.0)
+            result = subprocess.CompletedProcess(["sleep", str(milliseconds)], 0, f"waited {milliseconds}ms", "")
+        elif extra_args[:1] == ["eval"] and len(extra_args) > 1:
+            result = run_cdp_javascript(cdp_port, extra_args[1], timeout=command_timeout(label, extra_args))
+        elif extra_args[:1] == ["press"] and len(extra_args) > 1 and str(extra_args[1]).lower() in {"enter", "return"}:
+            result = run_cdp_keypress(cdp_port, str(extra_args[1]), timeout=command_timeout(label, extra_args))
+        elif extra_args == ["get", "url"]:
+            result = run_cdp_javascript(cdp_port, "location.href", timeout=command_timeout(label, extra_args))
+        elif extra_args[:1] == ["screenshot"] and len(extra_args) > 1:
+            ok = capture_cdp_screenshot(cdp_port, Path(extra_args[1]), timeout=min(timeout, 20.0))
+            result = subprocess.CompletedProcess(["cdp-screenshot", str(cdp_port), extra_args[1]], 0 if ok else 1, str(extra_args[1]) if ok else "", "")
+        elif extra_args[:1] == ["close"]:
+            result = subprocess.CompletedProcess(["skip-close-temp-page"], 0, "skipped: browser process terminates in finally", "")
+        else:
+            result = run_agent_browser(["--cdp", str(cdp_port), *extra_args], session=session, timeout=command_timeout(label, extra_args))
         commands.append(
             {
                 "label": label,
@@ -2271,11 +2674,25 @@ def agent_browser_profile_workflow_run(
     try:
         invoke("open-provider", ["open", spec["url"]])
         invoke("wait-initial", ["wait", "4000"])
+        before_eval = invoke("eval-before-text", ["eval", browser_eval_visible_text_script()])
+        visible_text_parts.append(before_eval.stdout)
         before_snapshot = invoke("snapshot-before", ["snapshot", "-i", "-c"])
         current_snapshot_text = before_snapshot.stdout
         visible_text_parts.append(current_snapshot_text)
-        before_eval = invoke("eval-before-text", ["eval", "document.body.innerText"])
-        visible_text_parts.append(before_eval.stdout)
+        consent_result = click_first_agent_browser_text(
+            invoke,
+            ["Alle annehmen", "Accept all", "I agree", "Agree", "Zustimmen"],
+            command_log_label="consent",
+            snapshot=current_snapshot_text,
+        )
+        if consent_result.get("clicked"):
+            workflow_events.append({"event": "consent", **consent_result})
+            invoke("wait-after-consent", ["wait", "2500"])
+            consent_eval = invoke("eval-after-consent", ["eval", browser_eval_visible_text_script()])
+            visible_text_parts.append(consent_eval.stdout)
+            consent_snapshot = invoke("snapshot-after-consent", ["snapshot", "-i", "-c"])
+            current_snapshot_text = consent_snapshot.stdout or current_snapshot_text
+            visible_text_parts.append(current_snapshot_text)
 
         inventory = extract_provider_inventory(provider_id, "\n".join(visible_text_parts))
         if inventory.get("login_state") == "signed-out-or-wall":
@@ -2382,6 +2799,32 @@ def agent_browser_profile_workflow_run(
                                 provider=provider_id,
                                 mode=spec["mode"],
                             )
+                            specific_confirmation_labels = [
+                                str(label)
+                                for label in spec["confirmation_triggers"]
+                                if str(label).strip().lower() not in {"start", "confirm", "allow", "begin", "submit"}
+                            ]
+                            js_confirm = click_first_agent_browser_text(
+                                invoke,
+                                specific_confirmation_labels,
+                                command_log_label=f"confirm-start-js-{confirm_index}",
+                                snapshot="",
+                            )
+                            if js_confirm.get("clicked"):
+                                confirm_attempts.append(
+                                    {
+                                        "label": js_confirm.get("label", ""),
+                                        "returncode": 0,
+                                        "method": "cdp-js",
+                                    }
+                                )
+                                confirm_result = {
+                                    "clicked": True,
+                                    "label": js_confirm.get("label", ""),
+                                    "ref": "",
+                                    "attempts": confirm_attempts,
+                                }
+                                break
                             confirm_attempts.append(
                                 {
                                     "label": "",
@@ -2452,6 +2895,9 @@ def agent_browser_profile_workflow_run(
 
     (paths["run_dir"] / "visible-text.txt").write_text(visible_text, encoding="utf-8")
     (paths["run_dir"] / "output.txt").write_text(output["text"], encoding="utf-8")
+    final_inventory = extract_provider_inventory(provider_id, visible_text)
+    if status in {"submitted", "started", "verified"} and final_inventory.get("login_state") == "signed-out-or-wall":
+        final_inventory["login_state"] = "signed-in-or-ready"
     payload = {
         **plan,
         "status": status,
@@ -2460,7 +2906,7 @@ def agent_browser_profile_workflow_run(
         "launch": launch_status,
         "screenshot": str(screenshot) if screenshot.exists() else "",
         "chat_url": current_url,
-        "inventory": extract_provider_inventory(provider_id, visible_text),
+        "inventory": final_inventory,
         "verification": verification,
         "workflow_events": workflow_events,
         "output": output,
@@ -3325,6 +3771,161 @@ def cmd_workflow_run(args: argparse.Namespace) -> int:
     return 0 if payload.get("status") in {"opened", "submitted", "started", "verified", "captured"} else 1
 
 
+def compact_workflow_run_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    output = payload.get("output") or {}
+    inventory = payload.get("inventory") or {}
+    clone = payload.get("clone") or {}
+    return {
+        "status": payload.get("status", ""),
+        "status_json": payload.get("status_json", ""),
+        "visible_text_path": payload.get("visible_text_path", ""),
+        "output_text_path": payload.get("output_text_path", ""),
+        "screenshot": payload.get("screenshot", ""),
+        "chat_url": payload.get("chat_url", ""),
+        "inventory": {
+            "provider": inventory.get("provider", ""),
+            "login_state": inventory.get("login_state", ""),
+            "visible_status": inventory.get("visible_status", {}),
+            "available_models": inventory.get("available_models", []),
+            "available_tools": inventory.get("available_tools", []),
+            "available_modes": inventory.get("available_modes", {}),
+        },
+        "output": {
+            "status": output.get("status", ""),
+            "text_length": output.get("text_length", 0),
+            "completion_markers_found": output.get("completion_markers_found", []),
+            "running_markers_found": output.get("running_markers_found", []),
+        },
+        "cache": payload.get("cache"),
+        "clone": {
+            "source_profile": clone.get("source_profile", ""),
+            "profile_directory": clone.get("profile_directory", ""),
+            "clone_user_data": clone.get("clone_user_data", ""),
+        },
+    }
+
+
+def cleanup_workflow_clone(payload: dict[str, Any]) -> None:
+    clone_user_data = str((payload.get("clone") or {}).get("clone_user_data") or "")
+    if not clone_user_data:
+        return
+    clone_root = Path(clone_user_data).expanduser().parent
+    if clone_root.exists() and clone_root.is_dir() and "/tmp/" in str(clone_root):
+        shutil.rmtree(clone_root, ignore_errors=True)
+
+
+def cmd_workflow_suite(args: argparse.Namespace) -> int:
+    browsers = discover_browsers()
+    browser_ids = {normalize_browser_name(item.strip()) for item in args.browsers.split(",") if item.strip()}
+    providers = requested_provider_ids(args.providers) if args.providers else []
+    rows = build_workflow_suite_rows(
+        browsers,
+        providers=providers,
+        browser_ids=browser_ids,
+        profile_selector=args.profile,
+        all_profiles=args.all_profiles,
+        features=args.features,
+        include_all_features=args.all_features,
+    )
+    artifact_root = Path(args.artifact_root).expanduser()
+    clone_root = Path(args.clone_root).expanduser()
+    plan_payload = {
+        "status": "planned",
+        "artifact_root": str(artifact_root),
+        "clone_root": str(clone_root),
+        "submit": args.submit,
+        "confirm_start": args.confirm_start,
+        "all_profiles": args.all_profiles,
+        "rows": rows,
+    }
+    if args.plan_only:
+        if args.output:
+            write_json(Path(args.output).expanduser(), plan_payload)
+        print(json.dumps(plan_payload, ensure_ascii=False, indent=2))
+        return 0
+
+    browser_map = {normalize_browser_name(str(browser.get("id", ""))): browser for browser in browsers}
+    results: list[dict[str, Any]] = []
+    for row in rows:
+        if args.max_runs and len([item for item in results if item.get("status") != "skipped"]) >= args.max_runs:
+            break
+        if row.get("status") == "skipped":
+            results.append({**row, "run_status": "skipped"})
+            continue
+        browser = browser_map.get(str(row.get("browser", "")))
+        if not browser:
+            results.append({**row, "run_status": "blocked", "blocker": "browser not discovered at execution time"})
+            if not args.continue_on_failure:
+                break
+            continue
+        try:
+            profile = resolve_profile(browser.get("profiles", []), str(row.get("profile_directory", "")))
+        except ValueError as exc:
+            results.append({**row, "run_status": "blocked", "blocker": str(exc)})
+            if not args.continue_on_failure:
+                break
+            continue
+        try:
+            run_payload = agent_browser_profile_workflow_run(
+                browser=browser,
+                profile=profile,
+                provider=str(row["provider"]),
+                mode=str(row["mode"]),
+                prompt=str(row["prompt"]),
+                artifact_root=artifact_root,
+                clone_root=clone_root,
+                submit=args.submit,
+                confirm_start=args.confirm_start,
+                wait_seconds=args.wait_seconds,
+                timeout=args.timeout,
+                cache_root=Path(args.cache_root).expanduser() if args.cache else None,
+                refresh_cache=not args.no_refresh_cache,
+            )
+            run_status = str(run_payload.get("status", "unknown"))
+            compact_payload = compact_workflow_run_payload(run_payload)
+            if not args.keep_clones:
+                cleanup_workflow_clone(run_payload)
+            ok_statuses = {"opened", "submitted", "started", "verified", "captured"}
+            if args.require_started:
+                ok_statuses = {"started", "verified"}
+            results.append(
+                {
+                    **row,
+                    "run_status": run_status,
+                    "ok": run_status in ok_statuses,
+                    **compact_payload,
+                }
+            )
+            if run_status not in ok_statuses and not args.continue_on_failure:
+                break
+        except Exception as exc:
+            results.append({**row, "run_status": "error", "ok": False, "error": str(exc)})
+            if not args.continue_on_failure:
+                break
+
+    summary = {
+        "total": len(results),
+        "ok": sum(1 for item in results if item.get("ok")),
+        "started_or_verified": sum(1 for item in results if item.get("run_status") in {"started", "verified"}),
+        "submitted": sum(1 for item in results if item.get("run_status") == "submitted"),
+        "blocked": sum(1 for item in results if item.get("run_status") in {"blocked", "error"}),
+    }
+    payload = {
+        "status": "completed",
+        "artifact_root": str(artifact_root),
+        "clone_root": str(clone_root),
+        "submit": args.submit,
+        "confirm_start": args.confirm_start,
+        "require_started": args.require_started,
+        "summary": summary,
+        "results": results,
+    }
+    if args.output:
+        write_json(Path(args.output).expanduser(), payload)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0 if results and all(item.get("ok") or item.get("run_status") == "skipped" for item in results) else 1
+
+
 def cmd_save_chat(args: argparse.Namespace) -> int:
     text = Path(args.text_file).expanduser().read_text(encoding="utf-8") if args.text_file else sys.stdin.read()
     record = save_chat_record(
@@ -3549,6 +4150,28 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_run.add_argument("--cache-root", default=str(default_chat_cache_root()))
     workflow_run.add_argument("--no-refresh-cache", action="store_true")
     workflow_run.add_argument("--output", default="")
+    workflow_suite = sub.add_parser("workflow-suite")
+    workflow_suite.add_argument("--artifact-root", default="/tmp/hermes-ai-research-workflow-suite")
+    workflow_suite.add_argument("--clone-root", default="/tmp/hermes-ai-research-workflow-suite-clones")
+    workflow_suite.add_argument("--browsers", default="brave", help="Comma-separated browser ids. Defaults to brave.")
+    workflow_suite.add_argument("--profile", default="work")
+    workflow_suite.add_argument("--all-profiles", action="store_true")
+    workflow_suite.add_argument("--providers", default="chatgpt,gemini,perplexity,grok,claude")
+    workflow_suite.add_argument("--features", default="", help="Comma-separated provider:mode entries, e.g. chatgpt:agent,gemini:deep-research.")
+    workflow_suite.add_argument("--all-features", action="store_true", help="Run every provider mode supported by workflow-run.")
+    workflow_suite.add_argument("--plan-only", action="store_true")
+    workflow_suite.add_argument("--submit", action="store_true")
+    workflow_suite.add_argument("--confirm-start", action="store_true")
+    workflow_suite.add_argument("--require-started", action="store_true", help="Fail submitted-only workflows unless they reach started/verified.")
+    workflow_suite.add_argument("--continue-on-failure", action="store_true")
+    workflow_suite.add_argument("--max-runs", type=int, default=0)
+    workflow_suite.add_argument("--wait-seconds", type=int, default=30)
+    workflow_suite.add_argument("--timeout", type=float, default=90.0)
+    workflow_suite.add_argument("--cache", action="store_true")
+    workflow_suite.add_argument("--cache-root", default=str(default_chat_cache_root()))
+    workflow_suite.add_argument("--no-refresh-cache", action="store_true")
+    workflow_suite.add_argument("--keep-clones", action="store_true", help="Keep temporary profile clones after each suite row for debugging.")
+    workflow_suite.add_argument("--output", default="")
     save_chat = sub.add_parser("save-chat")
     save_chat.add_argument("--cache-root", default=str(default_chat_cache_root()))
     save_chat.add_argument("--browser", required=True)
@@ -3655,6 +4278,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_workflow_plan(args)
     if args.command == "workflow-run":
         return cmd_workflow_run(args)
+    if args.command == "workflow-suite":
+        return cmd_workflow_suite(args)
     if args.command == "save-chat":
         return cmd_save_chat(args)
     if args.command == "chat-cache":

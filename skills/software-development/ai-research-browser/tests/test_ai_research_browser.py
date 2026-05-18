@@ -1672,6 +1672,15 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertIn("InputEvent", script)
         self.assertIn("contenteditable", script)
 
+    def test_click_text_js_script_clicks_visible_text_without_voice_controls(self):
+        module = load_module()
+
+        script = module.click_text_js_script("Agent")
+
+        self.assertIn("Agent", script)
+        self.assertIn("dictation", script)
+        self.assertIn("el.click()", script)
+
     def test_wait_milliseconds_returns_integer_agent_browser_wait_arg(self):
         module = load_module()
 
@@ -1750,6 +1759,80 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertTrue(payload["safety"]["uses_profile_clone"])
         self.assertTrue(payload["submit"])
         self.assertTrue(payload["confirm_start"])
+
+    def test_workflow_suite_targets_include_primary_agent_and_research_features(self):
+        module = load_module()
+
+        targets = module.workflow_suite_targets()
+        pairs = {(target["provider"], target["mode"]) for target in targets}
+
+        self.assertIn(("chatgpt", "agent"), pairs)
+        self.assertIn(("chatgpt", "deep-research"), pairs)
+        self.assertIn(("gemini", "deep-research"), pairs)
+        self.assertIn(("perplexity", "research"), pairs)
+        self.assertIn(("grok", "research"), pairs)
+        self.assertIn(("claude", "research"), pairs)
+
+    def test_cmd_workflow_suite_plan_outputs_clone_rows(self):
+        module = load_module()
+        original_discover = module.discover_browsers
+        module.discover_browsers = lambda: [
+            {
+                "id": "brave",
+                "display_name": "Brave Browser",
+                "binary_path": "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+                "user_data_dir": "/tmp/brave",
+                "default_port": 9222,
+                "profiles": [{"directory": "Profile 2", "name": "work", "account": "", "path": ""}],
+            }
+        ]
+        try:
+            out = StringIO()
+            with redirect_stdout(out):
+                exit_code = module.main(
+                    [
+                        "workflow-suite",
+                        "--browsers",
+                        "brave",
+                        "--profile",
+                        "work",
+                        "--providers",
+                        "chatgpt",
+                        "--features",
+                        "chatgpt:agent,chatgpt:deep-research",
+                        "--plan-only",
+                        "--submit",
+                        "--confirm-start",
+                    ]
+                )
+        finally:
+            module.discover_browsers = original_discover
+
+        payload = json.loads(out.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["status"], "planned")
+        self.assertTrue(payload["submit"])
+        self.assertEqual([row["mode"] for row in payload["rows"]], ["agent", "deep-research"])
+        self.assertEqual(payload["rows"][0]["profile_directory"], "Profile 2")
+
+    def test_compact_workflow_run_payload_omits_large_command_logs(self):
+        module = load_module()
+
+        compact = module.compact_workflow_run_payload(
+            {
+                "status": "verified",
+                "status_json": "/tmp/status.json",
+                "commands": [{"stdout": "x" * 10000}],
+                "inventory": {"provider": "grok", "visible_status": {"account": "a@test"}, "usage_lines": ["large"]},
+                "output": {"status": "complete", "text": "large", "text_length": 5},
+                "clone": {"clone_user_data": "/tmp/example/user-data", "source_profile": "/source", "profile_directory": "Default"},
+            }
+        )
+
+        self.assertEqual(compact["status"], "verified")
+        self.assertNotIn("commands", compact)
+        self.assertNotIn("text", compact["output"])
+        self.assertEqual(compact["output"]["text_length"], 5)
 
 
 if __name__ == "__main__":

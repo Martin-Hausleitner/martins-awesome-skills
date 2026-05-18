@@ -301,6 +301,21 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
   --confirm-start
 ```
 
+Run the focused workflow suite for the main paid/agentic features in one command:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py workflow-suite \
+  --browsers brave \
+  --profile work \
+  --submit \
+  --confirm-start \
+  --continue-on-failure \
+  --cache \
+  --output /tmp/hermes-ai-workflow-suite.json
+```
+
+By default the suite covers ChatGPT Agent, ChatGPT Deep Research, Gemini Deep Research, Perplexity Research, Grok Research/DeepSearch, and Claude Research/Search. Use `--features chatgpt:agent,gemini:deep-research`, `--providers chatgpt,gemini`, `--max-runs 1`, or `--plan-only` to narrow or preview the queue. Use `--all-features` when you want every workflow mode implemented by `workflow-run`.
+
 Each workflow writes `status.json`, `visible-text.txt`, `output.txt`, and a screenshot under the artifact root. The JSON records the clicked feature trigger, confirmation trigger, current URL, extracted output text, account inventory, and cache metadata when `--cache` is set. Confirmation clicks are exact-control only, so generic labels such as `Start` cannot accidentally hit dictation or voice controls; if a provider keeps the feature chip selected but never renders an exact research/agent start control, the run remains `submitted` instead of being reported as started.
 
 When you already have visible UI text from Computer Use, Peekaboo, or another capture, parse it without touching the browser:

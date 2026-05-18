@@ -143,6 +143,20 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
   --cache
 ```
 
+Run the focused workflow suite for the main agentic/research features:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py workflow-suite \
+  --browsers brave \
+  --profile work \
+  --submit \
+  --confirm-start \
+  --continue-on-failure \
+  --cache
+```
+
+The default suite covers ChatGPT Agent, ChatGPT Deep Research, Gemini Deep Research, Perplexity Research, Grok Research/DeepSearch, and Claude Research/Search. Use `--plan-only` before a long run, `--max-runs 1` for smoke tests, `--features provider:mode` for a hand-picked queue, and `--all-features` for every workflow mode implemented by the script.
+
 `workflow-run` launches the real browser binary headless against a disposable copy of the selected profile, connects Agent Browser through CDP, selects the provider feature, fills the custom prompt, optionally confirms the provider start/research plan, writes screenshot/text/status artifacts, and terminates only the clone process. Confirmation must use exact visible controls; do not let generic labels such as `Start` match dictation, voice, or unrelated UI. If no exact start/research control or running marker appears, keep the status at `submitted`. Do not wire workflow automation to a live user browser window unless the user explicitly requests live mutation.
 
 Use the interactive picker:

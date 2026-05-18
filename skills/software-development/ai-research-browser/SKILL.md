@@ -34,7 +34,7 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 - Extracts visible provider account, plan/subscription, model, quota, and usage text when a real UI snapshot is supplied.
 - Scans local profile site data for provider session evidence without reading or emitting cookie values.
 - Runs Agent Browser backed E2E probes against a CDP-enabled browser profile and records provider inventory artifacts.
-- Builds a focused primary feature suite for ChatGPT chat/model selection, ChatGPT Deep Research, ChatGPT Agent, Gemini Deep Research, and Claude Opus.
+- Builds a focused primary feature suite for ChatGPT chat/model selection, ChatGPT Deep Research, ChatGPT Agent, Gemini Deep Research, Claude Opus, Grok chat/research, and Perplexity chat/research.
 - Runs Agent Browser against disposable browser-profile clones and records `signed-out-or-wall` when the cloned session hits login or anti-automation pages.
 - Exposes provider-specific probe hints for account menus, model selectors, tool controls, and usage/limit text.
 - Lists automation backends such as Playwright/CDP, Codex Computer Use, Peekaboo, OpenAI CUA/Operator, Claude Computer Use, Gemini Computer Use, Stagehand, Browser-Use, and Hyperbrowser.

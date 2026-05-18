@@ -296,6 +296,34 @@ def primary_feature_targets() -> list[dict[str, Any]]:
             "must_verify": ["login", "model-selector", "opus-selected", "usage-limit"],
             "notes": "Claude Opus availability and plan/usage banner.",
         },
+        {
+            "provider": "grok",
+            "mode": "chat",
+            "model": "Fast",
+            "must_verify": ["login", "model-selector", "composer-ready"],
+            "notes": "Grok normal chat and visible model selector.",
+        },
+        {
+            "provider": "grok",
+            "mode": "research",
+            "model": "Grok 4.1 Fast Reasoning",
+            "must_verify": ["login", "deepsearch-or-research-tool", "model-selector"],
+            "notes": "Grok DeepSearch/Research availability and reasoning/search controls.",
+        },
+        {
+            "provider": "perplexity",
+            "mode": "chat",
+            "model": "Best",
+            "must_verify": ["login", "model-selector", "composer-ready"],
+            "notes": "Perplexity normal search/chat and account readiness.",
+        },
+        {
+            "provider": "perplexity",
+            "mode": "research",
+            "model": "Best",
+            "must_verify": ["login", "research-mode", "model-selector"],
+            "notes": "Perplexity Research/Advanced Research availability.",
+        },
     ]
 
 
@@ -1526,6 +1554,9 @@ def build_account_audit_matrix(
                     provider=provider_id,
                     visible_text=visible_text,
                 ) if visible_text else {}
+                status = "captured" if account_status else ("skipped" if not can_launch else "needs-ui-capture")
+                if not account_status and can_launch and session_evidence.get("confidence") != "none":
+                    status = "session-detected-needs-ui-capture"
                 background_plan = None
                 if can_launch:
                     background_plan = build_background_launch_plan(
@@ -1547,7 +1578,7 @@ def build_account_audit_matrix(
                         "profile_name": profile.get("name", ""),
                         "profile_account": profile.get("account", ""),
                         "profile_account_state": profile.get("account_state", ""),
-                        "status": "captured" if account_status else ("skipped" if not can_launch else "needs-ui-capture"),
+                        "status": status,
                         "skip_reason": skip_reason,
                         "text_artifact": str(text_path) if text_path else "",
                         "account_status": account_status,

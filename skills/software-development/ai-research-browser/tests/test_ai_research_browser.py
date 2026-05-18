@@ -790,6 +790,40 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertIn("deep-research-tool", suite[1]["must_verify"])
         self.assertEqual(suite[0]["status"], "queued")
 
+    def test_primary_feature_suite_includes_grok_and_perplexity_when_requested(self):
+        module = load_module()
+        root = Path(tempfile.mkdtemp())
+        con = sqlite3.connect(root / "Cookies")
+        con.execute("create table cookies(host_key text, name text)")
+        con.executemany(
+            "insert into cookies(host_key, name) values (?, ?)",
+            [
+                (".grok.com", "sso"),
+                (".perplexity.ai", "__Secure-next-auth.session-token"),
+            ],
+        )
+        con.commit()
+        con.close()
+        browsers = [
+            {
+                "id": "brave",
+                "display_name": "Brave Browser",
+                "profiles": [{"directory": "Default", "name": "Work", "account": "", "account_state": "signed-in-hidden", "path": str(root)}],
+            }
+        ]
+
+        suite = module.build_primary_feature_suite(browsers, providers=["grok", "perplexity"])
+
+        self.assertEqual(
+            [(row["provider"], row["feature"], row["status"]) for row in suite],
+            [
+                ("grok", "chat", "queued"),
+                ("grok", "research", "queued"),
+                ("perplexity", "chat", "queued"),
+                ("perplexity", "research", "queued"),
+            ],
+        )
+
     def test_cmd_feature_suite_outputs_primary_targets(self):
         module = load_module()
         original_discover = module.discover_browsers
@@ -902,6 +936,37 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertEqual(chatgpt["account_status"]["quotas"]["deep_research_remaining"], 5)
         self.assertTrue(chatgpt["background_plan"]["launch_command"])
         self.assertEqual(audit["rows"][1]["status"], "needs-ui-capture")
+
+    def test_account_audit_status_marks_detected_sessions_separately_from_missing_ui(self):
+        module = load_module()
+        root = Path(tempfile.mkdtemp())
+        con = sqlite3.connect(root / "Cookies")
+        con.execute("create table cookies(host_key text, name text)")
+        con.execute("insert into cookies(host_key, name) values (?, ?)", (".perplexity.ai", "__Secure-next-auth.session-token"))
+        con.commit()
+        con.close()
+        browsers = [
+            {
+                "id": "brave",
+                "display_name": "Brave Browser",
+                "default_port": 9222,
+                "app_exists": True,
+                "binary_exists": True,
+                "user_data_dir": "/tmp/brave",
+                "binary_path": "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+                "app_path": "/Applications/Brave Browser.app",
+                "profiles": [{"directory": "Default", "name": "Work", "account": "", "path": str(root)}],
+            }
+        ]
+
+        audit = module.build_account_audit_matrix(
+            browsers,
+            {"perplexity": {"url": "https://www.perplexity.ai/"}},
+            text_dir=None,
+        )
+
+        self.assertEqual(audit["rows"][0]["status"], "session-detected-needs-ui-capture")
+        self.assertEqual(audit["rows"][0]["session_evidence"]["confidence"], "likely-logged-in")
 
     def test_cmd_account_audit_outputs_rows_for_browser_provider_inventory(self):
         module = load_module()

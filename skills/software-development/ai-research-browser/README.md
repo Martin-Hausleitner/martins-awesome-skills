@@ -40,6 +40,8 @@ The focused suite checks:
 - ChatGPT Agent
 - Gemini Deep Research
 - Claude Opus
+- Grok chat and DeepSearch/Research
+- Perplexity chat and Research/Advanced Research
 
 Run Agent Browser against disposable browser-profile clones and write E2E artifacts:
 
@@ -164,7 +166,7 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
   --output /tmp/ai-account-audit.json
 ```
 
-Rows with parsed provider text are marked `captured`. Rows without UI text are marked `needs-ui-capture`; their `background_plan` contains the hidden/headless launch command needed to collect the provider page without distracting the user. Keep the resulting JSON local because it may contain private names, emails, subscription labels, and usage quotas.
+Rows with parsed provider text are marked `captured`. Rows without UI text but with local session-cookie/storage evidence are marked `session-detected-needs-ui-capture`; rows without either are marked `needs-ui-capture`. Their `background_plan` contains the hidden/headless launch command needed to collect the provider page without distracting the user. Keep the resulting JSON local because it may contain private names, emails, subscription labels, and usage quotas.
 
 Inspect supported automation backends:
 

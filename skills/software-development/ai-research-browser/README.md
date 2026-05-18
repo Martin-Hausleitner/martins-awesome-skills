@@ -51,6 +51,15 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 
 The extension command reports browser/profile, extension id, version, popup, permissions, and manifest path. Use `--include-ai-exporter` on `workflow-run`, `workflow-suite`, or `workflow-followup` when a temporary profile clone should copy/load the SaveAI extension for export-oriented tests.
 
+Inspect the reverse-engineered SaveAI / AI Exporter capabilities and Notion readiness:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py ai-exporter-capabilities \
+  --output /tmp/hermes-ai-exporter-capabilities.json
+```
+
+This command parses the installed extension manifest and reports supported providers, available runtime actions such as `exportFullMarkdown`, `copyFullMarkdown`, `openFullNotionExport`, and `saveFullChatsToNotion`, plus local Notion session evidence without reading or emitting cookie values. Treat `saveFullChatsToNotion` as an external write: run Markdown export/cache first, then sync to Notion only when that write is intended.
+
 Run Agent Browser against disposable browser-profile clones and write E2E artifacts:
 
 ```bash
@@ -331,7 +340,7 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
   --output /tmp/gemini-image-chat-workflow.json
 ```
 
-Attachment upload is intentionally evidence-driven: the workflow records a `attach-files` event with `ok: true`, `no-file-input`, or an error. If a provider hides uploads behind a menu, first use Agent Browser snapshots to discover the exact menu path, then add that selector path before relying on automated file upload.
+Attachment upload is intentionally evidence-driven: the workflow first tries provider-specific upload-menu labels such as Gemini's `Menü „Datei hochladen“ öffnen`, then records an `attach-files` event with `ok: true`, `no-file-input`, or an error. If a provider changes the upload menu, use Agent Browser snapshots to discover the exact label before relying on automated file upload.
 
 Start Perplexity Research or Grok DeepSearch:
 

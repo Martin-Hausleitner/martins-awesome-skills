@@ -1276,6 +1276,42 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertEqual(payload["extensions"][0]["extension"]["version"], "4.2.1")
         self.assertIn("storage", payload["extensions"][0]["extension"]["permissions"])
 
+    def test_ai_exporter_capabilities_parse_hosts_actions_and_notion_state(self):
+        module = load_module()
+        source = Path(tempfile.mkdtemp())
+        profile = source / "Default"
+        extension_id = module.KNOWN_EXTENSION_IDS["ai-exporter"]["ids"][0]
+        extension_dir = profile / "Extensions" / extension_id / "4.2.1_0"
+        extension_dir.mkdir(parents=True)
+        (extension_dir / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "name": "SaveAI Popup",
+                    "version": "4.2.1",
+                    "content_scripts": [{"matches": ["https://chatgpt.com/*", "https://gemini.google.com/*"]}],
+                    "permissions": ["storage", "cookies"],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        payload = module.build_ai_exporter_capabilities(
+            [
+                {
+                    "id": "brave",
+                    "display_name": "Brave Browser",
+                    "profiles": [{"directory": "Default", "name": "Work", "path": str(profile), "account_state": "signed-in-hidden"}],
+                }
+            ]
+        )
+
+        row = payload["rows"][0]
+        self.assertIn("chatgpt", row["supported_providers"])
+        self.assertIn("gemini", row["supported_providers"])
+        self.assertIn("saveFullChatsToNotion", row["actions"])
+        self.assertTrue(row["notion"]["requires_notion_login"])
+        self.assertEqual(row["notion"]["session_evidence"]["confidence"], "none")
+
     def test_account_audit_matrix_covers_each_provider_and_parses_text_artifacts(self):
         module = load_module()
         text_root = Path(tempfile.mkdtemp())
@@ -1741,6 +1777,7 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertEqual(plan["attachments"], ["/tmp/example-image.png"])
         self.assertEqual(attachment_actions[0]["method"], "cdp-dom-set-file-input-files")
         self.assertEqual(attachment_actions[0]["file_count"], 1)
+        self.assertIn("Datei hochladen", " ".join(attachment_actions[0]["menu_triggers"]))
 
     def test_snapshot_ref_helpers_prefer_exact_textbox_and_button_refs(self):
         module = load_module()

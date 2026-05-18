@@ -34,6 +34,7 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 - Reopens cached/existing chat URLs with `workflow-followup`, sends a follow-up such as "Fass zusammen", exports Markdown, and refreshes the local cache.
 - Attaches local files/images to `workflow-run` and `workflow-followup` when the provider exposes a visible file input, and records `no-file-input` instead of guessing when the upload path is hidden.
 - Discovers installed SaveAI / AI Exporter extension manifests and can copy/load selected extensions into temporary profile clones for export-oriented tests.
+- Reverse-engineers installed SaveAI / AI Exporter capabilities, including supported provider hosts, Markdown/PDF/JSON/image export actions, Notion sync actions, and local Notion session evidence without cookie values.
 - Extracts visible provider account, plan/subscription, model, quota, and usage text when a real UI snapshot is supplied.
 - Scans local profile site data for provider session evidence without reading or emitting cookie values.
 - Runs Agent Browser backed E2E probes against a CDP-enabled browser profile and records provider inventory artifacts.
@@ -82,6 +83,15 @@ List installed SaveAI / AI Exporter extension copies:
 ```bash
 python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py extensions --ai-exporter
 ```
+
+Inspect SaveAI / AI Exporter export and Notion-sync readiness:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py ai-exporter-capabilities \
+  --output /tmp/hermes-ai-exporter-capabilities.json
+```
+
+The capability command reports supported providers, extension actions such as `exportFullMarkdown`, `copyFullMarkdown`, `openFullNotionExport`, and `saveFullChatsToNotion`, and whether Notion site cookies indicate a logged-in workspace. Treat Notion sync as an external write: export/cache locally first, then perform Notion sync only when the user requested that write.
 
 Generate the current Unbrowser Local command plan:
 
@@ -186,7 +196,7 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
   --cache
 ```
 
-Attachment upload uses CDP `DOM.setFileInputFiles` against the temporary clone only. If the provider hides uploads behind a menu, the workflow records `no-file-input`; inspect the Agent Browser snapshot and add the provider-specific menu path before treating attachment support as verified.
+Attachment upload uses CDP `DOM.setFileInputFiles` against the temporary clone only. The workflow first opens known upload menus such as Gemini's `Menü „Datei hochladen“ öffnen`; if the provider changes the menu or still hides the file input, the workflow records `no-file-input` for E2E evidence.
 
 Run the focused workflow suite for the main agentic/research features:
 

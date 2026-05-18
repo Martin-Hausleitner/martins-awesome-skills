@@ -590,6 +590,97 @@ def discover_extensions(
     return {"extensions": rows}
 
 
+AI_EXPORTER_ACTIONS = [
+    "copyFullMarkdown",
+    "exportFullMarkdown",
+    "exportFullText",
+    "exportFullJSON",
+    "exportFullWord",
+    "exportFullPDF",
+    "captureAllToImage",
+    "openFullNotionExport",
+    "saveFullChatsToNotion",
+]
+
+
+AI_EXPORTER_PROVIDER_HOSTS = {
+    "chatgpt": ["chatgpt.com", "chat.openai.com"],
+    "gemini": ["gemini.google.com"],
+    "claude": ["claude.ai"],
+    "grok": ["grok.com"],
+    "perplexity": ["www.perplexity.ai", "perplexity.ai"],
+    "googleaistudio": ["aistudio.google.com"],
+    "notebooklm": ["notebooklm.google.com"],
+    "deepseek": ["chat.deepseek.com"],
+}
+
+
+def manifest_supported_hosts(manifest: dict[str, Any]) -> list[str]:
+    hosts: set[str] = set()
+    for script in manifest.get("content_scripts", []):
+        if not isinstance(script, dict):
+            continue
+        for match in script.get("matches", []):
+            if not isinstance(match, str):
+                continue
+            try:
+                hostname = urllib.parse.urlparse(match.replace("*://", "https://").replace("/*", "/")).hostname
+            except Exception:
+                hostname = ""
+            if hostname:
+                hosts.add(hostname)
+    return sorted(hosts)
+
+
+def ai_exporter_supported_providers(manifest: dict[str, Any]) -> list[str]:
+    hosts = manifest_supported_hosts(manifest)
+    providers: list[str] = []
+    for provider, provider_hosts in AI_EXPORTER_PROVIDER_HOSTS.items():
+        if any(any(host == target or host.endswith(f".{target}") for target in provider_hosts) for host in hosts):
+            providers.append(provider)
+    return providers
+
+
+def build_ai_exporter_capabilities(browsers: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    extension_ids = known_extension_ids("ai-exporter")
+    for browser in browsers or discover_browsers():
+        for profile in browser.get("profiles") or []:
+            for extension in discover_profile_extensions(profile, extension_ids=extension_ids):
+                manifest_path = Path(str(extension.get("manifest_path", ""))).expanduser()
+                manifest = read_json(manifest_path)
+                rows.append(
+                    {
+                        "browser": browser.get("id", ""),
+                        "browser_name": browser.get("display_name", ""),
+                        "profile_directory": profile.get("directory", ""),
+                        "profile_name": profile.get("name", ""),
+                        "profile_account_state": profile.get("account_state", ""),
+                        "extension": extension,
+                        "supported_hosts": manifest_supported_hosts(manifest),
+                        "supported_providers": ai_exporter_supported_providers(manifest),
+                        "actions": AI_EXPORTER_ACTIONS,
+                        "notion": {
+                            "requires_notion_login": True,
+                            "session_evidence": provider_session_evidence(profile, "notion"),
+                            "api_family": "notion-web-clipper-v3",
+                            "writes_externally": True,
+                        },
+                        "automation_notes": [
+                            "Content script listens for runtime actions such as exportFullMarkdown, copyFullMarkdown, openFullNotionExport, and saveFullChatsToNotion.",
+                            "Notion sync depends on Notion cookies and a selected workspace/page/database from the extension UI.",
+                            "For E2E proof, load the extension into the temporary profile, export Markdown locally first, then only perform Notion sync when explicitly requested.",
+                        ],
+                    }
+                )
+    return {
+        "extension_alias": "ai-exporter",
+        "extension_ids": extension_ids,
+        "actions": AI_EXPORTER_ACTIONS,
+        "rows": rows,
+    }
+
+
 def provider_url(provider: str) -> str:
     providers = provider_registry()
     provider = normalize_provider_name(provider)
@@ -1308,6 +1399,7 @@ def provider_workflow_specs() -> dict[str, dict[str, dict[str, Any]]]:
                 "feature_triggers": [],
                 "slash_triggers": [],
                 "confirmation_triggers": [],
+                "attachment_triggers": ["Add files and more", "Attach files", "Upload file"],
                 "running_markers": ["Stop generating", "Regenerate", "Sources"],
                 "completion_markers": ["Sources", "Final answer", "Done"],
                 "output_selectors": ["main", "[data-testid='conversation-turn']"],
@@ -1315,6 +1407,7 @@ def provider_workflow_specs() -> dict[str, dict[str, dict[str, Any]]]:
             "deep-research": {
                 "feature_triggers": ["Deep research", "Deep Research"],
                 "menu_triggers": ["Add files and more", "Tools"],
+                "attachment_triggers": ["Add files and more", "Attach files", "Upload file"],
                 "pre_prompt_triggers": [],
                 "slash_triggers": ["/Deepresearch", "/deep research"],
                 "confirmation_triggers": ["Start research", "Create report", "Start", "Begin"],
@@ -1326,6 +1419,7 @@ def provider_workflow_specs() -> dict[str, dict[str, dict[str, Any]]]:
             "agent": {
                 "feature_triggers": ["Agent", "ChatGPT agent", "Use agent"],
                 "menu_triggers": ["Add files and more", "Tools"],
+                "attachment_triggers": ["Add files and more", "Attach files", "Upload file"],
                 "pre_prompt_triggers": [],
                 "slash_triggers": ["/agent"],
                 "confirmation_triggers": ["Start", "Take control", "Allow", "Confirm"],
@@ -1340,6 +1434,7 @@ def provider_workflow_specs() -> dict[str, dict[str, dict[str, Any]]]:
                 "feature_triggers": [],
                 "slash_triggers": [],
                 "confirmation_triggers": [],
+                "attachment_triggers": ["Menü „Datei hochladen“ öffnen", "Datei hochladen", "Upload files", "Upload file"],
                 "running_markers": ["Gemini", "Antwort wird"],
                 "completion_markers": ["Sources", "Quellen", "Antwort"],
                 "output_selectors": ["#extended-response-markdown-content", "message-content", "main"],
@@ -1347,6 +1442,7 @@ def provider_workflow_specs() -> dict[str, dict[str, dict[str, Any]]]:
             "deep-research": {
                 "feature_triggers": ["Deep Research", "Deep research", "Recherche"],
                 "menu_triggers": ["Tools", "Canvas"],
+                "attachment_triggers": ["Menü „Datei hochladen“ öffnen", "Datei hochladen", "Upload files", "Upload file"],
                 "pre_prompt_triggers": [],
                 "slash_triggers": [],
                 "confirmation_triggers": ["Start research", "Recherche starten", "Starten", "Create plan"],
@@ -1358,6 +1454,7 @@ def provider_workflow_specs() -> dict[str, dict[str, dict[str, Any]]]:
             "agent": {
                 "feature_triggers": ["Agent"],
                 "menu_triggers": ["Tools", "Canvas"],
+                "attachment_triggers": ["Menü „Datei hochladen“ öffnen", "Datei hochladen", "Upload files", "Upload file"],
                 "pre_prompt_triggers": [],
                 "slash_triggers": [],
                 "confirmation_triggers": ["Confirm", "Bestätigen", "Start", "Allow"],
@@ -1372,6 +1469,7 @@ def provider_workflow_specs() -> dict[str, dict[str, dict[str, Any]]]:
                 "feature_triggers": [],
                 "slash_triggers": [],
                 "confirmation_triggers": [],
+                "attachment_triggers": ["Attach", "Upload", "Add file"],
                 "running_markers": ["Searching", "Sources"],
                 "completion_markers": ["Sources", "Answer"],
                 "output_selectors": ["main", "article"],
@@ -1379,6 +1477,7 @@ def provider_workflow_specs() -> dict[str, dict[str, dict[str, Any]]]:
             "research": {
                 "feature_triggers": ["Research", "Deep Research", "Pro Search"],
                 "menu_triggers": ["Search", "Focus", "Sources"],
+                "attachment_triggers": ["Attach", "Upload", "Add file"],
                 "pre_prompt_triggers": [],
                 "slash_triggers": [],
                 "confirmation_triggers": ["Start", "Submit"],
@@ -1393,6 +1492,7 @@ def provider_workflow_specs() -> dict[str, dict[str, dict[str, Any]]]:
                 "feature_triggers": [],
                 "slash_triggers": [],
                 "confirmation_triggers": [],
+                "attachment_triggers": ["Attach", "Upload", "Add file"],
                 "running_markers": ["Generating", "Search"],
                 "completion_markers": ["Sources", "Answer"],
                 "output_selectors": ["main", "article"],
@@ -1401,6 +1501,7 @@ def provider_workflow_specs() -> dict[str, dict[str, dict[str, Any]]]:
                 "feature_triggers": ["DeepSearch", "Deep Search", "Search", "Think"],
                 "menu_triggers": [],
                 "pre_prompt_triggers": ["New Chat"],
+                "attachment_triggers": ["Attach", "Upload", "Add file"],
                 "slash_triggers": [],
                 "confirmation_triggers": ["Start", "Submit"],
                 "pre_confirm_wait_seconds": 12,
@@ -1414,6 +1515,7 @@ def provider_workflow_specs() -> dict[str, dict[str, dict[str, Any]]]:
                 "feature_triggers": [],
                 "slash_triggers": [],
                 "confirmation_triggers": [],
+                "attachment_triggers": ["Attach", "Upload", "Add file"],
                 "running_markers": ["Claude", "Generating"],
                 "completion_markers": ["Response", "Done"],
                 "output_selectors": ["main", "article"],
@@ -1452,6 +1554,7 @@ def provider_workflow_spec(provider: str, mode: str) -> dict[str, Any]:
     spec["mode"] = mode_id
     spec.setdefault("menu_triggers", [])
     spec.setdefault("pre_prompt_triggers", [])
+    spec.setdefault("attachment_triggers", [])
     spec.setdefault("pre_confirm_wait_seconds", 12)
     spec["composer_selector"] = provider_composer_selector(provider_id)
     spec["url"] = provider_url(provider_id)
@@ -1492,6 +1595,7 @@ def build_ai_workflow_plan(
             {
                 "label": "attach-files",
                 "method": "cdp-dom-set-file-input-files",
+                "menu_triggers": spec.get("attachment_triggers", []),
                 "files": [str(path.expanduser()) for path in attachments],
                 "file_count": len(attachments),
             }
@@ -2583,6 +2687,40 @@ def upload_cdp_attachments(
     return result
 
 
+def prepare_and_upload_attachments(
+    *,
+    port: int,
+    attachments: list[Path] | None,
+    commands: list[dict[str, Any]],
+    workflow_events: list[dict[str, Any]],
+    timeout: float,
+    invoke: Any,
+    snapshot: str,
+    menu_triggers: list[str],
+    label: str = "attach-files",
+) -> subprocess.CompletedProcess[str] | None:
+    if not attachments:
+        return None
+    menu_result = click_first_agent_browser_text(
+        invoke,
+        menu_triggers,
+        command_log_label=f"{label}-open-menu",
+        snapshot=snapshot,
+    )
+    if menu_result.get("attempts") or menu_result.get("clicked"):
+        workflow_events.append({"event": f"{label}-open-menu", **menu_result})
+    if menu_result.get("clicked"):
+        invoke(f"wait-after-{label}-menu", ["wait", "1000"])
+    return upload_cdp_attachments(
+        port=port,
+        attachments=attachments,
+        commands=commands,
+        workflow_events=workflow_events,
+        timeout=timeout,
+        label=label,
+    )
+
+
 def agent_browser_profile_probe(
     *,
     browser: dict[str, Any],
@@ -3018,12 +3156,15 @@ def agent_browser_profile_workflow_run(
             )
             workflow_events.append({"event": "fill-prompt", "returncode": fill_result.returncode})
             if fill_result.returncode == 0:
-                upload_cdp_attachments(
+                prepare_and_upload_attachments(
                     port=cdp_port,
                     attachments=attachments,
                     commands=commands,
                     workflow_events=workflow_events,
                     timeout=timeout,
+                    invoke=invoke,
+                    snapshot=current_snapshot_text,
+                    menu_triggers=list(spec.get("attachment_triggers", [])),
                 )
             if submit and fill_result.returncode == 0:
                 invoke("submit-prompt", ["press", "Enter"])
@@ -3350,12 +3491,15 @@ def agent_browser_profile_followup_run(
             )
             workflow_events.append({"event": "fill-followup", "returncode": fill_result.returncode})
             if fill_result.returncode == 0:
-                upload_cdp_attachments(
+                prepare_and_upload_attachments(
                     port=cdp_port,
                     attachments=attachments,
                     commands=commands,
                     workflow_events=workflow_events,
                     timeout=timeout,
+                    invoke=invoke,
+                    snapshot=current_snapshot_text,
+                    menu_triggers=list(spec.get("attachment_triggers", [])),
                     label="attach-followup-files",
                 )
             if submit and fill_result.returncode == 0:
@@ -3472,6 +3616,7 @@ def provider_session_domains(provider: str) -> list[str]:
         "perplexity": ["perplexity.ai"],
         "grok": ["grok.com", "x.com", "x.ai"],
         "openrouter": ["openrouter.ai", "clerk.openrouter.ai"],
+        "notion": ["notion.so", "www.notion.so"],
     }.get(normalize_provider_name(provider), [])
 
 
@@ -3493,6 +3638,7 @@ def provider_session_cookie_names(provider: str) -> list[str]:
         "perplexity": ["__Secure-next-auth.session-token", "pplx", "g_state", "intercom-session"],
         "grok": ["sso", "sso-rw", "x-userid", "auth_token", "twid"],
         "openrouter": ["__session", "__refresh", "__client", "__client_uat"],
+        "notion": ["notion_user_id", "token_v2", "file_token"],
     }.get(normalize_provider_name(provider), [])
 
 
@@ -4560,6 +4706,14 @@ def cmd_extensions(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ai_exporter_capabilities(args: argparse.Namespace) -> int:
+    payload = build_ai_exporter_capabilities()
+    if args.output:
+        write_json(Path(args.output).expanduser(), payload)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0 if payload.get("rows") else 1
+
+
 def compact_workflow_run_payload(payload: dict[str, Any]) -> dict[str, Any]:
     output = payload.get("output") or {}
     inventory = payload.get("inventory") or {}
@@ -4786,6 +4940,8 @@ def build_parser() -> argparse.ArgumentParser:
     extensions.add_argument("--extension", action="append", help="Extension id or known alias. Can be repeated or comma-separated.")
     extensions.add_argument("--ai-exporter", action="store_true", help="Filter for the known SaveAI / AI Exporter extension id.")
     extensions.add_argument("--output", default="")
+    ai_exporter_capabilities = sub.add_parser("ai-exporter-capabilities")
+    ai_exporter_capabilities.add_argument("--output", default="")
     unbrowser_plan = sub.add_parser("unbrowser-plan")
     unbrowser_plan.add_argument("--url", default="")
     unbrowser_plan.add_argument("--prompt", default="")
@@ -5050,6 +5206,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_backends(args)
     if args.command == "extensions":
         return cmd_extensions(args)
+    if args.command == "ai-exporter-capabilities":
+        return cmd_ai_exporter_capabilities(args)
     if args.command == "unbrowser-plan":
         return cmd_unbrowser_plan(args)
     if args.command == "unbrowser-mcp-probe":

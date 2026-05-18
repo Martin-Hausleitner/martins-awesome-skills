@@ -855,6 +855,7 @@ def agent_browser_probe(
     profile: str,
     session: str = "",
     open_controls: bool = False,
+    timeout: float = 45.0,
 ) -> dict[str, Any]:
     provider_id = normalize_provider_name(provider)
     paths = build_artifact_paths(artifact_root, provider=provider_id, mode=mode, browser=browser, profile=profile)
@@ -863,7 +864,7 @@ def agent_browser_probe(
     commands: list[dict[str, Any]] = []
 
     def invoke(label: str, extra_args: list[str]) -> subprocess.CompletedProcess[str]:
-        result = run_agent_browser(["--cdp", str(cdp_port), *extra_args], session=session)
+        result = run_agent_browser(["--cdp", str(cdp_port), *extra_args], session=session, timeout=timeout)
         commands.append(
             {
                 "label": label,
@@ -889,7 +890,11 @@ def agent_browser_probe(
 
     inventory = extract_provider_inventory(provider_id, visible_text)
     evidence_status = "captured" if visible_text else "failed"
-    if visible_text and screenshot_result.returncode != 0:
+    if any(command.get("returncode") == 124 for command in commands):
+        evidence_status = "timeout"
+    elif inventory.get("login_state") == "signed-out-or-wall":
+        evidence_status = "signed-out-or-wall"
+    elif visible_text and screenshot_result.returncode != 0:
         evidence_status = "captured-without-screenshot"
     payload = {
         "provider": provider_id,
@@ -905,6 +910,127 @@ def agent_browser_probe(
     }
     write_json(paths["status_json"], payload)
     (paths["run_dir"] / "visible-text.txt").write_text(visible_text, encoding="utf-8")
+    return {**payload, "status_json": str(paths["status_json"]), "visible_text_path": str(paths["run_dir"] / "visible-text.txt")}
+
+
+def live_probe_ok(payload: dict[str, Any], *, assert_login: bool = False) -> bool:
+    status = payload.get("status")
+    if status not in {"captured", "captured-without-screenshot"}:
+        return False
+    if assert_login and payload.get("inventory", {}).get("login_state") != "signed-in-or-ready":
+        return False
+    return True
+
+
+def provider_composer_selector(provider: str) -> str:
+    provider_id = normalize_provider_name(provider)
+    selectors = {
+        "chatgpt": "textarea, [contenteditable='true'], [role='textbox']",
+        "claude": "[contenteditable='true'], textarea, [role='textbox']",
+        "grok": "[contenteditable='true'], textarea, [role='textbox']",
+        "perplexity": "[contenteditable='true'], textarea, [role='textbox']",
+        "gemini": "[contenteditable='true'], textarea, [role='textbox']",
+        "openrouter": "textarea, [contenteditable='true'], [role='textbox']",
+    }
+    return selectors.get(provider_id, "textarea, [contenteditable='true'], [role='textbox']")
+
+
+def agent_browser_ask_export(
+    *,
+    cdp_port: int,
+    provider: str,
+    prompt: str,
+    artifact_root: Path,
+    browser: str,
+    profile: str,
+    session: str = "",
+    submit: bool = False,
+    timeout: float = 90.0,
+    cache_root: Path | None = None,
+) -> dict[str, Any]:
+    provider_id = normalize_provider_name(provider)
+    paths = build_artifact_paths(artifact_root, provider=provider_id, mode="ask", browser=browser, profile=profile)
+    paths["run_dir"].mkdir(parents=True, exist_ok=True)
+    commands: list[dict[str, Any]] = []
+
+    def invoke(label: str, extra_args: list[str]) -> subprocess.CompletedProcess[str]:
+        result = run_agent_browser(["--cdp", str(cdp_port), *extra_args], session=session, timeout=timeout)
+        commands.append(
+            {
+                "label": label,
+                "args": ["agent-browser", "--cdp", str(cdp_port), *extra_args],
+                "returncode": result.returncode,
+                "stdout": result.stdout[-4000:],
+                "stderr": result.stderr[-4000:],
+            }
+        )
+        return result
+
+    invoke("open", ["open", provider_url(provider_id)])
+    invoke("wait", ["wait", "3000"])
+    before = invoke("snapshot-before", ["snapshot", "-i", "-c"])
+    before_text = before.stdout
+    inventory = extract_provider_inventory(provider_id, before_text)
+    if inventory.get("login_state") == "signed-out-or-wall":
+        payload = {
+            "provider": provider_id,
+            "browser": normalize_browser_name(browser),
+            "profile": profile,
+            "status": "signed-out-or-wall",
+            "inventory": inventory,
+            "commands": commands,
+            "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        }
+        write_json(paths["status_json"], payload)
+        (paths["run_dir"] / "visible-text.txt").write_text(before_text, encoding="utf-8")
+        return {**payload, "status_json": str(paths["status_json"]), "visible_text_path": str(paths["run_dir"] / "visible-text.txt")}
+
+    selector = provider_composer_selector(provider_id)
+    fill_result = invoke("fill-composer", ["fill", selector, prompt])
+    if submit and fill_result.returncode == 0:
+        invoke("submit", ["press", "Enter"])
+        invoke("wait-after-submit", ["wait", "12000"])
+    after = invoke("snapshot-after", ["snapshot", "-i", "-c"])
+    text = "\n".join(part for part in [before_text, after.stdout] if part)
+    screenshot = paths["screenshot_png"]
+    invoke("screenshot", ["screenshot", str(screenshot)])
+    (paths["run_dir"] / "visible-text.txt").write_text(text, encoding="utf-8")
+
+    cache_payload = None
+    current_url = invoke("get-url", ["get", "url"]).stdout.strip()
+    if cache_root:
+        record = save_chat_record(
+            cache_root=cache_root,
+            browser=browser,
+            profile=profile,
+            provider=provider_id,
+            chat_url=current_url or provider_url(provider_id),
+            title=f"{provider_id} ask export",
+            text=text,
+            source="agent-browser-cdp",
+            refresh=True,
+        )
+        cache_payload = {
+            "key": record["key"],
+            "metadata_path": str(record["metadata_path"]),
+            "text_path": str(record["text_path"]),
+        }
+
+    payload = {
+        "provider": provider_id,
+        "browser": normalize_browser_name(browser),
+        "profile": profile,
+        "status": "submitted" if submit and fill_result.returncode == 0 else "filled",
+        "submit": submit,
+        "composer_selector": selector,
+        "chat_url": current_url,
+        "screenshot": str(screenshot) if screenshot.exists() else "",
+        "inventory": extract_provider_inventory(provider_id, text),
+        "cache": cache_payload,
+        "commands": commands,
+        "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    }
+    write_json(paths["status_json"], payload)
     return {**payload, "status_json": str(paths["status_json"]), "visible_text_path": str(paths["run_dir"] / "visible-text.txt")}
 
 
@@ -2087,6 +2213,88 @@ def cmd_agent_browser_suite(args: argparse.Namespace) -> int:
     return 0 if all((result.get("probe_result") or {}).get("status") in {"captured", "signed-out-or-wall"} for result in results) else 1
 
 
+def cmd_agent_browser_live_suite(args: argparse.Namespace) -> int:
+    if not args.cdp_port:
+        raise SystemExit("agent-browser-live-suite requires --cdp-port for the real browser session")
+    if not is_port_open(args.cdp_port):
+        print(json.dumps({"status": "blocked", "blocker": f"CDP port {args.cdp_port} is not reachable"}, ensure_ascii=False, indent=2))
+        return 2
+
+    providers = requested_provider_ids(args.providers) if args.providers else ["chatgpt", "gemini", "claude"]
+    browsers = discover_browsers()
+    selected_browser_ids = {normalize_browser_name(item.strip()) for item in args.browsers.split(",") if item.strip()}
+    if selected_browser_ids:
+        browsers = [browser for browser in browsers if browser.get("id") in selected_browser_ids]
+    rows = build_primary_feature_suite(
+        browsers,
+        providers=providers,
+        include_all_features=args.all_features,
+        backend="agent-browser",
+    )
+    if args.profile:
+        profile_slug = slug(args.profile)
+        rows = [row for row in rows if slug(str(row.get("profile_directory", ""))) == profile_slug or slug(str(row.get("profile_name", ""))) == profile_slug]
+
+    results = []
+    for index, row in enumerate(rows, start=1):
+        if args.max_runs and len(results) >= args.max_runs:
+            break
+        result = agent_browser_probe(
+            cdp_port=args.cdp_port,
+            provider=str(row["provider"]),
+            mode=str(row["feature"]),
+            artifact_root=Path(args.artifact_root).expanduser(),
+            browser=str(row["browser"]),
+            profile=str(row["profile_directory"]),
+            session=args.session,
+            open_controls=args.open_controls,
+            timeout=args.timeout,
+        )
+        results.append({**row, "probe_result": result, "run_index": index, "ok": live_probe_ok(result, assert_login=args.assert_login)})
+
+    payload = {
+        "status": "completed",
+        "cdp_port": args.cdp_port,
+        "cdp_version": endpoint_version(args.cdp_port) or {},
+        "artifact_root": str(Path(args.artifact_root).expanduser()),
+        "assert_login": args.assert_login,
+        "results": results,
+    }
+    if args.output:
+        write_json(Path(args.output).expanduser(), payload)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0 if results and all(result.get("ok") for result in results) else 1
+
+
+def cmd_agent_browser_ask(args: argparse.Namespace) -> int:
+    if not args.cdp_port:
+        raise SystemExit("agent-browser-ask requires --cdp-port for the real browser session")
+    if not is_port_open(args.cdp_port):
+        print(json.dumps({"status": "blocked", "blocker": f"CDP port {args.cdp_port} is not reachable"}, ensure_ascii=False, indent=2))
+        return 2
+    prompt = args.prompt
+    if args.prompt_file:
+        prompt = Path(args.prompt_file).expanduser().read_text(encoding="utf-8")
+    if not prompt:
+        raise SystemExit("agent-browser-ask requires --prompt or --prompt-file")
+    payload = agent_browser_ask_export(
+        cdp_port=args.cdp_port,
+        provider=args.provider,
+        prompt=prompt,
+        artifact_root=Path(args.artifact_root).expanduser(),
+        browser=args.browser,
+        profile=args.profile,
+        session=args.session,
+        submit=args.submit,
+        timeout=args.timeout,
+        cache_root=Path(args.cache_root).expanduser() if args.cache else None,
+    )
+    if args.output:
+        write_json(Path(args.output).expanduser(), payload)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0 if payload.get("status") in {"filled", "submitted"} else 1
+
+
 def cmd_save_chat(args: argparse.Namespace) -> int:
     text = Path(args.text_file).expanduser().read_text(encoding="utf-8") if args.text_file else sys.stdin.read()
     record = save_chat_record(
@@ -2254,6 +2462,33 @@ def build_parser() -> argparse.ArgumentParser:
     agent_suite.add_argument("--max-runs", type=int, default=0, help="Limit probe count for smoke tests.")
     agent_suite.add_argument("--timeout", type=float, default=45.0, help="Per Agent Browser command timeout in seconds.")
     agent_suite.add_argument("--output", default="")
+    live_suite = sub.add_parser("agent-browser-live-suite")
+    live_suite.add_argument("--artifact-root", default="/tmp/hermes-ai-research-agent-browser-live-e2e")
+    live_suite.add_argument("--providers", default="chatgpt,gemini,claude")
+    live_suite.add_argument("--browsers", default="brave", help="Comma-separated browser ids. Defaults to brave.")
+    live_suite.add_argument("--profile", default="Work", help="Profile directory or display name to filter, e.g. Work or Default.")
+    live_suite.add_argument("--cdp-port", type=int, required=True)
+    live_suite.add_argument("--session", default="")
+    live_suite.add_argument("--all-features", action="store_true")
+    live_suite.add_argument("--open-controls", action="store_true")
+    live_suite.add_argument("--assert-login", action="store_true", help="Fail if the live snapshot is signed out or blocked.")
+    live_suite.add_argument("--max-runs", type=int, default=0)
+    live_suite.add_argument("--timeout", type=float, default=45.0)
+    live_suite.add_argument("--output", default="")
+    ask = sub.add_parser("agent-browser-ask")
+    ask.add_argument("--artifact-root", default="/tmp/hermes-ai-research-agent-browser-ask")
+    ask.add_argument("--browser", default="brave")
+    ask.add_argument("--profile", default="Work")
+    ask.add_argument("--provider", choices=provider_cli_choices(), required=True)
+    ask.add_argument("--cdp-port", type=int, required=True)
+    ask.add_argument("--session", default="")
+    ask.add_argument("--prompt", default="")
+    ask.add_argument("--prompt-file", default="")
+    ask.add_argument("--submit", action="store_true", help="Actually press Enter after filling the prompt.")
+    ask.add_argument("--cache", action="store_true", help="Save visible text to the chat cache after capture.")
+    ask.add_argument("--cache-root", default=str(default_chat_cache_root()))
+    ask.add_argument("--timeout", type=float, default=90.0)
+    ask.add_argument("--output", default="")
     save_chat = sub.add_parser("save-chat")
     save_chat.add_argument("--cache-root", default=str(default_chat_cache_root()))
     save_chat.add_argument("--browser", required=True)
@@ -2352,6 +2587,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_e2e_probe(args)
     if args.command == "agent-browser-suite":
         return cmd_agent_browser_suite(args)
+    if args.command == "agent-browser-live-suite":
+        return cmd_agent_browser_live_suite(args)
+    if args.command == "agent-browser-ask":
+        return cmd_agent_browser_ask(args)
     if args.command == "save-chat":
         return cmd_save_chat(args)
     if args.command == "chat-cache":

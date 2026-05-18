@@ -847,6 +847,51 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertEqual(payload[0]["provider"], "claude")
         self.assertEqual(payload[0]["model"], "Opus 4.7")
 
+    def test_live_probe_ok_requires_captured_and_login_when_asserted(self):
+        module = load_module()
+
+        captured = {"status": "captured", "inventory": {"login_state": "signed-in-or-ready"}}
+        signed_out = {"status": "signed-out-or-wall", "inventory": {"login_state": "signed-out-or-wall"}}
+
+        self.assertTrue(module.live_probe_ok(captured, assert_login=True))
+        self.assertFalse(module.live_probe_ok(signed_out, assert_login=False))
+        self.assertFalse(module.live_probe_ok({"status": "captured", "inventory": {"login_state": "unknown"}}, assert_login=True))
+
+    def test_agent_browser_probe_marks_signed_out_snapshot_as_wall(self):
+        module = load_module()
+        root = Path(tempfile.mkdtemp())
+
+        def fake_run(args, *, session="", timeout=45.0):
+            command = ["agent-browser", *args]
+            if "snapshot" in args:
+                return module.subprocess.CompletedProcess(command, 0, stdout='button "Log in"\nbutton "Sign up for free"', stderr="")
+            return module.subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        original_run = module.run_agent_browser
+        module.run_agent_browser = fake_run
+        try:
+            payload = module.agent_browser_probe(
+                cdp_port=9222,
+                provider="chatgpt",
+                mode="chat",
+                artifact_root=root,
+                browser="brave",
+                profile="Default",
+            )
+        finally:
+            module.run_agent_browser = original_run
+
+        self.assertEqual(payload["status"], "signed-out-or-wall")
+        self.assertEqual(payload["inventory"]["login_state"], "signed-out-or-wall")
+
+    def test_provider_composer_selector_returns_generic_editable_targets(self):
+        module = load_module()
+
+        selector = module.provider_composer_selector("perplexity")
+
+        self.assertIn("contenteditable", selector)
+        self.assertIn("textbox", selector)
+
     def test_agent_browser_profile_global_args_use_profile_not_user_data_dir_arg(self):
         module = load_module()
 

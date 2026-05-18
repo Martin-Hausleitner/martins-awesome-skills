@@ -54,6 +54,36 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 
 Use `--plan-only` to see the complete queue first, `--max-runs 1` for a smoke test, and `--timeout 15` to keep flaky browser clones from hanging. The clone runner records `status.json`, `visible-text.txt`, and a screenshot for each probe. It reports automation walls such as ChatGPT `Just a moment...` as `signed-out-or-wall` even when the local profile contains session cookies, so clone success is not confused with a real usable login.
 
+Run Agent Browser against a real CDP-enabled browser session and fail if the UI is not actually logged in:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py agent-browser-live-suite \
+  --providers chatgpt,claude,grok,perplexity \
+  --browsers brave \
+  --profile Work \
+  --cdp-port 9222 \
+  --assert-login \
+  --artifact-root /tmp/hermes-ai-research-agent-browser-live
+```
+
+This is the "truth" path for Agent Browser. The target browser must already be running with `--remote-debugging-port=<port>` against the intended profile. If Agent Browser auto-connects to a signed-out clone or a different Chromium instance, the live suite records `signed-out-or-wall` and exits non-zero instead of treating the capture as usable.
+
+Fill a provider composer and export the visible transcript/output through the same real CDP session:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py agent-browser-ask \
+  --provider perplexity \
+  --browser brave \
+  --profile Work \
+  --cdp-port 9222 \
+  --prompt "Say READY in one short sentence." \
+  --submit \
+  --cache \
+  --artifact-root /tmp/hermes-ai-research-agent-browser-ask
+```
+
+Omit `--submit` for a non-spending dry run that fills the composer and exports the current UI text. With `--cache`, the captured text is saved into the local chat cache for reuse or deliberate refresh.
+
 Use the interactive picker:
 
 ```bash
@@ -197,6 +227,20 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 ```
 
 `e2e-probe` opens the provider URL, captures an Agent Browser accessibility snapshot, optionally opens known model/tool controls, takes a screenshot, and writes `status.json` plus `visible-text.txt`. The inventory includes inferred login state, visible account/email, plan, selected model, matched model/tool labels, available mode markers, and usage/limit lines.
+
+Use `agent-browser-live-suite` for a whole focused suite against the real CDP session. Unlike `e2e-probe`, it can assert that each result is logged in:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py agent-browser-live-suite \
+  --providers chatgpt,claude,grok,perplexity \
+  --browsers brave \
+  --profile Work \
+  --cdp-port 9222 \
+  --assert-login \
+  --max-runs 8
+```
+
+Use `agent-browser-ask` when the goal is not just inventory but controlling the provider and exporting visible output. It opens the provider URL, verifies the page is not a sign-in/wall state, fills the composer, optionally submits, waits, snapshots again, saves a screenshot, and can write the visible text to the chat cache.
 
 For non-CDP browsers, `agent-browser-suite` creates a disposable clone of the selected Chromium profile and launches Agent Browser with `--profile <clone-user-data>` plus the browser executable. This is useful as a repeatable E2E smoke test, but it is intentionally conservative: if provider cookies are present yet the cloned/headless browser lands on a sign-in or anti-automation page, the result is recorded as `signed-out-or-wall`. Use a real running browser plus Computer Use or a CDP-enabled hidden launch for final account, plan, model, and quota proof.
 

@@ -34,6 +34,8 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 - Extracts visible provider account, plan/subscription, model, quota, and usage text when a real UI snapshot is supplied.
 - Scans local profile site data for provider session evidence without reading or emitting cookie values.
 - Runs Agent Browser backed E2E probes against a CDP-enabled browser profile and records provider inventory artifacts.
+- Runs an Agent Browser live suite against a real CDP-enabled browser session and can fail hard when the page is signed out or blocked.
+- Fills a provider composer through Agent Browser, optionally submits the prompt, exports the visible output, and saves it into the local chat cache.
 - Builds a focused primary feature suite for ChatGPT chat/model selection, ChatGPT Deep Research, ChatGPT Agent, Gemini Deep Research, Claude Opus, Grok chat/research, and Perplexity chat/research.
 - Runs Agent Browser against disposable browser-profile clones and records `signed-out-or-wall` when the cloned session hits login or anti-automation pages.
 - Exposes provider-specific probe hints for account menus, model selectors, tool controls, and usage/limit text.
@@ -47,6 +49,8 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 ## Safety Rule
 
 Do not quit or relaunch the user's already-open browser without explicit permission. If a browser is already running without `--remote-debugging-port`, run preflight and report the blocker. Prefer `launch-background --dry-run` or `launch-all-background --dry-run` before execution, so the user can see whether the run will attach, launch hidden, or be blocked. For live UI checks, use Computer Use against the existing window and record screenshots locally.
+
+For Agent Browser "truth" checks, prefer `agent-browser-live-suite --assert-login` against a known real CDP port. Do not trust `agent-browser --auto-connect` unless the captured provider UI proves the intended profile/account is logged in; auto-connect can attach to a signed-out clone or the wrong Chromium instance.
 
 Do not commit private screenshots that contain account names, chat history, or private prompts to a public repository. Keep them as local artifacts unless the user explicitly asks for a sanitized export.
 

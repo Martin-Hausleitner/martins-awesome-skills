@@ -299,6 +299,51 @@ class AiResearchBrowserTest(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(module.parse_visible_status(text)["plan"], plan)
 
+    def test_parse_plan_ignores_upgrade_upsells(self):
+        module = load_module()
+
+        status = module.parse_visible_status(
+            "kleinstein.fragen@gmail.com\n"
+            "Unlock extended capabilities\n"
+            "Try for $0.00\n"
+            "Upgrade to SuperGrok\n"
+            "DeepSearch\n"
+            "Ask anything"
+        )
+
+        self.assertEqual(status["account"], "kleinstein.fragen@gmail.com")
+        self.assertEqual(status["plan"], "")
+
+    def test_parse_plan_ignores_escaped_upgrade_upsell_text(self):
+        module = load_module()
+
+        status = module.parse_visible_status(
+            '"Unlock extended capabilities\\n\\nTry for $0.00\\nUpgrade to SuperGrok\\nAsk anything"'
+        )
+
+        self.assertEqual(status["plan"], "")
+
+    def test_parse_plan_ignores_comparison_history_titles(self):
+        module = load_module()
+
+        status = module.parse_visible_status("Claude Pro vs Max: Token-Limits & API-Kostenvergleich\nAsk anything")
+
+        self.assertEqual(status["plan"], "")
+
+    def test_parse_model_ignores_history_ref_titles(self):
+        module = load_module()
+
+        status = module.parse_visible_status('- link "Anti-Gravity Opus mit OpenClaw verbinden" [ref=e18]\nAsk Grok')
+
+        self.assertEqual(status["model"], "")
+
+    def test_parse_model_respects_provider_family_when_available(self):
+        module = load_module()
+
+        status = module.parse_visible_status("Anti-Gravity Opus mit OpenClaw verbinden\nAsk Grok", provider="grok")
+
+        self.assertEqual(status["model"], "")
+
     def test_parse_chatgpt_profile_name_followed_by_plan(self):
         module = load_module()
 

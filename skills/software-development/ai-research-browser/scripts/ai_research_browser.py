@@ -683,31 +683,63 @@ def expand_agent_browser_eval_text(text: str) -> str:
     return "\n".join(chunks)
 
 
-def parse_visible_status(text: str) -> dict[str, Any]:
+def parse_visible_status(text: str, *, provider: str = "") -> dict[str, Any]:
+    provider_id = normalize_provider_name(provider) if provider else ""
     text = expand_agent_browser_eval_text(text or "")
     account_match = re.search(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", text)
     lines = [line.strip().strip('"') for line in text.splitlines() if line.strip()]
     model_match = re.search(r"Model:\s*([^\n]+)", text, flags=re.I)
     if not model_match:
-        model_match = re.search(
-            r"\b((?:GPT[- ][^\n]+|Claude[ \t]+[^\n]+|Opus[ \t]+[^\n]+|Sonnet[ \t]+[^\n]+|Gemini[ \t]+[^\n]+|Grok[ \t]+[^\n]+))",
-            text,
-            flags=re.I,
-        )
-    plan_match = re.search(
+        model_pattern = r"\b((?:GPT[- ][^\n]+|Claude[ \t]+[^\n]+|Opus[ \t]+[^\n]+|Sonnet[ \t]+[^\n]+|Gemini[ \t]+[^\n]+|Grok[ \t]+[^\n]+))"
+        provider_model_prefixes = {
+            "chatgpt": ("gpt",),
+            "gemini": ("gemini",),
+            "claude": ("claude", "opus", "sonnet"),
+            "grok": ("grok",),
+            "perplexity": ("sonar", "gpt", "claude", "gemini"),
+        }
+        for candidate in re.finditer(model_pattern, text, flags=re.I):
+            candidate_text = candidate.group(1).strip()
+            if provider_id in provider_model_prefixes and not candidate_text.casefold().startswith(provider_model_prefixes[provider_id]):
+                continue
+            line_start = text.rfind("\n", 0, candidate.start()) + 1
+            line_end = text.find("\n", candidate.end())
+            if line_end == -1:
+                line_end = len(text)
+            line = text[line_start:line_end]
+            if "[ref=" in line or re.search(r"\b(vs|versus)\b|vergleich|comparison", line, flags=re.I):
+                continue
+            model_match = candidate
+            break
+    def is_entitlement_upsell_match(match: re.Match[str]) -> bool:
+        line_start = text.rfind("\n", 0, match.start()) + 1
+        line_end = text.find("\n", match.end())
+        if line_end == -1:
+            line_end = len(text)
+        line = text[line_start:line_end].casefold()
+        local_context = text[max(0, match.start() - 200) : min(len(text), match.end() + 40)].casefold()
+        before_match = local_context[: local_context.find(match.group(0).casefold())]
+        if re.search(r"\b(vs|versus)\b|vergleich|comparison", line):
+            return True
+        upsell_phrases = ("upgrade to", "try for", "unlock", "subscribe", "buy ", "purchase", "get supergrok", "get premium")
+        return any(phrase in line for phrase in upsell_phrases) or any(phrase in before_match for phrase in upsell_phrases)
+
+    def first_current_plan_match(pattern: str) -> re.Match[str] | None:
+        for match in re.finditer(pattern, text, flags=re.I):
+            if not is_entitlement_upsell_match(match):
+                return match
+        return None
+
+    plan_match = first_current_plan_match(
         r"\b(ChatGPT\s+|Claude\s+|Google\s+AI\s+|Google\s+One\s+AI\s+|Gemini\s+|Perplexity\s+|X\s+)?"
         r"(Free|Plus|Pro|Team|Enterprise|Max|Advanced|Ultra|SuperGrok|Premium\+?|Premium)\s+"
-        r"(?:plan|subscription|abo|tier)\b",
-        text,
-        flags=re.I,
+        r"(?:plan|subscription|abo|tier)\b"
     )
     if not plan_match:
-        plan_match = re.search(
+        plan_match = first_current_plan_match(
             r"\b(Gemini Advanced|Google AI Pro|Google AI Ultra|Google One AI Pro|Google One AI Ultra|"
             r"Perplexity Pro|Perplexity Max|ChatGPT Pro|ChatGPT Plus|Claude Pro|Claude Max|"
-            r"SuperGrok|X Premium\+?|Premium\+)\b",
-            text,
-            flags=re.I,
+            r"SuperGrok|X Premium\+?|Premium\+)\b"
         )
     standalone_plan = ""
     account_name = account_match.group(0) if account_match else ""
@@ -780,7 +812,7 @@ def verify_visible_text(text: str, *, provider: str, mode: str) -> dict[str, Any
         "detected": bool(matched),
         "matched_markers": matched,
         "expected_markers": markers,
-        "visible_status": parse_visible_status(text or ""),
+        "visible_status": parse_visible_status(text or "", provider=provider),
     }
 
 
@@ -814,7 +846,7 @@ def infer_login_state(text: str, provider: str) -> str:
     ]
     if any(marker in lowered for marker in wall_markers):
         return "signed-out-or-wall"
-    visible_status = parse_visible_status(expanded)
+    visible_status = parse_visible_status(expanded, provider=provider)
     if visible_status.get("account") or visible_status.get("plan"):
         return "signed-in-or-ready"
     signed_out_lines = {"sign in", "log in", "login", "sign up", "anmelden", "registrieren", "create account"}
@@ -849,7 +881,7 @@ def extract_provider_inventory(provider: str, text: str) -> dict[str, Any]:
     text = expand_agent_browser_eval_text(text or "")
     catalog = model_catalog().get(provider_id, {"models": [], "tools": [], "modes": []})
     specs = provider_probe_specs().get(provider_id, {})
-    visible_status = parse_visible_status(text)
+    visible_status = parse_visible_status(text, provider=provider_id)
     models = [
         model
         for model in catalog.get("models", [])
@@ -2679,7 +2711,7 @@ def account_status_record(
     provider: str,
     visible_text: str = "",
 ) -> dict[str, Any]:
-    visible_status = parse_visible_status(visible_text or "")
+    visible_status = parse_visible_status(visible_text or "", provider=provider)
     return {
         "browser": normalize_browser_name(browser),
         "profile_directory": profile.get("directory", ""),

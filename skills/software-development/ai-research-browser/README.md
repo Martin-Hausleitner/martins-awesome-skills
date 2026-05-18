@@ -244,6 +244,65 @@ Use `agent-browser-ask` when the goal is not just inventory but controlling the 
 
 For non-CDP browsers, `agent-browser-suite` creates a disposable clone of the selected Chromium profile and launches Agent Browser with `--profile <clone-user-data>` plus the browser executable. This is useful as a repeatable E2E smoke test, but it is intentionally conservative: if provider cookies are present yet the cloned/headless browser lands on a sign-in or anti-automation page, the result is recorded as `signed-out-or-wall`. Use a real running browser plus Computer Use or a CDP-enabled hidden launch for final account, plan, model, and quota proof.
 
+Use `workflow-plan` and `workflow-run` for the fixed "select feature -> send custom prompt -> confirm start -> extract output" path. These commands always use a temporary profile clone and a dedicated headless CDP process, so existing browser windows and tabs are not closed or modified.
+
+Preview the exact safe plan:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py workflow-plan \
+  --browser brave \
+  --profile work \
+  --provider chatgpt \
+  --mode agent \
+  --prompt "Open a test chat and summarize the account-visible feature state." \
+  --submit \
+  --confirm-start
+```
+
+Start ChatGPT Deep Research or ChatGPT Agent:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py workflow-run \
+  --browser brave \
+  --profile work \
+  --provider chatgpt \
+  --mode deep-research \
+  --prompt "Research the latest public docs for OpenAI Deep Research and produce a concise source-backed summary." \
+  --submit \
+  --confirm-start \
+  --cache \
+  --output /tmp/chatgpt-deep-research-workflow.json
+```
+
+Start Gemini Deep Research:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py workflow-run \
+  --browser brave \
+  --profile work \
+  --provider google \
+  --mode deep-research \
+  --prompt "Use Deep Research to compare current browser automation options for logged-in AI accounts." \
+  --submit \
+  --confirm-start \
+  --output /tmp/gemini-deep-research-workflow.json
+```
+
+Start Perplexity Research or Grok DeepSearch:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py workflow-run \
+  --browser brave \
+  --profile work \
+  --provider perplexity \
+  --mode research \
+  --prompt "Research the topic and return citations plus a short conclusion." \
+  --submit \
+  --confirm-start
+```
+
+Each workflow writes `status.json`, `visible-text.txt`, `output.txt`, and a screenshot under the artifact root. The JSON records the clicked feature trigger, confirmation trigger, current URL, extracted output text, account inventory, and cache metadata when `--cache` is set.
+
 When you already have visible UI text from Computer Use, Peekaboo, or another capture, parse it without touching the browser:
 
 ```bash

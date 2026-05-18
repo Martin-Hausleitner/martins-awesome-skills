@@ -118,6 +118,33 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 
 Use `--plan-only` to inspect the queue first, `--max-runs 1` for a smoke test, and `--timeout 15` when a cloned browser is flaky. Treat `signed-out-or-wall` and `timeout` as real failed-login/automation-wall findings, not as success. For final account, plan, model, and quota proof, verify with a real running browser through Computer Use or a hidden CDP launch.
 
+Run fixed provider workflows from a temporary profile clone:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py workflow-plan \
+  --browser brave \
+  --profile work \
+  --provider chatgpt \
+  --mode agent \
+  --prompt "Custom prompt" \
+  --submit \
+  --confirm-start
+```
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py workflow-run \
+  --browser brave \
+  --profile work \
+  --provider google \
+  --mode deep-research \
+  --prompt "Custom Deep Research prompt" \
+  --submit \
+  --confirm-start \
+  --cache
+```
+
+`workflow-run` launches the real browser binary headless against a disposable copy of the selected profile, connects Agent Browser through CDP, selects the provider feature, fills the custom prompt, optionally confirms the provider start/research plan, writes screenshot/text/status artifacts, and terminates only the clone process. Do not wire workflow automation to a live user browser window unless the user explicitly requests live mutation.
+
 Use the interactive picker:
 
 ```bash

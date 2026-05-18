@@ -1535,6 +1535,134 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertEqual(exit_code, 2)
         self.assertIn("no profiles discovered for Microsoft Edge", payload["blockers"])
 
+    def test_ai_workflow_spec_has_required_research_and_agent_triggers(self):
+        module = load_module()
+
+        chatgpt_research = module.provider_workflow_spec("chatgpt", "deep-research")
+        chatgpt_agent = module.provider_workflow_spec("chatgpt", "agent")
+        gemini_research = module.provider_workflow_spec("google", "deep-research")
+        perplexity_research = module.provider_workflow_spec("perplexity", "research")
+
+        self.assertIn("Deep research", chatgpt_research["feature_triggers"])
+        self.assertIn("/Deepresearch", chatgpt_research["slash_triggers"])
+        self.assertIn("Agent", chatgpt_agent["feature_triggers"])
+        self.assertIn("/agent", chatgpt_agent["slash_triggers"])
+        self.assertIn("Deep Research", gemini_research["feature_triggers"])
+        self.assertIn("Start research", gemini_research["confirmation_triggers"])
+        self.assertIn("Research", perplexity_research["feature_triggers"])
+
+    def test_build_workflow_plan_uses_clone_cdp_and_preserves_live_browser(self):
+        module = load_module()
+
+        plan = module.build_ai_workflow_plan(
+            browser={"id": "brave", "display_name": "Brave Browser", "binary_path": "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"},
+            profile={"directory": "Profile 2", "name": "work"},
+            provider="chatgpt",
+            mode="agent",
+            prompt="Test prompt",
+            artifact_root=Path("/tmp/artifacts"),
+            clone_root=Path("/tmp/clones"),
+            submit=True,
+            confirm_start=True,
+            wait_seconds=5,
+        )
+
+        self.assertEqual(plan["provider"], "chatgpt")
+        self.assertEqual(plan["mode"], "agent")
+        self.assertEqual(plan["browser"], "brave")
+        self.assertEqual(plan["profile"], "Profile 2")
+        self.assertEqual(plan["isolation"], "temporary-profile-clone-cdp")
+        self.assertTrue(plan["safety"]["does_not_close_existing_browser_windows"])
+        self.assertEqual(plan["actions"][0]["label"], "open-provider")
+        self.assertIn("select-feature", [action["label"] for action in plan["actions"]])
+        self.assertIn("confirm-start", [action["label"] for action in plan["actions"]])
+
+    def test_snapshot_ref_helpers_prefer_exact_textbox_and_button_refs(self):
+        module = load_module()
+        snapshot = "\n".join(
+            [
+                '- link "KI Modelle für Voice-Agent" [ref=e14]',
+                '- button "Add files and more" [ref=e34]',
+                '- textbox "Chat with ChatGPT" [ref=e35]',
+                '- button "Agent" [ref=e42]',
+            ]
+        )
+
+        self.assertEqual(module.find_snapshot_ref(snapshot, "Add files and more", roles=("button",)), "e34")
+        self.assertEqual(module.find_snapshot_ref(snapshot, "Agent", roles=("button",)), "e42")
+        self.assertEqual(module.find_composer_ref(snapshot), "e35")
+
+    def test_snapshot_ref_helper_does_not_match_start_dictation_for_start(self):
+        module = load_module()
+        snapshot = "\n".join(
+            [
+                '- button "Start dictation" [ref=e47]',
+                '- button "Start Voice" [ref=e48]',
+            ]
+        )
+
+        self.assertEqual(module.find_snapshot_ref(snapshot, "Start", roles=("button",)), "")
+
+    def test_extract_workflow_output_prefers_provider_report_selectors(self):
+        module = load_module()
+
+        body = "\n".join(
+            [
+                "ChatGPT",
+                "Sources",
+                "Research complete",
+                "Final answer",
+                "The result text",
+            ]
+        )
+        extracted = module.extract_workflow_output_from_text(body, provider="chatgpt", mode="deep-research")
+
+        self.assertEqual(extracted["status"], "complete")
+        self.assertIn("The result text", extracted["text"])
+
+    def test_cmd_workflow_plan_outputs_safe_json(self):
+        module = load_module()
+        original_discover = module.discover_browsers
+        module.discover_browsers = lambda: [
+            {
+                "id": "brave",
+                "display_name": "Brave Browser",
+                "binary_path": "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+                "user_data_dir": "/tmp/brave",
+                "default_port": 9222,
+                "profiles": [{"directory": "Profile 2", "name": "work", "account": ""}],
+            }
+        ]
+        try:
+            out = StringIO()
+            with redirect_stdout(out):
+                exit_code = module.main(
+                    [
+                        "workflow-plan",
+                        "--browser",
+                        "brave",
+                        "--profile",
+                        "work",
+                        "--provider",
+                        "chatgpt",
+                        "--mode",
+                        "deep-research",
+                        "--prompt",
+                        "Find sources",
+                        "--submit",
+                        "--confirm-start",
+                    ]
+                )
+        finally:
+            module.discover_browsers = original_discover
+
+        payload = json.loads(out.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["profile"], "Profile 2")
+        self.assertTrue(payload["safety"]["uses_profile_clone"])
+        self.assertTrue(payload["submit"])
+        self.assertTrue(payload["confirm_start"])
+
 
 if __name__ == "__main__":
     unittest.main()

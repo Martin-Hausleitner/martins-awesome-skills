@@ -988,6 +988,282 @@ def provider_composer_selector(provider: str) -> str:
     return selectors.get(provider_id, "textarea, [contenteditable='true'], [role='textbox']")
 
 
+def provider_workflow_specs() -> dict[str, dict[str, dict[str, Any]]]:
+    return {
+        "chatgpt": {
+            "chat": {
+                "feature_triggers": [],
+                "slash_triggers": [],
+                "confirmation_triggers": [],
+                "running_markers": ["Stop generating", "Regenerate", "Sources"],
+                "completion_markers": ["Sources", "Final answer", "Done"],
+                "output_selectors": ["main", "[data-testid='conversation-turn']"],
+            },
+            "deep-research": {
+                "feature_triggers": ["Deep research", "Deep Research"],
+                "menu_triggers": ["Add files and more", "Tools"],
+                "slash_triggers": ["/Deepresearch", "/deep research"],
+                "confirmation_triggers": ["Start research", "Create report", "Start", "Begin"],
+                "running_markers": ["Researching", "Searching", "Creating report", "Sources"],
+                "completion_markers": ["Research complete", "Sources", "Final answer", "Done"],
+                "output_selectors": ["main", "[data-testid='conversation-turn']", "article"],
+            },
+            "agent": {
+                "feature_triggers": ["Agent", "ChatGPT agent", "Use agent"],
+                "menu_triggers": ["Add files and more", "Tools"],
+                "slash_triggers": ["/agent"],
+                "confirmation_triggers": ["Start", "Take control", "Allow", "Confirm"],
+                "running_markers": ["Agent", "Taking action", "Working", "Running"],
+                "completion_markers": ["Done", "Finished", "Completed", "Task complete"],
+                "output_selectors": ["main", "[data-testid='conversation-turn']", "article"],
+            },
+        },
+        "gemini": {
+            "chat": {
+                "feature_triggers": [],
+                "slash_triggers": [],
+                "confirmation_triggers": [],
+                "running_markers": ["Gemini", "Antwort wird"],
+                "completion_markers": ["Sources", "Quellen", "Antwort"],
+                "output_selectors": ["#extended-response-markdown-content", "message-content", "main"],
+            },
+            "deep-research": {
+                "feature_triggers": ["Deep Research", "Deep research", "Recherche"],
+                "menu_triggers": ["Tools", "Canvas"],
+                "slash_triggers": [],
+                "confirmation_triggers": ["Start research", "Recherche starten", "Starten", "Create plan"],
+                "running_markers": ["Creating plan", "Plan erstellen", "Researching", "Analysiere Ergebnisse", "Erstelle Bericht"],
+                "completion_markers": ["Research complete", "Recherche fertig", "Ich bin mit deiner Recherche fertig", "Abgeschlossen"],
+                "output_selectors": ["#extended-response-markdown-content", "message-content", "main"],
+            },
+            "agent": {
+                "feature_triggers": ["Agent"],
+                "menu_triggers": ["Tools", "Canvas"],
+                "slash_triggers": [],
+                "confirmation_triggers": ["Confirm", "Bestätigen", "Start", "Allow"],
+                "running_markers": ["Agent", "Plan", "Working"],
+                "completion_markers": ["Done", "Fertig", "Completed"],
+                "output_selectors": ["message-content", "main"],
+            },
+        },
+        "perplexity": {
+            "chat": {
+                "feature_triggers": [],
+                "slash_triggers": [],
+                "confirmation_triggers": [],
+                "running_markers": ["Searching", "Sources"],
+                "completion_markers": ["Sources", "Answer"],
+                "output_selectors": ["main", "article"],
+            },
+            "research": {
+                "feature_triggers": ["Research", "Deep Research", "Pro Search"],
+                "menu_triggers": ["Search", "Focus", "Sources"],
+                "slash_triggers": [],
+                "confirmation_triggers": ["Start", "Submit"],
+                "running_markers": ["Researching", "Searching", "Sources"],
+                "completion_markers": ["Sources", "Answer", "Completed"],
+                "output_selectors": ["main", "article"],
+            },
+        },
+        "grok": {
+            "chat": {
+                "feature_triggers": [],
+                "slash_triggers": [],
+                "confirmation_triggers": [],
+                "running_markers": ["Generating", "Search"],
+                "completion_markers": ["Sources", "Answer"],
+                "output_selectors": ["main", "article"],
+            },
+            "research": {
+                "feature_triggers": ["DeepSearch", "Deep Search", "Search", "Think"],
+                "menu_triggers": ["Search", "Tools"],
+                "slash_triggers": [],
+                "confirmation_triggers": ["Start", "Submit"],
+                "running_markers": ["DeepSearch", "Searching", "Thinking"],
+                "completion_markers": ["Sources", "Answer", "Completed"],
+                "output_selectors": ["main", "article"],
+            },
+        },
+        "claude": {
+            "chat": {
+                "feature_triggers": [],
+                "slash_triggers": [],
+                "confirmation_triggers": [],
+                "running_markers": ["Claude", "Generating"],
+                "completion_markers": ["Response", "Done"],
+                "output_selectors": ["main", "article"],
+            },
+            "research": {
+                "feature_triggers": ["Research", "Search"],
+                "slash_triggers": [],
+                "confirmation_triggers": ["Start", "Continue"],
+                "running_markers": ["Research", "Searching", "Sources"],
+                "completion_markers": ["Sources", "Done", "Completed"],
+                "output_selectors": ["main", "article"],
+            },
+            "artifacts": {
+                "feature_triggers": ["Artifacts", "Create"],
+                "slash_triggers": [],
+                "confirmation_triggers": ["Create", "Start"],
+                "running_markers": ["Artifact", "Preview"],
+                "completion_markers": ["Artifact", "Preview"],
+                "output_selectors": ["main", "article"],
+            },
+        },
+    }
+
+
+def provider_workflow_spec(provider: str, mode: str) -> dict[str, Any]:
+    provider_id = normalize_provider_name(provider)
+    mode_id = "research" if provider_id in {"perplexity", "grok", "claude"} and mode == "deep-research" else mode
+    specs = provider_workflow_specs()
+    provider_specs = specs.get(provider_id, {})
+    if mode_id not in provider_specs:
+        raise ValueError(f"unsupported workflow mode for {provider_id}: {mode}")
+    spec = dict(provider_specs[mode_id])
+    spec["provider"] = provider_id
+    spec["mode"] = mode_id
+    spec["composer_selector"] = provider_composer_selector(provider_id)
+    spec["url"] = provider_url(provider_id)
+    return spec
+
+
+def build_ai_workflow_plan(
+    *,
+    browser: dict[str, Any],
+    profile: dict[str, str],
+    provider: str,
+    mode: str,
+    prompt: str,
+    artifact_root: Path,
+    clone_root: Path,
+    submit: bool = False,
+    confirm_start: bool = False,
+    wait_seconds: int = 30,
+) -> dict[str, Any]:
+    provider_id = normalize_provider_name(provider)
+    browser_id = normalize_browser_name(str(browser.get("id", "")))
+    profile_directory = str(profile.get("directory", "Default"))
+    spec = provider_workflow_spec(provider_id, mode)
+    actions: list[dict[str, Any]] = [
+        {"label": "open-provider", "target": spec["url"]},
+        {"label": "capture-before", "tool": "snapshot+visible-text+screenshot"},
+    ]
+    if spec.get("feature_triggers"):
+        actions.append({"label": "open-feature-menu", "triggers": spec.get("menu_triggers", [])})
+        actions.append({"label": "select-feature", "triggers": spec["feature_triggers"], "slash_fallbacks": spec.get("slash_triggers", [])})
+    actions.append({"label": "fill-prompt", "composer_selector": spec["composer_selector"], "prompt_preview": prompt[:160]})
+    if submit:
+        actions.append({"label": "submit-prompt", "key": "Enter"})
+    if submit and confirm_start and spec.get("confirmation_triggers"):
+        actions.append({"label": "confirm-start", "triggers": spec["confirmation_triggers"]})
+    actions.append({"label": "wait-for-run", "seconds": wait_seconds, "markers": spec.get("running_markers", [])})
+    actions.append({"label": "extract-output", "selectors": spec.get("output_selectors", [])})
+    return {
+        "provider": provider_id,
+        "mode": spec["mode"],
+        "browser": browser_id,
+        "browser_name": browser.get("display_name", ""),
+        "profile": profile_directory,
+        "profile_name": profile.get("name", ""),
+        "submit": submit,
+        "confirm_start": confirm_start,
+        "wait_seconds": wait_seconds,
+        "artifact_root": str(artifact_root.expanduser()),
+        "clone_root": str(clone_root.expanduser()),
+        "isolation": "temporary-profile-clone-cdp",
+        "safety": {
+            "uses_profile_clone": True,
+            "does_not_close_existing_browser_windows": True,
+            "terminates_only_launched_clone_process": True,
+            "does_not_read_cookie_values": True,
+        },
+        "workflow_spec": spec,
+        "actions": actions,
+    }
+
+
+def extract_workflow_output_from_text(text: str, *, provider: str, mode: str) -> dict[str, Any]:
+    provider_id = normalize_provider_name(provider)
+    spec = provider_workflow_spec(provider_id, mode)
+    expanded = expand_agent_browser_eval_text(text or "")
+    markers = [str(marker) for marker in spec.get("completion_markers", [])]
+    running_markers = [str(marker) for marker in spec.get("running_markers", [])]
+    status = "empty"
+    if expanded.strip():
+        status = "captured"
+    if any(marker.lower() in expanded.lower() for marker in running_markers):
+        status = "running"
+    if any(marker.lower() in expanded.lower() for marker in markers):
+        status = "complete"
+    lines = [line.rstrip() for line in expanded.splitlines()]
+    collapsed = "\n".join(line for line in lines if line.strip())
+    return {
+        "provider": provider_id,
+        "mode": spec["mode"],
+        "status": status,
+        "completion_markers_found": [marker for marker in markers if marker.lower() in expanded.lower()],
+        "running_markers_found": [marker for marker in running_markers if marker.lower() in expanded.lower()],
+        "text": collapsed,
+        "text_length": len(collapsed),
+    }
+
+
+def browser_eval_body_and_report_script(selectors: list[str]) -> str:
+    selectors_json = json.dumps(selectors)
+    return (
+        "(() => {"
+        f"const selectors = {selectors_json};"
+        "const parts = [];"
+        "for (const selector of selectors) {"
+        "  for (const el of document.querySelectorAll(selector)) {"
+        "    const text = (el.innerText || el.textContent || '').trim();"
+        "    if (text && !parts.includes(text)) parts.push(text);"
+        "  }"
+        "}"
+        "const body = (document.body && document.body.innerText || '').trim();"
+        "if (body && !parts.includes(body)) parts.push(body);"
+        "return parts.join('\\n\\n--- BODY ---\\n\\n');"
+        "})()"
+    )
+
+
+def find_snapshot_ref(
+    snapshot: str,
+    label: str,
+    *,
+    roles: tuple[str, ...] = ("button", "menuitem", "option", "textbox", "link"),
+    exact_only: bool = False,
+) -> str:
+    escaped = re.escape(label)
+    for role in roles:
+        pattern = rf"- {re.escape(role)} \"{escaped}\"(?:\s|\[).*?\[ref=([^\]]+)\]"
+        match = re.search(pattern, snapshot)
+        if match:
+            return match.group(1)
+    if exact_only or label.lower() in {"start", "confirm", "allow", "begin"}:
+        return ""
+    for role in roles:
+        pattern = rf"- {re.escape(role)} \"[^\"]*{escaped}[^\"]*\"(?:\s|\[).*?\[ref=([^\]]+)\]"
+        match = re.search(pattern, snapshot, flags=re.I)
+        if match:
+            full_label_match = re.search(rf"- {re.escape(role)} \"([^\"]*{escaped}[^\"]*)\"", match.group(0), flags=re.I)
+            full_label = full_label_match.group(1).lower() if full_label_match else ""
+            if any(blocked in full_label for blocked in ["dictation", "voice"]):
+                continue
+            return match.group(1)
+    return ""
+
+
+def find_composer_ref(snapshot: str) -> str:
+    for label in ["Chat with ChatGPT", "Message ChatGPT", "Ask anything", "Ask Perplexity", "Prompt eingeben", "How can I help"]:
+        ref = find_snapshot_ref(snapshot, label, roles=("textbox",))
+        if ref:
+            return ref
+    match = re.search(r"- textbox \"[^\"]*\".*?\[ref=([^\]]+)\]", snapshot)
+    return match.group(1) if match else ""
+
+
 def agent_browser_ask_export(
     *,
     cdp_port: int,
@@ -1102,7 +1378,10 @@ def endpoint_version(port: int, host: str = "127.0.0.1") -> dict[str, Any] | Non
 
 
 def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True)
+    except PermissionError as exc:
+        return subprocess.CompletedProcess(cmd, 126, "", str(exc))
 
 
 def port_owner(port: int) -> str:
@@ -1727,6 +2006,285 @@ def agent_browser_profile_probe(
     write_json(paths["status_json"], payload)
     (paths["run_dir"] / "visible-text.txt").write_text(visible_text, encoding="utf-8")
     return {**payload, "status_json": str(paths["status_json"]), "visible_text_path": str(paths["run_dir"] / "visible-text.txt")}
+
+
+def click_first_agent_browser_text(
+    invoke: Any,
+    labels: list[str],
+    *,
+    command_log_label: str,
+    snapshot: str = "",
+) -> dict[str, Any]:
+    attempts: list[dict[str, Any]] = []
+    for label in labels:
+        ref = find_snapshot_ref(snapshot, str(label), roles=("button", "menuitem", "option", "link")) if snapshot else ""
+        if ref:
+            result = invoke(f"{command_log_label}:{label}", ["click", f"@{ref}"])
+            attempts.append({"label": label, "ref": ref, "returncode": result.returncode})
+            if result.returncode == 0:
+                return {"clicked": True, "label": label, "ref": ref, "attempts": attempts}
+            continue
+        if str(label).lower() in {"start", "confirm", "allow", "begin"}:
+            attempts.append({"label": label, "returncode": 1, "skipped": "generic-label-without-exact-ref"})
+            continue
+        result = invoke(f"{command_log_label}:{label}", ["find", "text", str(label), "click"])
+        attempts.append({"label": label, "returncode": result.returncode})
+        if result.returncode == 0:
+            return {"clicked": True, "label": label, "attempts": attempts}
+    return {"clicked": False, "label": "", "attempts": attempts}
+
+
+def fill_agent_browser_composer(
+    invoke: Any,
+    *,
+    snapshot: str,
+    selector: str,
+    text: str,
+    label: str,
+) -> subprocess.CompletedProcess[str]:
+    ref = find_composer_ref(snapshot)
+    if ref:
+        return invoke(label, ["fill", f"@{ref}", text])
+    return invoke(label, ["fill", selector, text])
+
+
+def agent_browser_profile_workflow_run(
+    *,
+    browser: dict[str, Any],
+    profile: dict[str, str],
+    provider: str,
+    mode: str,
+    prompt: str,
+    artifact_root: Path,
+    clone_root: Path,
+    submit: bool = False,
+    confirm_start: bool = False,
+    wait_seconds: int = 30,
+    timeout: float = 90.0,
+    cache_root: Path | None = None,
+    refresh_cache: bool = True,
+) -> dict[str, Any]:
+    provider_id = normalize_provider_name(provider)
+    spec = provider_workflow_spec(provider_id, mode)
+    browser_id = normalize_browser_name(str(browser.get("id", "")))
+    profile_directory = str(profile.get("directory", "Default"))
+    run_name = f"{browser_id}-{slug(profile_directory)}-{provider_id}-{slug(spec['mode'])}-workflow"
+    paths = build_artifact_paths(artifact_root.expanduser(), provider=provider_id, mode=f"{spec['mode']}-workflow", browser=browser_id, profile=profile_directory)
+    paths["run_dir"].mkdir(parents=True, exist_ok=True)
+    commands: list[dict[str, Any]] = []
+    workflow_events: list[dict[str, Any]] = []
+    plan = build_ai_workflow_plan(
+        browser=browser,
+        profile=profile,
+        provider=provider_id,
+        mode=spec["mode"],
+        prompt=prompt,
+        artifact_root=artifact_root,
+        clone_root=clone_root,
+        submit=submit,
+        confirm_start=confirm_start,
+        wait_seconds=wait_seconds,
+    )
+
+    clone = clone_browser_profile_for_agent_browser(browser, profile, clone_root, run_slug=run_name)
+    if not clone.get("ok"):
+        payload = {
+            **plan,
+            "status": "blocked",
+            "blocker": clone.get("error", "profile clone failed"),
+            "clone": clone,
+            "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        }
+        write_json(paths["status_json"], payload)
+        return {**payload, "status_json": str(paths["status_json"])}
+
+    session = f"ai-workflow-{run_name}"
+    cdp_port = find_available_port()
+    launch_args = build_clone_cdp_launch_args(
+        browser,
+        clone_user_data=str(clone["clone_user_data"]),
+        profile_directory=profile_directory,
+        port=cdp_port,
+        headless=True,
+        initial_url="about:blank",
+    )
+    browser_process, launch_status = start_clone_cdp_browser(
+        launch_args=launch_args,
+        port=cdp_port,
+        log_path=paths["run_dir"] / "browser-cdp.log",
+    )
+    if not launch_status.get("ok"):
+        terminate_process(browser_process)
+        payload = {
+            **plan,
+            "status": "blocked",
+            "blocker": "browser clone CDP launch failed",
+            "clone": clone,
+            "launch": launch_status,
+            "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        }
+        write_json(paths["status_json"], payload)
+        return {**payload, "status_json": str(paths["status_json"])}
+
+    def invoke(label: str, extra_args: list[str]) -> subprocess.CompletedProcess[str]:
+        result = run_agent_browser(["--cdp", str(cdp_port), *extra_args], session=session, timeout=timeout)
+        commands.append(
+            {
+                "label": label,
+                "args": ["agent-browser", "--session", session, "--cdp", str(cdp_port), *extra_args],
+                "returncode": result.returncode,
+                "stdout": result.stdout[-4000:],
+                "stderr": result.stderr[-4000:],
+            }
+        )
+        return result
+
+    visible_text_parts: list[str] = []
+    screenshot = paths["screenshot_png"]
+    current_url = ""
+    try:
+        invoke("open-provider", ["open", spec["url"]])
+        invoke("wait-initial", ["wait", "4000"])
+        before_snapshot = invoke("snapshot-before", ["snapshot", "-i", "-c"])
+        current_snapshot_text = before_snapshot.stdout
+        visible_text_parts.append(current_snapshot_text)
+        before_eval = invoke("eval-before-text", ["eval", "document.body.innerText"])
+        visible_text_parts.append(before_eval.stdout)
+
+        inventory = extract_provider_inventory(provider_id, "\n".join(visible_text_parts))
+        if inventory.get("login_state") == "signed-out-or-wall":
+            status = "signed-out-or-wall"
+        else:
+            status = "opened"
+            feature_result = {"clicked": False, "label": "", "attempts": []}
+            if spec.get("feature_triggers"):
+                menu_result = click_first_agent_browser_text(
+                    invoke,
+                    list(spec.get("menu_triggers", [])),
+                    command_log_label="open-feature-menu",
+                    snapshot=current_snapshot_text,
+                )
+                if menu_result.get("clicked"):
+                    workflow_events.append({"event": "open-feature-menu", **menu_result})
+                    invoke("wait-after-feature-menu", ["wait", "1000"])
+                    menu_snapshot = invoke("snapshot-after-feature-menu", ["snapshot", "-i", "-c"])
+                    current_snapshot_text = menu_snapshot.stdout or current_snapshot_text
+                    visible_text_parts.append(current_snapshot_text)
+                feature_result = click_first_agent_browser_text(
+                    invoke,
+                    list(spec["feature_triggers"]),
+                    command_log_label="select-feature",
+                    snapshot=current_snapshot_text,
+                )
+                workflow_events.append({"event": "select-feature", **feature_result})
+            if not feature_result.get("clicked") and spec.get("slash_triggers"):
+                slash = str(spec["slash_triggers"][0])
+                slash_result = fill_agent_browser_composer(
+                    invoke,
+                    snapshot=current_snapshot_text,
+                    selector=spec["composer_selector"],
+                    text=slash,
+                    label="slash-feature",
+                )
+                workflow_events.append({"event": "slash-feature", "trigger": slash, "returncode": slash_result.returncode})
+                if slash_result.returncode == 0:
+                    invoke("slash-enter", ["press", "Enter"])
+                    invoke("wait-after-slash", ["wait", "1500"])
+                    slash_snapshot = invoke("snapshot-after-slash", ["snapshot", "-i", "-c"])
+                    current_snapshot_text = slash_snapshot.stdout or current_snapshot_text
+
+            fill_result = fill_agent_browser_composer(
+                invoke,
+                snapshot=current_snapshot_text,
+                selector=spec["composer_selector"],
+                text=prompt,
+                label="fill-prompt",
+            )
+            workflow_events.append({"event": "fill-prompt", "returncode": fill_result.returncode})
+            if submit and fill_result.returncode == 0:
+                invoke("submit-prompt", ["press", "Enter"])
+                status = "submitted"
+                invoke("wait-after-submit", ["wait", str(max(1000, min(wait_seconds, 12) * 1000))])
+                if confirm_start and spec.get("confirmation_triggers"):
+                    confirm_snapshot = invoke("snapshot-before-confirm", ["snapshot", "-i", "-c"])
+                    current_snapshot_text = confirm_snapshot.stdout or current_snapshot_text
+                    visible_text_parts.append(current_snapshot_text)
+                    confirm_result = click_first_agent_browser_text(
+                        invoke,
+                        list(spec["confirmation_triggers"]),
+                        command_log_label="confirm-start",
+                        snapshot=current_snapshot_text,
+                    )
+                    workflow_events.append({"event": "confirm-start", **confirm_result})
+                    if confirm_result.get("clicked"):
+                        status = "started"
+                        invoke("wait-after-confirm", ["wait", str(max(1000, min(wait_seconds, 30) * 1000))])
+
+        after_snapshot = invoke("snapshot-after", ["snapshot", "-i", "-c"])
+        visible_text_parts.append(after_snapshot.stdout)
+        output_eval = invoke("extract-output", ["eval", browser_eval_body_and_report_script(list(spec.get("output_selectors", [])))])
+        visible_text_parts.append(output_eval.stdout)
+        current_url = invoke("get-url", ["get", "url"]).stdout.strip()
+        screenshot_result = invoke("screenshot", ["screenshot", str(screenshot)])
+        if screenshot_result.returncode != 0:
+            capture_cdp_screenshot(cdp_port, screenshot)
+        invoke("close-temp-page", ["close"])
+    finally:
+        terminate_process(browser_process)
+
+    visible_text = "\n".join(part for part in visible_text_parts if part)
+    output = extract_workflow_output_from_text(visible_text, provider=provider_id, mode=spec["mode"])
+    verification = verify_visible_text(visible_text, provider=provider_id, mode=spec["mode"]) if visible_text else None
+    if output["status"] == "complete" and status in {"submitted", "started"}:
+        status = "verified"
+    elif output["status"] == "running" and status == "submitted":
+        status = "started"
+
+    cache_payload = None
+    if cache_root and visible_text.strip():
+        record = save_chat_record(
+            cache_root=cache_root,
+            browser=browser_id,
+            profile=profile_directory,
+            provider=provider_id,
+            chat_url=current_url or spec["url"],
+            title=f"{provider_id} {spec['mode']} workflow",
+            text=visible_text,
+            source="agent-browser-profile-clone-workflow",
+            refresh=refresh_cache,
+        )
+        cache_payload = {
+            "key": record["key"],
+            "metadata_path": str(record["metadata_path"]),
+            "text_path": str(record["text_path"]),
+            "cache_hit": record["cache_hit"],
+        }
+
+    (paths["run_dir"] / "visible-text.txt").write_text(visible_text, encoding="utf-8")
+    (paths["run_dir"] / "output.txt").write_text(output["text"], encoding="utf-8")
+    payload = {
+        **plan,
+        "status": status,
+        "clone": clone,
+        "cdp_port": cdp_port,
+        "launch": launch_status,
+        "screenshot": str(screenshot) if screenshot.exists() else "",
+        "chat_url": current_url,
+        "inventory": extract_provider_inventory(provider_id, visible_text),
+        "verification": verification,
+        "workflow_events": workflow_events,
+        "output": output,
+        "cache": cache_payload,
+        "commands": commands,
+        "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    }
+    write_json(paths["status_json"], payload)
+    return {
+        **payload,
+        "status_json": str(paths["status_json"]),
+        "visible_text_path": str(paths["run_dir"] / "visible-text.txt"),
+        "output_text_path": str(paths["run_dir"] / "output.txt"),
+    }
 
 
 def requested_provider_ids(raw: str = "") -> list[str]:
@@ -2514,6 +3072,69 @@ def cmd_agent_browser_ask(args: argparse.Namespace) -> int:
     return 0 if payload.get("status") in {"filled", "submitted"} else 1
 
 
+def workflow_prompt_from_args(args: argparse.Namespace) -> str:
+    prompt = args.prompt
+    if args.prompt_file:
+        prompt = Path(args.prompt_file).expanduser().read_text(encoding="utf-8")
+    if not prompt:
+        raise SystemExit(f"{args.command} requires --prompt or --prompt-file")
+    return prompt
+
+
+def resolve_workflow_browser_profile(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, str]]:
+    browsers = discover_browsers()
+    browser_id = normalize_browser_name(args.browser)
+    browser_map = {browser["id"]: browser for browser in browsers}
+    if browser_id not in browser_map:
+        raise SystemExit(f"browser not discovered: {args.browser}")
+    browser = browser_map[browser_id]
+    profile = resolve_profile(browser.get("profiles", []), args.profile)
+    return browser, profile
+
+
+def cmd_workflow_plan(args: argparse.Namespace) -> int:
+    browser, profile = resolve_workflow_browser_profile(args)
+    payload = build_ai_workflow_plan(
+        browser=browser,
+        profile=profile,
+        provider=args.provider,
+        mode=args.mode,
+        prompt=workflow_prompt_from_args(args),
+        artifact_root=Path(args.artifact_root).expanduser(),
+        clone_root=Path(args.clone_root).expanduser(),
+        submit=args.submit,
+        confirm_start=args.confirm_start,
+        wait_seconds=args.wait_seconds,
+    )
+    if args.output:
+        write_json(Path(args.output).expanduser(), payload)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_workflow_run(args: argparse.Namespace) -> int:
+    browser, profile = resolve_workflow_browser_profile(args)
+    payload = agent_browser_profile_workflow_run(
+        browser=browser,
+        profile=profile,
+        provider=args.provider,
+        mode=args.mode,
+        prompt=workflow_prompt_from_args(args),
+        artifact_root=Path(args.artifact_root).expanduser(),
+        clone_root=Path(args.clone_root).expanduser(),
+        submit=args.submit,
+        confirm_start=args.confirm_start,
+        wait_seconds=args.wait_seconds,
+        timeout=args.timeout,
+        cache_root=Path(args.cache_root).expanduser() if args.cache else None,
+        refresh_cache=not args.no_refresh_cache,
+    )
+    if args.output:
+        write_json(Path(args.output).expanduser(), payload)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0 if payload.get("status") in {"opened", "submitted", "started", "verified", "captured"} else 1
+
+
 def cmd_save_chat(args: argparse.Namespace) -> int:
     text = Path(args.text_file).expanduser().read_text(encoding="utf-8") if args.text_file else sys.stdin.read()
     record = save_chat_record(
@@ -2708,6 +3329,36 @@ def build_parser() -> argparse.ArgumentParser:
     ask.add_argument("--cache-root", default=str(default_chat_cache_root()))
     ask.add_argument("--timeout", type=float, default=90.0)
     ask.add_argument("--output", default="")
+    workflow_plan = sub.add_parser("workflow-plan")
+    workflow_plan.add_argument("--artifact-root", default="/tmp/hermes-ai-research-workflows")
+    workflow_plan.add_argument("--clone-root", default="/tmp/hermes-ai-research-workflow-clones")
+    workflow_plan.add_argument("--browser", default="brave")
+    workflow_plan.add_argument("--profile", default="work")
+    workflow_plan.add_argument("--provider", choices=provider_cli_choices(), required=True)
+    workflow_plan.add_argument("--mode", default="chat")
+    workflow_plan.add_argument("--prompt", default="")
+    workflow_plan.add_argument("--prompt-file", default="")
+    workflow_plan.add_argument("--submit", action="store_true")
+    workflow_plan.add_argument("--confirm-start", action="store_true")
+    workflow_plan.add_argument("--wait-seconds", type=int, default=30)
+    workflow_plan.add_argument("--output", default="")
+    workflow_run = sub.add_parser("workflow-run")
+    workflow_run.add_argument("--artifact-root", default="/tmp/hermes-ai-research-workflows")
+    workflow_run.add_argument("--clone-root", default="/tmp/hermes-ai-research-workflow-clones")
+    workflow_run.add_argument("--browser", default="brave")
+    workflow_run.add_argument("--profile", default="work")
+    workflow_run.add_argument("--provider", choices=provider_cli_choices(), required=True)
+    workflow_run.add_argument("--mode", default="chat")
+    workflow_run.add_argument("--prompt", default="")
+    workflow_run.add_argument("--prompt-file", default="")
+    workflow_run.add_argument("--submit", action="store_true", help="Actually send the prompt.")
+    workflow_run.add_argument("--confirm-start", action="store_true", help="Click the provider plan/start confirmation when visible.")
+    workflow_run.add_argument("--wait-seconds", type=int, default=30)
+    workflow_run.add_argument("--timeout", type=float, default=90.0)
+    workflow_run.add_argument("--cache", action="store_true")
+    workflow_run.add_argument("--cache-root", default=str(default_chat_cache_root()))
+    workflow_run.add_argument("--no-refresh-cache", action="store_true")
+    workflow_run.add_argument("--output", default="")
     save_chat = sub.add_parser("save-chat")
     save_chat.add_argument("--cache-root", default=str(default_chat_cache_root()))
     save_chat.add_argument("--browser", required=True)
@@ -2810,6 +3461,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_agent_browser_live_suite(args)
     if args.command == "agent-browser-ask":
         return cmd_agent_browser_ask(args)
+    if args.command == "workflow-plan":
+        return cmd_workflow_plan(args)
+    if args.command == "workflow-run":
+        return cmd_workflow_run(args)
     if args.command == "save-chat":
         return cmd_save_chat(args)
     if args.command == "chat-cache":

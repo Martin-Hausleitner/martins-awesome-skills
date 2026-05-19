@@ -2348,6 +2348,283 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertEqual(payload["isolation"], "live-cdp-background-tab")
         self.assertTrue(payload["safety"]["does_not_close_existing_browser_windows"])
 
+    def test_default_sibling_profile_dir_is_separate_from_source_profile(self):
+        module = load_module()
+
+        path = module.default_sibling_user_data_dir(browser="Comet", profile="Default")
+
+        self.assertEqual(path.name, "user-data")
+        self.assertIn("comet-default", str(path))
+        self.assertIn(".cache/ai-research-browser/sibling-profiles", str(path))
+
+    def test_clean_sibling_profile_locks_removes_startup_locks_only(self):
+        module = load_module()
+        root = Path(tempfile.mkdtemp())
+        profile = root / "Default"
+        profile.mkdir()
+        for name in ["SingletonLock", "SingletonSocket", "SingletonCookie", "DevToolsActivePort"]:
+            (root / name).write_text("stale", encoding="utf-8")
+        (profile / "LOCK").write_text("stale", encoding="utf-8")
+        (profile / "Preferences").write_text("{}", encoding="utf-8")
+
+        removed = module.clean_sibling_profile_locks(root, "Default")
+
+        self.assertEqual(
+            sorted(Path(item).name for item in removed),
+            ["DevToolsActivePort", "LOCK", "SingletonCookie", "SingletonLock", "SingletonSocket"],
+        )
+        self.assertTrue((profile / "Preferences").exists())
+
+    def test_prepare_sibling_profile_seeds_reuses_and_can_refresh(self):
+        module = load_module()
+        source_root = Path(tempfile.mkdtemp())
+        source_profile = source_root / "Default"
+        source_profile.mkdir(parents=True)
+        (source_root / "Local State").write_text('{"profile":{}}', encoding="utf-8")
+        (source_profile / "Preferences").write_text('{"profile":{"name":"Work"}}', encoding="utf-8")
+        (source_profile / "SingletonLock").write_text("do-not-copy", encoding="utf-8")
+        sibling_user_data = Path(tempfile.mkdtemp()) / "sibling" / "user-data"
+
+        first = module.prepare_sibling_profile(
+            browser={"id": "brave", "user_data_dir": str(source_root)},
+            profile={"directory": "Default", "path": str(source_profile)},
+            sibling_user_data=sibling_user_data,
+            refresh=False,
+        )
+        second = module.prepare_sibling_profile(
+            browser={"id": "brave", "user_data_dir": str(source_root)},
+            profile={"directory": "Default", "path": str(source_profile)},
+            sibling_user_data=sibling_user_data,
+            refresh=False,
+        )
+        refreshed = module.prepare_sibling_profile(
+            browser={"id": "brave", "user_data_dir": str(source_root)},
+            profile={"directory": "Default", "path": str(source_profile)},
+            sibling_user_data=sibling_user_data,
+            refresh=True,
+        )
+
+        self.assertEqual(first["status"], "seeded")
+        self.assertEqual(second["status"], "reused")
+        self.assertEqual(refreshed["status"], "refreshed")
+        self.assertTrue((sibling_user_data / "Default" / "Preferences").exists())
+        self.assertTrue((sibling_user_data / "Local State").exists())
+        self.assertFalse((sibling_user_data / "Default" / "SingletonLock").exists())
+        self.assertNotEqual(first["sibling_user_data"], str(source_root))
+
+    def test_sibling_launch_args_are_headful_offscreen_by_default(self):
+        module = load_module()
+
+        args = module.build_sibling_cdp_launch_args(
+            {"binary_path": "/Applications/Comet.app/Contents/MacOS/Comet"},
+            sibling_user_data="/tmp/sibling/user-data",
+            profile_directory="Default",
+            port=9333,
+            provider="google",
+            headless=False,
+        )
+
+        self.assertEqual(args[0], "/Applications/Comet.app/Contents/MacOS/Comet")
+        self.assertIn("--remote-debugging-port=9333", args)
+        self.assertIn("--user-data-dir=/tmp/sibling/user-data", args)
+        self.assertIn("--profile-directory=Default", args)
+        self.assertIn("--window-position=-9999,0", args)
+        self.assertIn("--disable-background-timer-throttling", args)
+        self.assertNotIn("--headless=new", args)
+        self.assertEqual(args[-1], "https://gemini.google.com/app?hl=de")
+
+    def test_real_session_preflight_can_ignore_existing_non_cdp_for_sibling(self):
+        module = load_module()
+        original_endpoint = module.detect_cdp_endpoint
+        original_owner = module.lsof_port_owner
+        original_args = module.browser_main_process_args
+        original_evidence = module.provider_session_evidence
+        module.detect_cdp_endpoint = lambda port, hosts=None: {"ok": True, "base": "http://127.0.0.1:9333", "version": {"Browser": "Comet"}, "attempts": []}
+        module.lsof_port_owner = lambda port: {"port": port, "listening": True, "command": "Comet", "pid": "123", "raw": ""}
+        module.browser_main_process_args = lambda browser: ["/Applications/Comet.app/Contents/MacOS/Comet"]
+        module.provider_session_evidence = lambda profile, provider: {"provider": provider, "confidence": "likely-logged-in"}
+        try:
+            payload = module.build_real_session_preflight(
+                browser={"id": "comet", "display_name": "Comet", "default_port": 9333, "binary_path": "/Applications/Comet.app/Contents/MacOS/Comet"},
+                profile={"directory": "Default", "name": "Automation"},
+                provider="google",
+                ignore_existing_non_cdp=True,
+            )
+        finally:
+            module.detect_cdp_endpoint = original_endpoint
+            module.lsof_port_owner = original_owner
+            module.browser_main_process_args = original_args
+            module.provider_session_evidence = original_evidence
+
+        self.assertTrue(payload["can_attach"])
+        self.assertEqual(payload["blockers"], [])
+        self.assertTrue(payload["ignored_existing_non_cdp_processes"])
+
+    def test_workflow_sibling_run_prepares_launches_and_uses_live_runner(self):
+        module = load_module()
+        root = Path(tempfile.mkdtemp())
+        source_root = root / "source"
+        source_profile = source_root / "Default"
+        source_profile.mkdir(parents=True)
+        (source_root / "Local State").write_text("{}", encoding="utf-8")
+        (source_profile / "Preferences").write_text("{}", encoding="utf-8")
+
+        class FakeProcess:
+            pid = 4242
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                self.terminated = True
+
+            def wait(self, timeout=None):
+                return 0
+
+        fake_process = FakeProcess()
+        original_discover = module.discover_browsers
+        original_start = module.start_sibling_cdp_browser
+        original_live = module.agent_browser_live_workflow_run
+        module.discover_browsers = lambda: [
+            {
+                "id": "comet",
+                "display_name": "Comet",
+                "binary_path": "/Applications/Comet.app/Contents/MacOS/Comet",
+                "user_data_dir": str(source_root),
+                "default_port": 9223,
+                "profiles": [{"directory": "Default", "name": "Neptune", "path": str(source_profile)}],
+            }
+        ]
+        module.start_sibling_cdp_browser = lambda **kwargs: (
+            fake_process,
+            {"ok": True, "pid": fake_process.pid, "port": kwargs["port"], "launch_args": kwargs["launch_args"]},
+        )
+
+        def fake_live(**kwargs):
+            self.assertEqual(kwargs["browser"]["user_data_dir"], str(root / "sibling" / "user-data"))
+            self.assertEqual(kwargs["cdp_port"], 9333)
+            return {
+                "status": "opened",
+                "provider": "gemini",
+                "mode": "deep-research",
+                "browser": "comet",
+                "profile": "Default",
+                "status_json": str(root / "status.json"),
+                "output_text_path": str(root / "output.txt"),
+            }
+
+        module.agent_browser_live_workflow_run = fake_live
+        try:
+            out = StringIO()
+            with redirect_stdout(out):
+                exit_code = module.main(
+                    [
+                        "workflow-sibling-run",
+                        "--browser",
+                        "comet",
+                        "--profile",
+                        "work",
+                        "--provider",
+                        "google",
+                        "--mode",
+                        "deep-research",
+                        "--prompt",
+                        "Research",
+                        "--cdp-port",
+                        "9333",
+                        "--sibling-user-data",
+                        str(root / "sibling" / "user-data"),
+                        "--close-after",
+                    ]
+                )
+        finally:
+            module.discover_browsers = original_discover
+            module.start_sibling_cdp_browser = original_start
+            module.agent_browser_live_workflow_run = original_live
+
+        payload = json.loads(out.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["status"], "opened")
+        self.assertEqual(payload["execution_mode"], "sibling-cdp-automation-profile")
+        self.assertEqual(payload["sibling_profile"]["status"], "seeded")
+        self.assertTrue(payload["launch"]["ok"])
+        self.assertTrue(payload["closed_after"])
+        self.assertTrue(getattr(fake_process, "terminated", False))
+
+    def test_live_workflow_navigation_fallback_is_opt_in_for_sibling(self):
+        module = load_module()
+        root = Path(tempfile.mkdtemp())
+        original_preflight = module.build_real_session_preflight
+        original_run = module.run_agent_browser
+        original_nav = module.run_cdp_navigate
+        original_js = module.run_cdp_javascript
+        original_capture = module.capture_cdp_screenshot
+        module.build_real_session_preflight = lambda **kwargs: {"can_attach": True, "session_evidence": {"confidence": "likely-logged-in"}, "blockers": []}
+        sessions = []
+
+        def fake_run(args, *, session="", timeout=45.0):
+            sessions.append(session)
+            command = ["agent-browser", *args]
+            if args[:3] == ["--cdp", "9334", "tab"]:
+                return module.subprocess.CompletedProcess(command, 1, stdout="", stderr="tab timeout")
+            if "snapshot" in args:
+                return module.subprocess.CompletedProcess(command, 0, stdout="Gemini\nPrompt eingeben\nDeep Research", stderr="")
+            return module.subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        def fake_js(port, script, timeout=15.0):
+            if "location.href" in script:
+                return module.subprocess.CompletedProcess(["js"], 0, "https://gemini.google.com/app", "")
+            if "const text =" in script:
+                return module.subprocess.CompletedProcess(["js"], 0, '{"ok":true}', "")
+            return module.subprocess.CompletedProcess(["js"], 0, "Gemini\nPrompt eingeben\nDeep Research", "")
+
+        module.run_agent_browser = fake_run
+        module.run_cdp_navigate = lambda port, url, timeout=15.0: module.subprocess.CompletedProcess(["nav"], 0, url, "")
+        module.run_cdp_javascript = fake_js
+        module.capture_cdp_screenshot = lambda port, screenshot, timeout=20.0: (screenshot.write_bytes(b"png") or True)
+        try:
+            payload = module.agent_browser_live_workflow_run(
+                browser={"id": "comet", "display_name": "Comet"},
+                profile={"directory": "Default", "name": "Automation"},
+                provider="google",
+                mode="deep-research",
+                prompt="Research",
+                artifact_root=root / "artifacts",
+                cdp_port=9334,
+                allow_active_tab_navigation_fallback=True,
+            )
+        finally:
+            module.build_real_session_preflight = original_preflight
+            module.run_agent_browser = original_run
+            module.run_cdp_navigate = original_nav
+            module.run_cdp_javascript = original_js
+            module.capture_cdp_screenshot = original_capture
+
+        self.assertNotEqual(payload["status"], "blocked")
+        self.assertTrue(any(item.endswith("-p9334") for item in sessions))
+        self.assertTrue(any(event["event"] == "open-background-tab-fallback-navigate" for event in payload["workflow_events"]))
+
+    def test_cdp_helpers_use_detected_loopback_endpoint(self):
+        module = load_module()
+        original_detect = module.detect_cdp_endpoint
+        original_run = module.subprocess.run
+        commands = []
+        module.detect_cdp_endpoint = lambda port: {"ok": True, "base": "http://[::1]:9444"}
+
+        def fake_run(command, **kwargs):
+            commands.append(command)
+            return module.subprocess.CompletedProcess(command, 0, stdout="https://gemini.google.com/app", stderr="")
+
+        module.subprocess.run = fake_run
+        try:
+            result = module.run_cdp_navigate(9444, "https://gemini.google.com/app")
+        finally:
+            module.detect_cdp_endpoint = original_detect
+            module.subprocess.run = original_run
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(commands[0][4], "http://[::1]:9444")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -95,7 +95,24 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
   --output /tmp/hermes-real-session-preflight-brave-gemini.json
 ```
 
-`real-session-preflight` checks whether the intended browser/profile has a reachable CDP endpoint, whether the default port is occupied by another process, whether the browser is already running without `--remote-debugging-port`, and whether local site data shows provider session evidence. If a clone run lands on a sign-in page while session evidence exists, workflow results are marked `real-session-required`; final Gemini Deep Research E2E needs a real CDP-enabled session or a dedicated minimized browser window, not a disposable clone.
+`real-session-preflight` checks whether the intended browser/profile has a reachable CDP endpoint, whether the default port is occupied by another process, whether the browser is already running without `--remote-debugging-port`, and whether local site data shows provider session evidence. If a clone run lands on a sign-in page while session evidence exists, workflow results are marked `real-session-required`; final Gemini Deep Research E2E needs a real CDP-enabled session or a dedicated minimized sibling automation profile, not a disposable clone.
+
+Run a sibling automation session without touching already-open Brave/Comet windows:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py workflow-sibling-run \
+  --browser comet \
+  --profile work \
+  --provider google \
+  --mode deep-research \
+  --prompt "Custom Deep Research prompt" \
+  --submit \
+  --confirm-start \
+  --cache \
+  --output /tmp/hermes-gemini-sibling.json
+```
+
+`workflow-sibling-run` creates or reuses a separate `--user-data-dir` under `~/.cache/ai-research-browser/sibling-profiles/<browser-profile>/user-data`, starts the real browser binary headful but offscreen with a fresh CDP port, opens only the automation page, and never launches the source profile directory while the user's visible browser is running. Use `--sibling-user-data <dir>` for a named persistent automation profile, `--refresh-sibling` to re-seed it from the source profile, and `--close-after` for smoke tests. A provider may still reject a hot-cloned session: in a real Comet/Gemini smoke, Google accepted consent and loaded Gemini, but displayed `Anmelden`, so that run was correctly recorded as `signed-out-or-wall` rather than success. For production, seed a dedicated sibling profile once, log into the required providers there, and then reuse it for background E2E workflows.
 
 The profile alias `work` resolves by exact directory/name/account first, then by Work/Arbeit labels, and finally to the only discovered profile when a browser has exactly one local profile. This keeps Comet/Komet setups such as a single `Neptune` profile usable through `--profile work` without hard-coding a machine-specific directory name.
 
@@ -329,6 +346,23 @@ Use `agent-browser-ask` when the goal is not just inventory but controlling the 
 For non-CDP browsers, `agent-browser-suite` creates a disposable clone of the selected Chromium profile and launches Agent Browser with `--profile <clone-user-data>` plus the browser executable. This is useful as a repeatable E2E smoke test, but it is intentionally conservative: if provider cookies are present yet the cloned/headless browser lands on a sign-in or anti-automation page, the result is recorded as `signed-out-or-wall`. Use a real running browser plus Computer Use or a CDP-enabled hidden launch for final account, plan, model, and quota proof.
 
 Use `workflow-plan` and `workflow-run` for the fixed "select feature -> send custom prompt -> confirm start -> extract output" path. These commands always use a temporary profile clone and a dedicated headless CDP process, so existing browser windows and tabs are not closed or modified.
+
+Use `workflow-sibling-run` for the same fixed path when the provider needs a persistent, authenticated automation profile instead of a disposable clone. It launches the real browser binary offscreen/headful against a separate sibling `--user-data-dir`, cleans only stale locks inside that sibling directory, and terminates only the launched sibling process when `--close-after` is set:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py workflow-sibling-run \
+  --browser brave \
+  --profile work \
+  --provider chatgpt \
+  --mode deep-research \
+  --prompt "Custom Deep Research prompt" \
+  --submit \
+  --confirm-start \
+  --include-ai-exporter \
+  --cache
+```
+
+For the first setup of a fresh sibling profile, omit `--submit` and `--close-after`, then authenticate the provider in that dedicated automation profile. Subsequent runs reuse the same profile and can run in the background without touching the user's active browser windows.
 
 Preview the exact safe plan:
 

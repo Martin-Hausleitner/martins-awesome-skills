@@ -1148,10 +1148,17 @@ def run_agent_browser(args: list[str], *, session: str = "", timeout: float = 45
         )
 
 
+def cdp_http_base_for_port(port: int) -> str:
+    endpoint = detect_cdp_endpoint(port)
+    if endpoint.get("ok") and endpoint.get("base"):
+        return str(endpoint["base"])
+    return f"http://127.0.0.1:{int(port)}"
+
+
 def run_cdp_javascript(port: int, javascript: str, *, timeout: float = 15.0) -> subprocess.CompletedProcess[str]:
     bridge = r"""
-const [port, expression] = process.argv.slice(1);
-const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
+const [base, expression] = process.argv.slice(1);
+const targets = await (await fetch(`${base}/json/list`)).json();
 const target = targets.find((item) => item.type === 'page' && !String(item.url || '').startsWith('about:blank')) || targets.find((item) => item.type === 'page');
 if (!target || !target.webSocketDebuggerUrl) throw new Error('No page target for CDP eval');
 const ws = new WebSocket(target.webSocketDebuggerUrl);
@@ -1196,7 +1203,7 @@ const value = Object.prototype.hasOwnProperty.call(remote, 'value') ? remote.val
 process.stdout.write(typeof value === 'string' ? value : JSON.stringify(value ?? null));
 """
     env = {**os.environ, "HERMES_CDP_TIMEOUT_MS": str(max(1000, int(timeout * 1000)))}
-    command = ["node", "--input-type=module", "-e", bridge, str(int(port)), javascript]
+    command = ["node", "--input-type=module", "-e", bridge, cdp_http_base_for_port(port), javascript]
     try:
         return subprocess.run(command, capture_output=True, text=True, timeout=timeout + 2, env=env)
     except subprocess.TimeoutExpired as exc:
@@ -1211,8 +1218,8 @@ process.stdout.write(typeof value === 'string' ? value : JSON.stringify(value ??
 def run_cdp_keypress(port: int, key: str, *, timeout: float = 10.0) -> subprocess.CompletedProcess[str]:
     key_name = "Enter" if key.lower() in {"enter", "return"} else key
     bridge = r"""
-const [port, key] = process.argv.slice(1);
-const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
+const [base, key] = process.argv.slice(1);
+const targets = await (await fetch(`${base}/json/list`)).json();
 const target = targets.find((item) => item.type === 'page' && !String(item.url || '').startsWith('about:blank')) || targets.find((item) => item.type === 'page');
 if (!target || !target.webSocketDebuggerUrl) throw new Error('No page target for CDP keypress');
 const ws = new WebSocket(target.webSocketDebuggerUrl);
@@ -1247,7 +1254,7 @@ ws.close();
 process.stdout.write(JSON.stringify({ok: true, key}));
 """
     env = {**os.environ, "HERMES_CDP_TIMEOUT_MS": str(max(1000, int(timeout * 1000)))}
-    command = ["node", "--input-type=module", "-e", bridge, str(int(port)), key_name]
+    command = ["node", "--input-type=module", "-e", bridge, cdp_http_base_for_port(port), key_name]
     try:
         return subprocess.run(command, capture_output=True, text=True, timeout=timeout + 2, env=env)
     except subprocess.TimeoutExpired as exc:
@@ -1261,8 +1268,8 @@ process.stdout.write(JSON.stringify({ok: true, key}));
 
 def run_cdp_navigate(port: int, url: str, *, timeout: float = 15.0) -> subprocess.CompletedProcess[str]:
     bridge = r"""
-const [port, url] = process.argv.slice(1);
-const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
+const [base, url] = process.argv.slice(1);
+const targets = await (await fetch(`${base}/json/list`)).json();
 const target = targets.find((item) => item.type === 'page') || targets[0];
 if (!target || !target.webSocketDebuggerUrl) throw new Error('No page target for CDP navigation');
 const ws = new WebSocket(target.webSocketDebuggerUrl);
@@ -1296,7 +1303,7 @@ ws.close();
 process.stdout.write(url);
 """
     env = {**os.environ, "HERMES_CDP_TIMEOUT_MS": str(max(1000, int(timeout * 1000)))}
-    command = ["node", "--input-type=module", "-e", bridge, str(int(port)), url]
+    command = ["node", "--input-type=module", "-e", bridge, cdp_http_base_for_port(port), url]
     try:
         return subprocess.run(command, capture_output=True, text=True, timeout=timeout + 2, env=env)
     except subprocess.TimeoutExpired as exc:
@@ -1853,7 +1860,11 @@ def click_text_js_script(label: str) -> str:
         "    const rect = el.getBoundingClientRect();"
         "    const style = window.getComputedStyle(el);"
         "    if (rect.width <= 0 || rect.height <= 0 || style.visibility === 'hidden' || style.display === 'none') continue;"
-        "    el.click();"
+        "    el.scrollIntoView({block:'center', inline:'center'});"
+        "    for (const type of ['pointerdown','mousedown','pointerup','mouseup','click']) {"
+        "      el.dispatchEvent(new MouseEvent(type, {bubbles:true, cancelable:true, view:window, clientX:rect.left + rect.width / 2, clientY:rect.top + rect.height / 2}));"
+        "    }"
+        "    if (typeof el.click === 'function') el.click();"
         "    return {ok:true, text, tag:el.tagName, role:el.getAttribute('role') || ''};"
         "  }"
         "}"
@@ -1971,9 +1982,13 @@ def agent_browser_ask_export(
 
 
 def is_port_open(port: int, host: str = "127.0.0.1", timeout: float = 0.2) -> bool:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.settimeout(timeout)
-        return sock.connect_ex((host, int(port))) == 0
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    try:
+        with socket.socket(family, socket.SOCK_STREAM) as sock:
+            sock.settimeout(timeout)
+            return sock.connect_ex((host, int(port))) == 0
+    except OSError:
+        return False
 
 
 def endpoint_version(port: int, host: str = "127.0.0.1") -> dict[str, Any] | None:
@@ -2033,6 +2048,43 @@ def slug(value: str) -> str:
 
 def default_chat_cache_root() -> Path:
     return Path(os.environ.get("AI_RESEARCH_BROWSER_CACHE", "~/.cache/ai-research-browser/chats")).expanduser()
+
+
+def default_sibling_user_data_dir(*, browser: str, profile: str) -> Path:
+    return (
+        Path(os.environ.get("AI_RESEARCH_BROWSER_SIBLING_ROOT", "~/.cache/ai-research-browser/sibling-profiles")).expanduser()
+        / f"{slug(normalize_browser_name(browser))}-{slug(profile)}"
+        / "user-data"
+    )
+
+
+def clean_sibling_profile_locks(sibling_user_data: Path, profile_directory: str) -> list[str]:
+    root = sibling_user_data.expanduser()
+    profile_root = root / profile_directory
+    candidates = [
+        root / "SingletonLock",
+        root / "SingletonSocket",
+        root / "SingletonCookie",
+        root / "DevToolsActivePort",
+        root / "Lock",
+        root / "lockfile",
+        profile_root / "SingletonLock",
+        profile_root / "SingletonSocket",
+        profile_root / "SingletonCookie",
+        profile_root / "DevToolsActivePort",
+        profile_root / "LOCK",
+        profile_root / "Lock",
+        profile_root / "lockfile",
+    ]
+    removed: list[str] = []
+    for path in candidates:
+        try:
+            if path.exists() or path.is_symlink():
+                path.unlink()
+                removed.append(str(path))
+        except OSError:
+            continue
+    return removed
 
 
 def build_artifact_paths(root: Path, *, provider: str, mode: str, browser: str, profile: str) -> dict[str, Path]:
@@ -2394,6 +2446,10 @@ def build_workflow_suite_rows(
 
 PROFILE_CLONE_EXCLUDES = {
     "Singleton*",
+    "SingletonLock",
+    "SingletonSocket",
+    "SingletonCookie",
+    "DevToolsActivePort",
     "Lock",
     "lockfile",
     "Crashpad",
@@ -2407,6 +2463,7 @@ PROFILE_CLONE_EXCLUDES = {
     "Media Cache",
     "Service Worker/CacheStorage",
     "IndexedDB/*.blob",
+    "com.google.Chrome.code_sign_clone",
 }
 
 
@@ -2431,6 +2488,10 @@ def should_exclude_profile_path(path: Path, *, extension_ids: set[str] | None = 
     parts = set(path.parts)
     name = path.name
     if name.startswith("Singleton"):
+        return True
+    if name == "DevToolsActivePort":
+        return True
+    if name == "com.google.Chrome.code_sign_clone":
         return True
     if name in {"Lock", "lockfile"}:
         return True
@@ -2505,6 +2566,62 @@ def clone_browser_profile_for_agent_browser(
     }
 
 
+def prepare_sibling_profile(
+    *,
+    browser: dict[str, Any],
+    profile: dict[str, str],
+    sibling_user_data: Path,
+    refresh: bool = False,
+    include_extension_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    source_user_data = Path(str(browser.get("user_data_dir", ""))).expanduser()
+    profile_directory = str(profile.get("directory", "Default"))
+    source_profile = Path(str(profile.get("path") or source_user_data / profile_directory)).expanduser()
+    sibling_user_data = sibling_user_data.expanduser()
+    sibling_profile = sibling_user_data / profile_directory
+    if not source_profile.exists():
+        return {
+            "ok": False,
+            "status": "blocked",
+            "error": f"profile source does not exist: {source_profile}",
+            "source_profile": str(source_profile),
+            "sibling_user_data": str(sibling_user_data),
+            "sibling_profile": str(sibling_profile),
+        }
+    status = "reused"
+    if refresh and sibling_user_data.exists():
+        shutil.rmtree(sibling_user_data, ignore_errors=True)
+    if not sibling_profile.exists():
+        sibling_user_data.mkdir(parents=True, exist_ok=True)
+        extension_ids = {item.lower() for item in include_extension_ids or []}
+        copy_profile_tree(source_profile, sibling_profile, extension_ids=extension_ids)
+        for filename in ["Local State", "First Run"]:
+            source_file = source_user_data / filename
+            if source_file.exists():
+                try:
+                    shutil.copy2(source_file, sibling_user_data / filename)
+                except OSError:
+                    pass
+        status = "refreshed" if refresh else "seeded"
+    removed_locks = clean_sibling_profile_locks(sibling_user_data, profile_directory)
+    return {
+        "ok": True,
+        "status": status,
+        "source_user_data": str(source_user_data),
+        "source_profile": str(source_profile),
+        "sibling_user_data": str(sibling_user_data),
+        "sibling_profile": str(sibling_profile),
+        "profile_directory": profile_directory,
+        "removed_locks": removed_locks,
+        "included_extension_ids": sorted({item.lower() for item in include_extension_ids or []}),
+        "safety": {
+            "source_browser_left_running": True,
+            "source_profile_not_used_for_launch": True,
+            "cookie_values_not_read": True,
+        },
+    }
+
+
 def agent_browser_profile_global_args(browser: dict[str, Any], clone_user_data: str, profile_directory: str) -> list[str]:
     return [
         "--profile",
@@ -2517,9 +2634,13 @@ def agent_browser_profile_global_args(browser: dict[str, Any], clone_user_data: 
 
 
 def find_available_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
+    for _ in range(50):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = int(sock.getsockname()[1])
+        if not is_port_open(port, "127.0.0.1") and not is_port_open(port, "::1"):
+            return port
+    raise RuntimeError("Could not find a free loopback CDP port")
 
 
 def build_clone_cdp_launch_args(
@@ -2553,6 +2674,43 @@ def build_clone_cdp_launch_args(
     return args
 
 
+def build_sibling_cdp_launch_args(
+    browser: dict[str, Any],
+    *,
+    sibling_user_data: str,
+    profile_directory: str,
+    port: int,
+    provider: str,
+    headless: bool = False,
+    extension_paths: list[str] | None = None,
+) -> list[str]:
+    args = [
+        str(browser.get("binary_path", "")),
+        "--remote-debugging-address=127.0.0.1",
+        f"--remote-debugging-port={int(port)}",
+        f"--user-data-dir={sibling_user_data}",
+        f"--profile-directory={profile_directory}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-session-crashed-bubble",
+        "--disable-remote-fonts",
+        "--disable-background-timer-throttling",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-renderer-backgrounding",
+        "--restore-last-session=false",
+    ]
+    if headless:
+        args.append("--headless=new")
+    else:
+        args.extend(["--window-position=-9999,0", "--window-size=1400,1000"])
+    if extension_paths:
+        extension_arg = ",".join(str(path) for path in extension_paths if path)
+        if extension_arg:
+            args.extend([f"--disable-extensions-except={extension_arg}", f"--load-extension={extension_arg}"])
+    args.append(provider_url(provider))
+    return args
+
+
 def start_clone_cdp_browser(
     *,
     launch_args: list[str],
@@ -2582,6 +2740,16 @@ def start_clone_cdp_browser(
     return process, {"ok": False, "pid": process.pid, "port": port, "exit_code": exit_code, "launch_args": launch_args, "log_path": str(log_path)}
 
 
+def start_sibling_cdp_browser(
+    *,
+    launch_args: list[str],
+    port: int,
+    log_path: Path,
+    startup_timeout: float = 12.0,
+) -> tuple[subprocess.Popen[str] | None, dict[str, Any]]:
+    return start_clone_cdp_browser(launch_args=launch_args, port=port, log_path=log_path, startup_timeout=startup_timeout)
+
+
 def terminate_process(process: subprocess.Popen[str] | None) -> None:
     if process is None or process.poll() is not None:
         return
@@ -2596,8 +2764,8 @@ def terminate_process(process: subprocess.Popen[str] | None) -> None:
 def capture_cdp_screenshot(port: int, screenshot: Path, *, timeout: float = 20.0) -> bool:
     screenshot.parent.mkdir(parents=True, exist_ok=True)
     script = r"""
-const [port, out] = process.argv.slice(1);
-const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
+const [base, out] = process.argv.slice(1);
+const targets = await (await fetch(`${base}/json/list`)).json();
 const target = targets.find((item) => item.type === 'page' && !String(item.url || '').startsWith('about:blank')) || targets.find((item) => item.type === 'page');
 if (!target || !target.webSocketDebuggerUrl) throw new Error('No page target for CDP screenshot');
 const ws = new WebSocket(target.webSocketDebuggerUrl);
@@ -2631,16 +2799,16 @@ fs.writeFileSync(out, Buffer.from(result.data, 'base64'));
 clearTimeout(timer);
 ws.close();
 """
-    result = subprocess.run(["node", "--input-type=module", "-e", script, str(int(port)), str(screenshot)], capture_output=True, text=True, timeout=timeout)
+    result = subprocess.run(["node", "--input-type=module", "-e", script, cdp_http_base_for_port(port), str(screenshot)], capture_output=True, text=True, timeout=timeout)
     return result.returncode == 0 and screenshot.exists() and screenshot.stat().st_size > 0
 
 
 def set_cdp_file_input_files(port: int, files: list[Path], *, timeout: float = 20.0) -> subprocess.CompletedProcess[str]:
     expanded_files = [str(path.expanduser().resolve()) for path in files if path.expanduser().exists()]
     script = r"""
-const [port, filesJson] = process.argv.slice(1);
+const [base, filesJson] = process.argv.slice(1);
 const files = JSON.parse(filesJson);
-const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
+const targets = await (await fetch(`${base}/json/list`)).json();
 const target = targets.find((item) => item.type === 'page' && !String(item.url || '').startsWith('about:blank')) || targets.find((item) => item.type === 'page');
 if (!target || !target.webSocketDebuggerUrl) throw new Error('No page target for CDP file upload');
 const ws = new WebSocket(target.webSocketDebuggerUrl);
@@ -2693,7 +2861,7 @@ console.log(JSON.stringify(result));
     if not expanded_files:
         return subprocess.CompletedProcess(["cdp-file-upload", str(port)], 1, "", "No existing attachment files")
     try:
-        return subprocess.run(["node", "--input-type=module", "-e", script, str(int(port)), json.dumps(expanded_files)], capture_output=True, text=True, timeout=timeout)
+        return subprocess.run(["node", "--input-type=module", "-e", script, cdp_http_base_for_port(port), json.dumps(expanded_files)], capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
         return subprocess.CompletedProcess(
             ["node", "cdp-file-upload", str(port)],
@@ -2930,9 +3098,15 @@ def click_first_agent_browser_text(
     *,
     command_log_label: str,
     snapshot: str = "",
+    prefer_js: bool = False,
 ) -> dict[str, Any]:
     attempts: list[dict[str, Any]] = []
     for label in labels:
+        if prefer_js and str(label).lower() not in {"start", "confirm", "allow", "begin"}:
+            result = invoke(f"{command_log_label}:{label}:js-click", ["eval", click_text_js_script(str(label))])
+            attempts.append({"label": label, "returncode": result.returncode, "method": "js"})
+            if result.returncode == 0 and '"ok":false' not in result.stdout and "not-found" not in result.stdout:
+                return {"clicked": True, "label": label, "attempts": attempts}
         ref = find_snapshot_ref(snapshot, str(label), roles=("button", "menuitem", "option", "link")) if snapshot else ""
         if ref:
             result = invoke(f"{command_log_label}:{label}", ["click", f"@{ref}"])
@@ -3132,9 +3306,10 @@ def agent_browser_profile_workflow_run(
         visible_text_parts.append(current_snapshot_text)
         consent_result = click_first_agent_browser_text(
             invoke,
-            ["Alle annehmen", "Accept all", "I agree", "Agree", "Zustimmen"],
+            ["Alle akzeptieren", "Alle annehmen", "Accept all", "I agree", "Agree", "Zustimmen"],
             command_log_label="consent",
             snapshot=current_snapshot_text,
+            prefer_js=True,
         )
         if consent_result.get("clicked"):
             workflow_events.append({"event": "consent", **consent_result})
@@ -3402,6 +3577,8 @@ def agent_browser_live_workflow_run(
     cache_root: Path | None = None,
     refresh_cache: bool = True,
     attachments: list[Path] | None = None,
+    ignore_existing_non_cdp: bool = False,
+    allow_active_tab_navigation_fallback: bool = False,
 ) -> dict[str, Any]:
     provider_id = normalize_provider_name(provider)
     spec = provider_workflow_spec(provider_id, mode)
@@ -3425,7 +3602,13 @@ def agent_browser_live_workflow_run(
         wait_seconds=wait_seconds,
         attachments=attachments,
     )
-    real_session_preflight = build_real_session_preflight(browser=browser, profile=profile, provider=provider_id, port=cdp_port)
+    real_session_preflight = build_real_session_preflight(
+        browser=browser,
+        profile=profile,
+        provider=provider_id,
+        port=cdp_port,
+        ignore_existing_non_cdp=ignore_existing_non_cdp,
+    )
     if not real_session_preflight.get("can_attach"):
         payload = {
             **plan,
@@ -3437,7 +3620,7 @@ def agent_browser_live_workflow_run(
         write_json(paths["status_json"], payload)
         return {**payload, "status_json": str(paths["status_json"])}
 
-    session = f"ai-live-{run_name}"
+    session = f"ai-live-{run_name}-p{int(cdp_port)}"
     snapshot_timeout = max(8.0, min(timeout, 18.0))
 
     def command_timeout(label: str, extra_args: list[str]) -> float:
@@ -3497,17 +3680,48 @@ def agent_browser_live_workflow_run(
 
     tab_result = invoke("open-background-tab", ["tab", "new", spec["url"]])
     if tab_result.returncode != 0:
-        payload = {
-            **plan,
-            "status": "blocked",
-            "blocker": "agent-browser could not open a new live CDP tab",
-            "real_session_preflight": real_session_preflight,
-            "workflow_events": [{"event": "open-background-tab", "returncode": tab_result.returncode}],
-            "commands": commands,
-            "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        }
-        write_json(paths["status_json"], payload)
-        return {**payload, "status_json": str(paths["status_json"])}
+        if allow_active_tab_navigation_fallback:
+            nav_result = run_cdp_navigate(cdp_port, spec["url"], timeout=min(timeout, 20.0))
+            commands.append(
+                {
+                    "label": "open-background-tab-fallback-navigate",
+                    "args": ["cdp-navigate", str(cdp_port), spec["url"]],
+                    "returncode": nav_result.returncode,
+                    "stdout": nav_result.stdout[-4000:],
+                    "stderr": nav_result.stderr[-4000:],
+                }
+            )
+            workflow_events.append(
+                {
+                    "event": "open-background-tab-fallback-navigate",
+                    "tab_new_returncode": tab_result.returncode,
+                    "navigate_returncode": nav_result.returncode,
+                }
+            )
+            if nav_result.returncode != 0:
+                payload = {
+                    **plan,
+                    "status": "blocked",
+                    "blocker": "agent-browser tab new and CDP navigation fallback both failed",
+                    "real_session_preflight": real_session_preflight,
+                    "workflow_events": workflow_events,
+                    "commands": commands,
+                    "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                }
+                write_json(paths["status_json"], payload)
+                return {**payload, "status_json": str(paths["status_json"])}
+        else:
+            payload = {
+                **plan,
+                "status": "blocked",
+                "blocker": "agent-browser could not open a new live CDP tab",
+                "real_session_preflight": real_session_preflight,
+                "workflow_events": [{"event": "open-background-tab", "returncode": tab_result.returncode}],
+                "commands": commands,
+                "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            }
+            write_json(paths["status_json"], payload)
+            return {**payload, "status_json": str(paths["status_json"])}
 
     invoke("wait-initial", ["wait", "4000"])
     before_eval = invoke("eval-before-text", ["eval", browser_eval_visible_text_script()])
@@ -3517,9 +3731,10 @@ def agent_browser_live_workflow_run(
     visible_text_parts.append(current_snapshot_text)
     consent_result = click_first_agent_browser_text(
         invoke,
-        ["Alle annehmen", "Accept all", "I agree", "Agree", "Zustimmen"],
+        ["Alle akzeptieren", "Alle annehmen", "Accept all", "I agree", "Agree", "Zustimmen"],
         command_log_label="consent",
         snapshot=current_snapshot_text,
+        prefer_js=True,
     )
     if consent_result.get("clicked"):
         workflow_events.append({"event": "consent", **consent_result})
@@ -4180,6 +4395,7 @@ def build_real_session_preflight(
     profile: dict[str, str],
     provider: str = "gemini",
     port: int | None = None,
+    ignore_existing_non_cdp: bool = False,
 ) -> dict[str, Any]:
     provider_id = normalize_provider_name(provider)
     browser_id = normalize_browser_name(str(browser.get("id", "")))
@@ -4196,7 +4412,7 @@ def build_real_session_preflight(
         blockers.append("port-listener-is-not-cdp")
     if owner.get("listening") and not owner_matches_browser and not endpoint.get("ok"):
         blockers.append("port-owned-by-other-process")
-    if running_without_cdp:
+    if running_without_cdp and not ignore_existing_non_cdp:
         blockers.append("browser-running-without-remote-debugging")
     if not endpoint.get("ok") and not blockers:
         blockers.append("cdp-endpoint-not-reachable")
@@ -4214,6 +4430,7 @@ def build_real_session_preflight(
         "port_owner": owner,
         "browser_main_process_count": len(main_args),
         "browser_main_process_has_remote_debugging": any("--remote-debugging-port" in line for line in main_args),
+        "ignored_existing_non_cdp_processes": bool(running_without_cdp and ignore_existing_non_cdp),
         "session_evidence": session_evidence,
         "safe_next_steps": [
             "Use an already-running browser only when this preflight reports can_attach=true.",
@@ -5030,6 +5247,111 @@ def cmd_workflow_live_run(args: argparse.Namespace) -> int:
         refresh_cache=not args.no_refresh_cache,
         attachments=attachments,
     )
+    if args.output:
+        write_json(Path(args.output).expanduser(), payload)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0 if payload.get("status") in {"opened", "submitted", "started", "verified", "captured"} else 1
+
+
+def cmd_workflow_sibling_run(args: argparse.Namespace) -> int:
+    browser, source_profile = resolve_workflow_browser_profile(args)
+    provider_id = normalize_provider_name(args.provider)
+    prompt = workflow_prompt_from_args(args)
+    extension_ids = requested_extension_ids(getattr(args, "include_extension", None), include_ai_exporter=getattr(args, "include_ai_exporter", False))
+    sibling_user_data = Path(args.sibling_user_data).expanduser() if args.sibling_user_data else default_sibling_user_data_dir(
+        browser=str(browser.get("id", "")),
+        profile=str(source_profile.get("directory", args.profile)),
+    )
+    sibling_profile = prepare_sibling_profile(
+        browser=browser,
+        profile=source_profile,
+        sibling_user_data=sibling_user_data,
+        refresh=args.refresh_sibling,
+        include_extension_ids=extension_ids,
+    )
+    if not sibling_profile.get("ok"):
+        payload = {
+            "status": "blocked",
+            "execution_mode": "sibling-cdp-automation-profile",
+            "sibling_profile": sibling_profile,
+            "closed_after": False,
+        }
+        if args.output:
+            write_json(Path(args.output).expanduser(), payload)
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 2
+    cdp_port = args.cdp_port or find_available_port()
+    extension_paths = [item["path"] for item in discover_profile_extensions(source_profile, extension_ids=extension_ids)] if extension_ids else None
+    launch_args = build_sibling_cdp_launch_args(
+        browser,
+        sibling_user_data=str(sibling_user_data),
+        profile_directory=str(sibling_profile["profile_directory"]),
+        port=cdp_port,
+        provider=provider_id,
+        headless=args.headless,
+        extension_paths=extension_paths,
+    )
+    artifact_root = Path(args.artifact_root).expanduser()
+    log_path = artifact_root / f"sibling-{normalize_browser_name(str(browser.get('id', '')))}-{slug(str(sibling_profile['profile_directory']))}.log"
+    process, launch_status = start_sibling_cdp_browser(
+        launch_args=launch_args,
+        port=cdp_port,
+        log_path=log_path,
+    )
+    closed_after = False
+    try:
+        if not launch_status.get("ok"):
+            payload = {
+                "status": "blocked",
+                "execution_mode": "sibling-cdp-automation-profile",
+                "browser": normalize_browser_name(str(browser.get("id", ""))),
+                "provider": provider_id,
+                "mode": args.mode,
+                "sibling_profile": sibling_profile,
+                "launch": launch_status,
+                "closed_after": False,
+            }
+            if args.output:
+                write_json(Path(args.output).expanduser(), payload)
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+            return 2
+        sibling_browser = dict(browser)
+        sibling_browser["user_data_dir"] = str(sibling_user_data)
+        sibling_runtime_profile = {
+            **source_profile,
+            "path": str(Path(str(sibling_profile["sibling_profile"])).expanduser()),
+        }
+        workflow_payload = agent_browser_live_workflow_run(
+            browser=sibling_browser,
+            profile=sibling_runtime_profile,
+            provider=provider_id,
+            mode=args.mode,
+            prompt=prompt,
+            artifact_root=artifact_root,
+            cdp_port=cdp_port,
+            submit=args.submit,
+            confirm_start=args.confirm_start,
+            wait_seconds=args.wait_seconds,
+            timeout=args.timeout,
+            cache_root=Path(args.cache_root).expanduser() if args.cache else None,
+            refresh_cache=not args.no_refresh_cache,
+            attachments=[Path(item).expanduser() for item in args.attachment],
+            ignore_existing_non_cdp=True,
+            allow_active_tab_navigation_fallback=True,
+        )
+        payload = {
+            **workflow_payload,
+            "execution_mode": "sibling-cdp-automation-profile",
+            "sibling_profile": sibling_profile,
+            "launch": launch_status,
+            "closed_after": False,
+        }
+    finally:
+        if args.close_after:
+            terminate_process(process)
+            clean_sibling_profile_locks(sibling_user_data, str(sibling_profile.get("profile_directory", source_profile.get("directory", "Default"))))
+            closed_after = True
+    payload["closed_after"] = closed_after
     if args.output:
         write_json(Path(args.output).expanduser(), payload)
     print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -6007,6 +6329,30 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_live_run.add_argument("--no-refresh-cache", action="store_true")
     workflow_live_run.add_argument("--attachment", action="append", default=[], help="Local file/image path to attach through the provider file input when visible.")
     workflow_live_run.add_argument("--output", default="")
+    workflow_sibling_run = sub.add_parser("workflow-sibling-run")
+    workflow_sibling_run.add_argument("--artifact-root", default="/tmp/hermes-ai-research-sibling-workflows")
+    workflow_sibling_run.add_argument("--browser", default="brave")
+    workflow_sibling_run.add_argument("--profile", default="work")
+    workflow_sibling_run.add_argument("--provider", choices=provider_cli_choices(), required=True)
+    workflow_sibling_run.add_argument("--mode", default="chat")
+    workflow_sibling_run.add_argument("--prompt", default="")
+    workflow_sibling_run.add_argument("--prompt-file", default="")
+    workflow_sibling_run.add_argument("--cdp-port", type=int, help="CDP port for the sibling automation browser. Uses a free port when omitted.")
+    workflow_sibling_run.add_argument("--sibling-user-data", default="", help="Dedicated automation user-data-dir. Defaults to ~/.cache/ai-research-browser/sibling-profiles/<browser-profile>/user-data.")
+    workflow_sibling_run.add_argument("--refresh-sibling", action="store_true", help="Re-seed the sibling profile from the source profile before launch.")
+    workflow_sibling_run.add_argument("--headless", action="store_true", help="Use Chromium headless mode instead of the default offscreen headful mode.")
+    workflow_sibling_run.add_argument("--close-after", action="store_true", help="Terminate the launched sibling browser after the workflow. Default leaves it open for long-running research.")
+    workflow_sibling_run.add_argument("--submit", action="store_true", help="Actually send the prompt.")
+    workflow_sibling_run.add_argument("--confirm-start", action="store_true", help="Click the provider plan/start confirmation when visible.")
+    workflow_sibling_run.add_argument("--wait-seconds", type=int, default=30)
+    workflow_sibling_run.add_argument("--timeout", type=float, default=90.0)
+    workflow_sibling_run.add_argument("--cache", action="store_true")
+    workflow_sibling_run.add_argument("--cache-root", default=str(default_chat_cache_root()))
+    workflow_sibling_run.add_argument("--no-refresh-cache", action="store_true")
+    workflow_sibling_run.add_argument("--include-extension", action="append", help="Copy/load an extension id or alias into the sibling session.")
+    workflow_sibling_run.add_argument("--include-ai-exporter", action="store_true", help="Copy/load SaveAI / AI Exporter into the sibling session.")
+    workflow_sibling_run.add_argument("--attachment", action="append", default=[], help="Local file/image path to attach through the provider file input when visible.")
+    workflow_sibling_run.add_argument("--output", default="")
     workflow_followup = sub.add_parser("workflow-followup")
     workflow_followup.add_argument("--artifact-root", default="/tmp/hermes-ai-research-workflow-followups")
     workflow_followup.add_argument("--clone-root", default="/tmp/hermes-ai-research-workflow-followup-clones")
@@ -6214,6 +6560,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_workflow_run(args)
     if args.command == "workflow-live-run":
         return cmd_workflow_live_run(args)
+    if args.command == "workflow-sibling-run":
+        return cmd_workflow_sibling_run(args)
     if args.command == "workflow-followup":
         return cmd_workflow_followup(args)
     if args.command == "workflow-suite":

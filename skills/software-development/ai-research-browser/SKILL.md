@@ -41,6 +41,7 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 - Runs Agent Browser backed E2E probes against a CDP-enabled browser profile and records provider inventory artifacts.
 - Runs an Agent Browser live suite against a real CDP-enabled browser session and can fail hard when the page is signed out or blocked.
 - Runs `workflow-live-run` against a real CDP-enabled background browser session, opens only a new automation tab, leaves existing tabs/windows alone, and leaves long-running Deep Research/Agent tabs open for later follow-up/export.
+- Runs `workflow-sibling-run` against a persistent sibling automation profile: a separate `--user-data-dir` launched offscreen/headful with CDP, so active user windows are not closed, relaunched, or navigated.
 - Fills a provider composer through Agent Browser, optionally submits the prompt, exports the visible output, and saves it into the local chat cache.
 - Builds a focused primary feature suite for ChatGPT chat/model selection, ChatGPT Deep Research, ChatGPT Agent, Gemini Deep Research, Claude Opus, Grok chat/research, and Perplexity chat/research.
 - Runs Agent Browser against disposable browser-profile clones and records `signed-out-or-wall` when the cloned session hits login or anti-automation pages.
@@ -59,6 +60,8 @@ Do not quit or relaunch the user's already-open browser without explicit permiss
 For Agent Browser "truth" checks, prefer `agent-browser-live-suite --assert-login` against a known real CDP port. Do not trust `agent-browser --auto-connect` unless the captured provider UI proves the intended profile/account is logged in; auto-connect can attach to a signed-out clone or the wrong Chromium instance.
 
 For actual Deep Research or Agent execution in a standing background browser, prefer `workflow-live-run` or `workflow-orchestrate --live-cdp --port <port>`. These commands require `real-session-preflight.can_attach=true`; if the browser is already running without remote debugging, they report the blocker instead of closing or relaunching the user's browser.
+
+When the running browser is not CDP-attachable and must not be closed, use `workflow-sibling-run`. It never starts a second process on the original profile directory; it seeds or reuses a dedicated sibling profile, removes only stale locks there, launches the browser offscreen/headful with a fresh CDP port, and optionally closes only that launched sibling process with `--close-after`. Treat hot-cloned provider sessions as provisional: if Google, ChatGPT, or another provider shows `Anmelden`/sign-in after clone seeding, record `signed-out-or-wall` and seed a persistent sibling profile with a real one-time login instead of claiming the workflow worked.
 
 Do not commit private screenshots that contain account names, chat history, or private prompts to a public repository. Keep them as local artifacts unless the user explicitly asks for a sanitized export.
 
@@ -200,6 +203,22 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
   --confirm-start \
   --cache
 ```
+
+Run the same workflow through a persistent offscreen sibling profile:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py workflow-sibling-run \
+  --browser comet \
+  --profile work \
+  --provider google \
+  --mode deep-research \
+  --prompt "Custom Deep Research prompt" \
+  --submit \
+  --confirm-start \
+  --cache
+```
+
+Use `--sibling-user-data <dir>` for an explicit automation profile, `--refresh-sibling` to re-seed it from the source profile, and `--close-after` for smoke tests. Omit `--submit` for setup/dry-runs and do not claim Deep Research/Agent started unless the status artifacts show the provider UI was logged in and the requested mode was visible.
 
 Run the complete orchestrated evidence path for Gemini/ChatGPT/Perplexity/Grok workflows:
 

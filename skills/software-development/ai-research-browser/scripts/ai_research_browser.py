@@ -4915,6 +4915,64 @@ def cleanup_workflow_clone(payload: dict[str, Any]) -> None:
         shutil.rmtree(clone_root, ignore_errors=True)
 
 
+def build_notion_export_plan(
+    *,
+    requested: bool,
+    allow_external_write: bool,
+    provider: str,
+    ai_exporter_capabilities: dict[str, Any],
+    workflow_payload: dict[str, Any] | None,
+    followup_payload: dict[str, Any] | None,
+    workspace_hint: str = "Martin Workspace",
+) -> dict[str, Any]:
+    rows = [
+        row
+        for row in ai_exporter_capabilities.get("rows", [])
+        if normalize_provider_name(provider) in row.get("supported_providers", [])
+    ]
+    notion_rows = [
+        {
+            "browser": row.get("browser", ""),
+            "profile_directory": row.get("profile_directory", ""),
+            "extension_version": (row.get("extension") or {}).get("version", ""),
+            "notion_session_confidence": ((row.get("notion") or {}).get("session_evidence") or {}).get("confidence", ""),
+            "actions": [action for action in row.get("actions", []) if "Notion" in action],
+        }
+        for row in rows
+    ]
+    source_payload = followup_payload or workflow_payload or {}
+    output_text_path = source_payload.get("output_text_path", "")
+    status = str(source_payload.get("status", ""))
+    eligible_statuses = {"submitted", "started", "verified", "captured"}
+    blocked_reasons: list[str] = []
+    if not requested:
+        blocked_reasons.append("notion-sync-not-requested")
+    if not allow_external_write:
+        blocked_reasons.append("external-write-not-enabled")
+    if not notion_rows:
+        blocked_reasons.append("ai-exporter-notion-capability-not-found")
+    if status not in eligible_statuses:
+        blocked_reasons.append(f"workflow-status-{status or 'missing'}")
+    if not output_text_path:
+        blocked_reasons.append("no-exportable-output-path")
+    return {
+        "requested": requested,
+        "allow_external_write": allow_external_write,
+        "workspace_hint": workspace_hint,
+        "eligible": not blocked_reasons,
+        "blocked_reasons": blocked_reasons,
+        "source_output_text_path": output_text_path,
+        "source_status": status,
+        "ai_exporter_rows": notion_rows,
+        "intended_action": "saveFullChatsToNotion",
+        "safety": {
+            "writes_externally": True,
+            "local_export_first": True,
+            "requires_visible_extension_state": True,
+        },
+    }
+
+
 def cmd_workflow_suite(args: argparse.Namespace) -> int:
     browsers = discover_browsers()
     browser_ids = {normalize_browser_name(item.strip()) for item in args.browsers.split(",") if item.strip()}
@@ -5027,6 +5085,105 @@ def cmd_workflow_suite(args: argparse.Namespace) -> int:
         write_json(Path(args.output).expanduser(), payload)
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0 if results and all(item.get("ok") or item.get("run_status") == "skipped" for item in results) else 1
+
+
+def cmd_workflow_orchestrate(args: argparse.Namespace) -> int:
+    browser, profile = resolve_workflow_browser_profile(args)
+    provider_id = normalize_provider_name(args.provider)
+    artifact_root = Path(args.artifact_root).expanduser()
+    clone_root = Path(args.clone_root).expanduser()
+    prompt = workflow_prompt_from_args(args)
+    if not prompt:
+        prompt = default_workflow_prompt(provider_id, args.mode)
+    extension_ids = requested_extension_ids(getattr(args, "include_extension", None), include_ai_exporter=getattr(args, "include_ai_exporter", False))
+    preflight = build_real_session_preflight(browser=browser, profile=profile, provider=provider_id, port=args.port or None)
+    unbrowser_payload = None
+    if args.unbrowser:
+        unbrowser_payload = run_unbrowser_mcp_probe(
+            url=args.unbrowser_url or "https://www.unbrowser.ai/",
+            prompt=args.prompt,
+            profile=args.unbrowser_profile,
+            tool=args.unbrowser_tool,
+            artifact_root=Path(args.unbrowser_artifact_root).expanduser(),
+            timeout=args.timeout,
+            max_chars=args.unbrowser_max_chars,
+        )
+    ai_exporter_payload = build_ai_exporter_capabilities() if args.include_ai_exporter or args.notion_sync else {"rows": []}
+    ai_exporter_status_path = ""
+    if ai_exporter_payload.get("rows"):
+        ai_exporter_status_path = str(artifact_root / "ai-exporter-capabilities.json")
+        write_json(Path(ai_exporter_status_path), ai_exporter_payload)
+    workflow_payload = agent_browser_profile_workflow_run(
+        browser=browser,
+        profile=profile,
+        provider=provider_id,
+        mode=args.mode,
+        prompt=prompt,
+        artifact_root=artifact_root,
+        clone_root=clone_root,
+        submit=args.submit,
+        confirm_start=args.confirm_start,
+        wait_seconds=args.wait_seconds,
+        timeout=args.timeout,
+        cache_root=Path(args.cache_root).expanduser() if args.cache else None,
+        refresh_cache=not args.no_refresh_cache,
+        include_extension_ids=extension_ids,
+        attachments=[Path(item).expanduser() for item in args.attachment],
+    )
+    followup_payload = None
+    if args.followup and workflow_payload.get("chat_url") and workflow_payload.get("status") in {"submitted", "started", "verified", "captured"}:
+        followup_payload = agent_browser_profile_followup_run(
+            browser=browser,
+            profile=profile,
+            provider=provider_id,
+            chat_url=str(workflow_payload["chat_url"]),
+            prompt=args.followup_prompt,
+            artifact_root=Path(args.followup_artifact_root).expanduser(),
+            clone_root=Path(args.followup_clone_root).expanduser(),
+            submit=not args.no_followup_submit,
+            wait_seconds=args.followup_wait_seconds,
+            timeout=args.timeout,
+            cache_root=Path(args.cache_root).expanduser() if args.cache else None,
+            refresh_cache=not args.no_refresh_cache,
+            include_extension_ids=extension_ids,
+            attachments=[Path(item).expanduser() for item in args.followup_attachment],
+            export_markdown=Path(args.export_markdown).expanduser() if args.export_markdown else None,
+        )
+    notion_plan = build_notion_export_plan(
+        requested=args.notion_sync,
+        allow_external_write=args.allow_external_write,
+        provider=provider_id,
+        ai_exporter_capabilities=ai_exporter_payload,
+        workflow_payload=workflow_payload,
+        followup_payload=followup_payload,
+        workspace_hint=args.notion_workspace,
+    )
+    payload = {
+        "status": "completed" if workflow_payload.get("status") in {"submitted", "started", "verified", "captured"} else "blocked",
+        "provider": provider_id,
+        "mode": args.mode,
+        "browser": browser.get("id", ""),
+        "profile": profile,
+        "real_session_preflight": preflight,
+        "unbrowser": unbrowser_payload,
+        "ai_exporter_capabilities": {
+            "row_count": len(ai_exporter_payload.get("rows", [])),
+            "actions": ai_exporter_payload.get("actions", []),
+            "status_path": ai_exporter_status_path,
+        },
+        "workflow": compact_workflow_run_payload(workflow_payload),
+        "followup": compact_workflow_run_payload(followup_payload) if followup_payload else None,
+        "notion_export_plan": notion_plan,
+        "artifacts": {
+            "workflow_status_json": workflow_payload.get("status_json", ""),
+            "followup_status_json": (followup_payload or {}).get("status_json", ""),
+            "unbrowser_events": (unbrowser_payload or {}).get("events_path", ""),
+        },
+    }
+    if args.output:
+        write_json(Path(args.output).expanduser(), payload)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0 if payload["status"] == "completed" else 1
 
 
 def cmd_save_chat(args: argparse.Namespace) -> int:
@@ -5330,6 +5487,44 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_suite.add_argument("--include-ai-exporter", action="store_true", help="Copy/load SaveAI / AI Exporter into each temporary clone.")
     workflow_suite.add_argument("--keep-clones", action="store_true", help="Keep temporary profile clones after each suite row for debugging.")
     workflow_suite.add_argument("--output", default="")
+    workflow_orchestrate = sub.add_parser("workflow-orchestrate")
+    workflow_orchestrate.add_argument("--artifact-root", default="/tmp/hermes-ai-research-orchestrate")
+    workflow_orchestrate.add_argument("--clone-root", default="/tmp/hermes-ai-research-orchestrate-clones")
+    workflow_orchestrate.add_argument("--browser", default="brave")
+    workflow_orchestrate.add_argument("--profile", default="work")
+    workflow_orchestrate.add_argument("--provider", choices=provider_cli_choices(), required=True)
+    workflow_orchestrate.add_argument("--mode", default="deep-research")
+    workflow_orchestrate.add_argument("--prompt", default="")
+    workflow_orchestrate.add_argument("--prompt-file", default="")
+    workflow_orchestrate.add_argument("--submit", action="store_true")
+    workflow_orchestrate.add_argument("--confirm-start", action="store_true")
+    workflow_orchestrate.add_argument("--wait-seconds", type=int, default=30)
+    workflow_orchestrate.add_argument("--timeout", type=float, default=90.0)
+    workflow_orchestrate.add_argument("--port", type=int, help="Real browser CDP port to preflight.")
+    workflow_orchestrate.add_argument("--cache", action="store_true")
+    workflow_orchestrate.add_argument("--cache-root", default=str(default_chat_cache_root()))
+    workflow_orchestrate.add_argument("--no-refresh-cache", action="store_true")
+    workflow_orchestrate.add_argument("--include-extension", action="append", help="Copy/load an extension id or alias into temporary clones.")
+    workflow_orchestrate.add_argument("--include-ai-exporter", action="store_true", help="Copy/load SaveAI / AI Exporter and inspect export/Notion capability.")
+    workflow_orchestrate.add_argument("--attachment", action="append", default=[], help="Local file/image path to attach to the first provider workflow.")
+    workflow_orchestrate.add_argument("--followup", action="store_true", help="After a started/captured chat, send the configured follow-up prompt.")
+    workflow_orchestrate.add_argument("--followup-prompt", default="Fass den bisherigen Deep-Research-Report kompakt zusammen und nenne die wichtigsten Quellen.")
+    workflow_orchestrate.add_argument("--no-followup-submit", action="store_true")
+    workflow_orchestrate.add_argument("--followup-wait-seconds", type=int, default=30)
+    workflow_orchestrate.add_argument("--followup-artifact-root", default="/tmp/hermes-ai-research-orchestrate-followup")
+    workflow_orchestrate.add_argument("--followup-clone-root", default="/tmp/hermes-ai-research-orchestrate-followup-clones")
+    workflow_orchestrate.add_argument("--followup-attachment", action="append", default=[])
+    workflow_orchestrate.add_argument("--export-markdown", default="")
+    workflow_orchestrate.add_argument("--unbrowser", action="store_true", help="Run an Unbrowser Local MCP probe as part of the workflow evidence.")
+    workflow_orchestrate.add_argument("--unbrowser-url", default="https://www.unbrowser.ai/")
+    workflow_orchestrate.add_argument("--unbrowser-profile", default="core", choices=["core", "api", "full"])
+    workflow_orchestrate.add_argument("--unbrowser-tool", default="quick_fetch", choices=["quick_fetch", "smart_browse", "research"])
+    workflow_orchestrate.add_argument("--unbrowser-artifact-root", default="/tmp/hermes-unbrowser-orchestrate")
+    workflow_orchestrate.add_argument("--unbrowser-max-chars", type=int, default=12000)
+    workflow_orchestrate.add_argument("--notion-sync", action="store_true", help="Plan AI Exporter Save to Notion after local export.")
+    workflow_orchestrate.add_argument("--allow-external-write", action="store_true", help="Allow the orchestrator to mark external Notion write as eligible.")
+    workflow_orchestrate.add_argument("--notion-workspace", default="Martin Workspace")
+    workflow_orchestrate.add_argument("--output", default="")
     save_chat = sub.add_parser("save-chat")
     save_chat.add_argument("--cache-root", default=str(default_chat_cache_root()))
     save_chat.add_argument("--browser", required=True)
@@ -5450,6 +5645,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_workflow_followup(args)
     if args.command == "workflow-suite":
         return cmd_workflow_suite(args)
+    if args.command == "workflow-orchestrate":
+        return cmd_workflow_orchestrate(args)
     if args.command == "save-chat":
         return cmd_save_chat(args)
     if args.command == "chat-cache":

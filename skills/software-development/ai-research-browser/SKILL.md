@@ -198,6 +198,24 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
   --cache
 ```
 
+Run the complete orchestrated evidence path for Gemini/ChatGPT/Perplexity/Grok workflows:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py workflow-orchestrate \
+  --browser brave \
+  --profile work \
+  --provider google \
+  --mode deep-research \
+  --prompt "Custom Deep Research prompt" \
+  --unbrowser \
+  --include-ai-exporter \
+  --followup \
+  --notion-sync \
+  --output /tmp/hermes-gemini-orchestrate.json
+```
+
+`workflow-orchestrate` runs real-session preflight, optional Unbrowser Local MCP proof, SaveAI / AI Exporter capability parsing, the Agent Browser workflow, optional "Fass zusammen" follow-up, and a Notion export eligibility plan. It does not quit or relaunch existing browsers. Notion sync remains ineligible unless `--allow-external-write` is set and a local exportable output exists.
+
 Attach an image or file when the provider exposes a file input:
 
 ```bash

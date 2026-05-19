@@ -1762,6 +1762,33 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertEqual(status, "real-session-required")
         self.assertEqual(inventory["login_state"], "signed-out-or-wall")
 
+    def test_notion_export_plan_requires_explicit_external_write(self):
+        module = load_module()
+
+        plan = module.build_notion_export_plan(
+            requested=True,
+            allow_external_write=False,
+            provider="google",
+            ai_exporter_capabilities={
+                "rows": [
+                    {
+                        "browser": "brave",
+                        "profile_directory": "Default",
+                        "supported_providers": ["gemini"],
+                        "extension": {"version": "4.2.1"},
+                        "actions": ["openFullNotionExport", "saveFullChatsToNotion"],
+                        "notion": {"session_evidence": {"confidence": "likely-logged-in"}},
+                    }
+                ]
+            },
+            workflow_payload={"status": "captured", "output_text_path": "/tmp/out.txt"},
+            followup_payload=None,
+        )
+
+        self.assertFalse(plan["eligible"])
+        self.assertIn("external-write-not-enabled", plan["blocked_reasons"])
+        self.assertEqual(plan["ai_exporter_rows"][0]["notion_session_confidence"], "likely-logged-in")
+
     def test_ai_workflow_spec_has_required_research_and_agent_triggers(self):
         module = load_module()
 

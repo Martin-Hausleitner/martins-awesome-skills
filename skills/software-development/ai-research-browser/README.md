@@ -115,6 +115,24 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 
 Omit `--submit` for a non-spending dry run that fills the composer and exports the current UI text. With `--cache`, the captured text is saved into the local chat cache for reuse or deliberate refresh.
 
+Run the full local orchestration for a provider feature: real-session preflight, optional Unbrowser Local MCP proof, SaveAI / AI Exporter capability scan, Agent Browser workflow, optional "Fass zusammen" follow-up, and a Notion export eligibility plan:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py workflow-orchestrate \
+  --browser brave \
+  --profile work \
+  --provider google \
+  --mode deep-research \
+  --prompt "Custom Deep Research prompt" \
+  --unbrowser \
+  --include-ai-exporter \
+  --followup \
+  --notion-sync \
+  --output /tmp/hermes-gemini-orchestrate.json
+```
+
+`workflow-orchestrate` does not quit or relaunch existing browsers. It records the exact blocker when the real session is not CDP-attachable, still runs the safe clone workflow for selector/upload evidence, and marks the Notion step as ineligible unless `--allow-external-write` is set and an exportable output exists. This keeps AI Exporter / Notion writes explicit while still showing whether the installed extension and Notion session are ready.
+
 Use the interactive picker:
 
 ```bash

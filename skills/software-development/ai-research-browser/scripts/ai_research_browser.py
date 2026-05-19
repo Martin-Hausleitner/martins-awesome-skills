@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import select
@@ -79,26 +80,28 @@ def provider_registry() -> dict[str, dict[str, Any]]:
     return {
         "chatgpt": {
             "url": "https://chatgpt.com/",
-            "modes": ["chat", "deep-research", "agent"],
+            "modes": ["chat", "deep-research", "agent", "image"],
             "models": ["Auto", "GPT-5.3 Instant", "GPT-5.5", "GPT-5.5 Thinking", "GPT-5.5 Pro"],
             "tools": ["Deep research", "Agent", "Codex", "Search", "Canvas", "Data analysis", "Image generation"],
             "source_urls": ["https://help.openai.com/en/articles/11909943-gpt-52-in-chatgpt"],
             "mode_markers": {
                 "deep-research": ["Deep research", "/Deepresearch", "Start research"],
                 "agent": ["Agent", "/agent", "Take control", "Codex"],
+                "image": ["Create image", "Generate image", "Image generation"],
                 "chat": ["ChatGPT", "Message ChatGPT"],
             },
         },
         "gemini": {
             "url": "https://gemini.google.com/app?hl=de",
             "aliases": ["google", "google-gemini"],
-            "modes": ["chat", "deep-research", "agent"],
+            "modes": ["chat", "deep-research", "agent", "image"],
             "models": ["Auto", "Fast", "Flash", "Complex", "Pro", "Thinking with 3 Pro", "Deep Think"],
-            "tools": ["Deep Research", "Agent", "Deep Think", "Gmail", "Drive", "Google Search"],
+            "tools": ["Deep Research", "Agent", "Deep Think", "Gmail", "Drive", "Google Search", "Image generation"],
             "source_urls": ["https://support.google.com/gemini/answer/16275805"],
             "mode_markers": {
                 "deep-research": ["Deep Research", "Recherche starten", "Start research"],
                 "agent": ["Agent", "Confirm", "Bestätigen"],
+                "image": ["Image", "Imagen", "Bild erstellen"],
                 "chat": ["Gemini", "Prompt eingeben"],
             },
         },
@@ -289,16 +292,23 @@ def primary_feature_targets() -> list[dict[str, Any]]:
         {
             "provider": "chatgpt",
             "mode": "deep-research",
-            "model": "GPT-5.5 Pro",
+            "model": "GPT-5.5",
             "must_verify": ["login", "deep-research-tool", "review-plan-or-start-research"],
             "notes": "Select Deep Research; do not spend quota unless explicitly confirmed.",
         },
         {
             "provider": "chatgpt",
             "mode": "agent",
-            "model": "GPT-5.5 Pro",
+            "model": "GPT-5.5",
             "must_verify": ["login", "agent-tool", "agent-review-or-take-control"],
             "notes": "Select ChatGPT Agent/Agent tool; verify availability before execution.",
+        },
+        {
+            "provider": "chatgpt",
+            "mode": "image",
+            "model": "GPT-5.5",
+            "must_verify": ["login", "image-tool", "composer-ready"],
+            "notes": "Select ChatGPT image generation without using GPT-5.5 Pro.",
         },
         {
             "provider": "gemini",
@@ -306,6 +316,13 @@ def primary_feature_targets() -> list[dict[str, Any]]:
             "model": "Pro",
             "must_verify": ["login", "tools-menu", "deep-research-tool", "source-settings"],
             "notes": "Gemini Deep Research through Tools with Pro/Thinking mode when available.",
+        },
+        {
+            "provider": "gemini",
+            "mode": "image",
+            "model": "Pro",
+            "must_verify": ["login", "image-generation", "composer-ready"],
+            "notes": "Gemini image generation / Imagen availability.",
         },
         {
             "provider": "claude",
@@ -1159,7 +1176,8 @@ def run_cdp_javascript(port: int, javascript: str, *, timeout: float = 15.0) -> 
     bridge = r"""
 const [base, expression] = process.argv.slice(1);
 const targets = await (await fetch(`${base}/json/list`)).json();
-const target = targets.find((item) => item.type === 'page' && !String(item.url || '').startsWith('about:blank')) || targets.find((item) => item.type === 'page');
+const usablePage = (item) => item.type === 'page' && !/^(about:|chrome:|chrome-extension:|devtools:)/.test(String(item.url || ''));
+const target = targets.find((item) => usablePage(item) && /^https?:/.test(String(item.url || ''))) || targets.find(usablePage) || targets.find((item) => item.type === 'page');
 if (!target || !target.webSocketDebuggerUrl) throw new Error('No page target for CDP eval');
 const ws = new WebSocket(target.webSocketDebuggerUrl);
 let nextId = 0;
@@ -1220,7 +1238,8 @@ def run_cdp_keypress(port: int, key: str, *, timeout: float = 10.0) -> subproces
     bridge = r"""
 const [base, key] = process.argv.slice(1);
 const targets = await (await fetch(`${base}/json/list`)).json();
-const target = targets.find((item) => item.type === 'page' && !String(item.url || '').startsWith('about:blank')) || targets.find((item) => item.type === 'page');
+const usablePage = (item) => item.type === 'page' && !/^(about:|chrome:|chrome-extension:|devtools:)/.test(String(item.url || ''));
+const target = targets.find((item) => usablePage(item) && /^https?:/.test(String(item.url || ''))) || targets.find(usablePage) || targets.find((item) => item.type === 'page');
 if (!target || !target.webSocketDebuggerUrl) throw new Error('No page target for CDP keypress');
 const ws = new WebSocket(target.webSocketDebuggerUrl);
 let nextId = 0;
@@ -1270,7 +1289,8 @@ def run_cdp_navigate(port: int, url: str, *, timeout: float = 15.0) -> subproces
     bridge = r"""
 const [base, url] = process.argv.slice(1);
 const targets = await (await fetch(`${base}/json/list`)).json();
-const target = targets.find((item) => item.type === 'page') || targets[0];
+const usablePage = (item) => item.type === 'page' && !/^(chrome:|chrome-extension:|devtools:)/.test(String(item.url || ''));
+const target = targets.find((item) => usablePage(item) && /^https?:/.test(String(item.url || ''))) || targets.find(usablePage) || targets.find((item) => item.type === 'page') || targets[0];
 if (!target || !target.webSocketDebuggerUrl) throw new Error('No page target for CDP navigation');
 const ws = new WebSocket(target.webSocketDebuggerUrl);
 let nextId = 0;
@@ -1413,7 +1433,7 @@ def provider_workflow_specs() -> dict[str, dict[str, dict[str, Any]]]:
                 "slash_triggers": [],
                 "confirmation_triggers": [],
                 "attachment_triggers": ["Add files and more", "Attach files", "Upload file"],
-                "running_markers": ["Stop generating", "Regenerate", "Sources"],
+                "running_markers": ["Stop generating", "Stop answering", "Generating"],
                 "completion_markers": ["Sources", "Final answer", "Done"],
                 "output_selectors": ["main", "[data-testid='conversation-turn']"],
             },
@@ -1439,6 +1459,18 @@ def provider_workflow_specs() -> dict[str, dict[str, dict[str, Any]]]:
                 "pre_confirm_wait_seconds": 12,
                 "running_markers": ["Agent", "Taking action", "Working", "Running"],
                 "completion_markers": ["Done", "Finished", "Completed", "Task complete"],
+                "output_selectors": ["main", "[data-testid='conversation-turn']", "article"],
+            },
+            "image": {
+                "feature_triggers": ["Create image", "Generate image", "Image", "Bild erstellen"],
+                "menu_triggers": ["Add files and more", "Tools"],
+                "attachment_triggers": ["Add files and more", "Attach files", "Upload file"],
+                "pre_prompt_triggers": [],
+                "slash_triggers": ["/image", "/create image"],
+                "confirmation_triggers": [],
+                "pre_confirm_wait_seconds": 12,
+                "running_markers": ["Creating image", "Generating image", "Bild wird erstellt"],
+                "completion_markers": ["Download", "Image created", "Bild erstellt", "PNG"],
                 "output_selectors": ["main", "[data-testid='conversation-turn']", "article"],
             },
         },
@@ -1475,6 +1507,18 @@ def provider_workflow_specs() -> dict[str, dict[str, dict[str, Any]]]:
                 "running_markers": ["Agent", "Plan", "Working"],
                 "completion_markers": ["Done", "Fertig", "Completed"],
                 "output_selectors": ["message-content", "main"],
+            },
+            "image": {
+                "feature_triggers": ["Image", "Generate image", "Create image", "Bild erstellen", "Imagen"],
+                "menu_triggers": ["Tools", "Canvas"],
+                "attachment_triggers": ["Menü „Datei hochladen“ öffnen", "Datei hochladen", "Upload files", "Upload file"],
+                "pre_prompt_triggers": [],
+                "slash_triggers": [],
+                "confirmation_triggers": [],
+                "pre_confirm_wait_seconds": 12,
+                "running_markers": ["Generating image", "Bild wird erstellt", "Imagen", "Erstelle Bild"],
+                "completion_markers": ["Download", "Bild", "Image", "Generated image"],
+                "output_selectors": ["#extended-response-markdown-content", "message-content", "main"],
             },
         },
         "perplexity": {
@@ -1586,6 +1630,8 @@ def build_ai_workflow_plan(
     submit: bool = False,
     confirm_start: bool = False,
     wait_seconds: int = 30,
+    response_timeout: float = 180.0,
+    copy_output: bool = False,
     attachments: list[Path] | None = None,
 ) -> dict[str, Any]:
     provider_id = normalize_provider_name(provider)
@@ -1625,6 +1671,10 @@ def build_ai_workflow_plan(
             }
         )
     actions.append({"label": "wait-for-run", "seconds": wait_seconds, "markers": spec.get("running_markers", [])})
+    if submit:
+        actions.append({"label": "wait-for-response", "timeout_seconds": response_timeout})
+    if copy_output:
+        actions.append({"label": "copy-output-to-clipboard", "after": "extract-output"})
     actions.append({"label": "extract-output", "selectors": spec.get("output_selectors", [])})
     return {
         "provider": provider_id,
@@ -1636,6 +1686,8 @@ def build_ai_workflow_plan(
         "submit": submit,
         "confirm_start": confirm_start,
         "wait_seconds": wait_seconds,
+        "response_timeout": response_timeout,
+        "copy_output": copy_output,
         "attachments": [str(path.expanduser()) for path in attachments or []],
         "artifact_root": str(artifact_root.expanduser()),
         "clone_root": str(clone_root.expanduser()),
@@ -1663,6 +1715,8 @@ def build_live_ai_workflow_plan(
     submit: bool = False,
     confirm_start: bool = False,
     wait_seconds: int = 30,
+    response_timeout: float = 180.0,
+    copy_output: bool = False,
     attachments: list[Path] | None = None,
 ) -> dict[str, Any]:
     plan = build_ai_workflow_plan(
@@ -1676,6 +1730,8 @@ def build_live_ai_workflow_plan(
         submit=submit,
         confirm_start=confirm_start,
         wait_seconds=wait_seconds,
+        response_timeout=response_timeout,
+        copy_output=copy_output,
         attachments=attachments,
     )
     live_plan = dict(plan)
@@ -1724,6 +1780,30 @@ def extract_workflow_output_from_text(text: str, *, provider: str, mode: str) ->
     }
 
 
+def clean_workflow_response_text(text: str, *, provider: str, prompt: str = "") -> str:
+    provider_id = normalize_provider_name(provider)
+    lines = [line.strip() for line in (text or "").splitlines()]
+    prompt_clean = " ".join((prompt or "").split())
+    cleaned: list[str] = []
+    removed_prompt = False
+    for line in lines:
+        if not line:
+            continue
+        normalized_line = " ".join(line.split())
+        if prompt_clean and not removed_prompt and normalized_line == prompt_clean:
+            removed_prompt = True
+            continue
+        if provider_id == "chatgpt":
+            if re.fullmatch(r"Thought for \d+\s*(?:s|sec|seconds)", line, flags=re.I):
+                continue
+            if line in {"Thinking", "ChatGPT can make mistakes. Check important info.", "Is this conversation helpful so far?"}:
+                continue
+        if provider_id == "gemini" and line in {"Gemini can make mistakes", "Gemini kann Fehler machen"}:
+            continue
+        cleaned.append(line)
+    return "\n".join(cleaned).strip()
+
+
 def browser_eval_body_and_report_script(selectors: list[str]) -> str:
     selectors_json = json.dumps(selectors)
     return (
@@ -1745,6 +1825,63 @@ def browser_eval_body_and_report_script(selectors: list[str]) -> str:
     )
 
 
+def browser_eval_latest_response_script(provider: str, selectors: list[str]) -> str:
+    selectors_json = json.dumps(selectors)
+    provider_id = normalize_provider_name(provider)
+    preferred = {
+        "chatgpt": [
+            "[data-message-author-role='assistant']",
+            "[data-testid*='conversation-turn']",
+            "article",
+        ],
+        "gemini": [
+            "message-content",
+            "#extended-response-markdown-content",
+            "[data-response-index]",
+            "main",
+        ],
+        "perplexity": ["article", "main"],
+        "grok": ["article", "main"],
+        "claude": ["article", "main"],
+    }.get(provider_id, ["article", "main"])
+    preferred_json = json.dumps([*preferred, *selectors])
+    return (
+        "(() => {"
+        "/* __AI_RESEARCH_LATEST_RESPONSE__ */"
+        f"const selectors = {preferred_json};"
+        f"const fallbackSelectors = {selectors_json};"
+        "const hidden = (el) => {"
+        "  const style = window.getComputedStyle(el);"
+        "  return style.display === 'none' || style.visibility === 'hidden' || el.offsetParent === null;"
+        "};"
+        "const clean = (text) => String(text || '')"
+        "  .split('\\n')"
+        "  .map(line => line.trim())"
+        "  .filter(line => line && !/^(Copy response|Copy message|Good response|Bad response|Share|More actions|ChatGPT can make mistakes|Gemini can make mistakes)/i.test(line))"
+        "  .join('\\n')"
+        "  .trim();"
+        "const texts = [];"
+        "for (const selector of selectors) {"
+        "  for (const el of Array.from(document.querySelectorAll(selector))) {"
+        "    if (hidden(el)) continue;"
+        "    const text = clean(el.innerText || el.textContent || '');"
+        "    if (text && !texts.includes(text)) texts.push(text.slice(0, 30000));"
+        "  }"
+        "}"
+        "if (texts.length) return texts[texts.length - 1].slice(0, 60000);"
+        "const fallback = [];"
+        "for (const selector of fallbackSelectors) {"
+        "  for (const el of Array.from(document.querySelectorAll(selector)).slice(-8)) {"
+        "    const text = clean(el.innerText || el.textContent || '');"
+        "    if (text && !fallback.includes(text)) fallback.push(text.slice(0, 30000));"
+        "  }"
+        "}"
+        "if (fallback.length) return fallback[fallback.length - 1].slice(0, 60000);"
+        "return clean(document.body && (document.body.innerText || document.body.textContent) || '').slice(0, 60000);"
+        "})()"
+    )
+
+
 def browser_eval_visible_text_script(max_chars: int = 60000) -> str:
     return (
         "(() => {"
@@ -1753,6 +1890,68 @@ def browser_eval_visible_text_script(max_chars: int = 60000) -> str:
         f"return text.slice(0, {int(max_chars)});"
         "})()"
     )
+
+
+def wait_for_workflow_response(
+    *,
+    invoke: Any,
+    provider: str,
+    mode: str,
+    output_selectors: list[str],
+    visible_text_parts: list[str],
+    response_timeout: float,
+    poll_interval: float = 2.0,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + max(0.1, response_timeout)
+    max_polls = max(1, int(math.ceil(max(0.1, response_timeout) / max(0.2, poll_interval))))
+    last_text = ""
+    stable_polls = 0
+    polls: list[dict[str, Any]] = []
+    latest_output: dict[str, Any] = {
+        "provider": normalize_provider_name(provider),
+        "mode": mode,
+        "status": "empty",
+        "completion_markers_found": [],
+        "running_markers_found": [],
+        "text": "",
+        "text_length": 0,
+    }
+    for index in range(max_polls):
+        snapshot = invoke(f"snapshot-response-{index}", ["snapshot", "-i", "-c"])
+        if snapshot.stdout:
+            visible_text_parts.append(snapshot.stdout)
+        output_eval = invoke(
+            f"extract-response-{index}",
+            ["eval", browser_eval_latest_response_script(provider, output_selectors)],
+        )
+        if output_eval.stdout:
+            visible_text_parts.append(output_eval.stdout)
+        combined = "\n".join(part for part in [snapshot.stdout, output_eval.stdout] if part)
+        latest_output = extract_workflow_output_from_text(combined, provider=provider, mode=mode)
+        current_text = latest_output.get("text", "")
+        if current_text and current_text == last_text and latest_output.get("status") != "running":
+            stable_polls += 1
+        else:
+            stable_polls = 0
+        last_text = current_text
+        polls.append(
+            {
+                "index": index,
+                "status": latest_output.get("status"),
+                "text_length": latest_output.get("text_length", 0),
+                "completion_markers_found": latest_output.get("completion_markers_found", []),
+                "running_markers_found": latest_output.get("running_markers_found", []),
+            }
+        )
+        if latest_output.get("status") == "complete":
+            return {"event": "wait-for-response", "status": "complete", "polls": polls, "output": latest_output}
+        if stable_polls >= 1 and int(latest_output.get("text_length", 0)) > 0:
+            return {"event": "wait-for-response", "status": "stable", "polls": polls, "output": latest_output}
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(max(0.2, poll_interval), remaining))
+    return {"event": "wait-for-response", "status": "timeout", "polls": polls, "output": latest_output}
 
 
 def wait_milliseconds(seconds: float, *, minimum_ms: int = 1000, maximum_ms: int | None = None) -> str:
@@ -2004,6 +2203,19 @@ def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
         return subprocess.run(cmd, capture_output=True, text=True)
     except PermissionError as exc:
         return subprocess.CompletedProcess(cmd, 126, "", str(exc))
+
+
+def copy_text_to_clipboard(text: str) -> dict[str, Any]:
+    if not text:
+        return {"requested": True, "copied": False, "text_length": 0, "error": "empty-output"}
+    try:
+        result = subprocess.run(["pbcopy"], input=text, text=True, capture_output=True)
+    except OSError as exc:
+        return {"requested": True, "copied": False, "text_length": len(text), "error": str(exc)}
+    payload = {"requested": True, "copied": result.returncode == 0, "text_length": len(text)}
+    if result.returncode != 0:
+        payload["error"] = (result.stderr or result.stdout or "pbcopy failed")[-1000:]
+    return payload
 
 
 def port_owner(port: int) -> str:
@@ -2731,8 +2943,17 @@ def start_clone_cdp_browser(
     deadline = time.time() + startup_timeout
     while time.time() < deadline:
         if is_port_open(port):
-            log_file.close()
-            return process, {"ok": True, "pid": process.pid, "port": port, "launch_args": launch_args, "log_path": str(log_path)}
+            endpoint = detect_cdp_endpoint(port)
+            if endpoint.get("ok"):
+                log_file.close()
+                return process, {
+                    "ok": True,
+                    "pid": process.pid,
+                    "port": port,
+                    "cdp_base": endpoint.get("base", ""),
+                    "launch_args": launch_args,
+                    "log_path": str(log_path),
+                }
         if process.poll() is not None:
             break
         time.sleep(0.2)
@@ -2769,7 +2990,8 @@ def capture_cdp_screenshot(port: int, screenshot: Path, *, timeout: float = 20.0
     script = r"""
 const [base, out] = process.argv.slice(1);
 const targets = await (await fetch(`${base}/json/list`)).json();
-const target = targets.find((item) => item.type === 'page' && !String(item.url || '').startsWith('about:blank')) || targets.find((item) => item.type === 'page');
+const usablePage = (item) => item.type === 'page' && !/^(about:|chrome:|chrome-extension:|devtools:)/.test(String(item.url || ''));
+const target = targets.find((item) => usablePage(item) && /^https?:/.test(String(item.url || ''))) || targets.find(usablePage) || targets.find((item) => item.type === 'page');
 if (!target || !target.webSocketDebuggerUrl) throw new Error('No page target for CDP screenshot');
 const ws = new WebSocket(target.webSocketDebuggerUrl);
 let nextId = 0;
@@ -2812,7 +3034,8 @@ def set_cdp_file_input_files(port: int, files: list[Path], *, timeout: float = 2
 const [base, filesJson] = process.argv.slice(1);
 const files = JSON.parse(filesJson);
 const targets = await (await fetch(`${base}/json/list`)).json();
-const target = targets.find((item) => item.type === 'page' && !String(item.url || '').startsWith('about:blank')) || targets.find((item) => item.type === 'page');
+const usablePage = (item) => item.type === 'page' && !/^(about:|chrome:|chrome-extension:|devtools:)/.test(String(item.url || ''));
+const target = targets.find((item) => usablePage(item) && /^https?:/.test(String(item.url || ''))) || targets.find(usablePage) || targets.find((item) => item.type === 'page');
 if (!target || !target.webSocketDebuggerUrl) throw new Error('No page target for CDP file upload');
 const ws = new WebSocket(target.webSocketDebuggerUrl);
 let nextId = 0;
@@ -3161,6 +3384,8 @@ def agent_browser_profile_workflow_run(
     submit: bool = False,
     confirm_start: bool = False,
     wait_seconds: int = 30,
+    response_timeout: float = 180.0,
+    copy_output: bool = False,
     timeout: float = 90.0,
     cache_root: Path | None = None,
     refresh_cache: bool = True,
@@ -3187,6 +3412,8 @@ def agent_browser_profile_workflow_run(
         submit=submit,
         confirm_start=confirm_start,
         wait_seconds=wait_seconds,
+        response_timeout=response_timeout,
+        copy_output=copy_output,
         attachments=attachments,
     )
 
@@ -3294,6 +3521,7 @@ def agent_browser_profile_workflow_run(
     visible_text_parts: list[str] = []
     screenshot = paths["screenshot_png"]
     current_url = ""
+    latest_response_text = ""
     try:
         invoke("open-provider", ["open", spec["url"]])
         invoke("wait-initial", ["wait", "4000"])
@@ -3492,11 +3720,25 @@ def agent_browser_profile_workflow_run(
                     if confirm_result.get("clicked") or confirm_result.get("running_marker_seen"):
                         status = "started"
                         invoke("wait-after-confirm", ["wait", str(max(1000, min(wait_seconds, 30) * 1000))])
+                response_event = wait_for_workflow_response(
+                    invoke=invoke,
+                    provider=provider_id,
+                    mode=spec["mode"],
+                    output_selectors=list(spec.get("output_selectors", [])),
+                    visible_text_parts=visible_text_parts,
+                    response_timeout=response_timeout,
+                )
+                workflow_events.append(response_event)
+                if response_event.get("status") in {"complete", "stable"}:
+                    status = "verified"
+                elif response_event.get("output", {}).get("status") == "running" and status == "submitted":
+                    status = "started"
 
         after_snapshot = invoke("snapshot-after", ["snapshot", "-i", "-c"])
         visible_text_parts.append(after_snapshot.stdout)
-        output_eval = invoke("extract-output", ["eval", browser_eval_body_and_report_script(list(spec.get("output_selectors", [])))])
+        output_eval = invoke("extract-output", ["eval", browser_eval_latest_response_script(provider_id, list(spec.get("output_selectors", [])))])
         visible_text_parts.append(output_eval.stdout)
+        latest_response_text = output_eval.stdout.strip()
         current_url = invoke("get-url", ["get", "url"]).stdout.strip()
         screenshot_result = invoke("screenshot", ["screenshot", str(screenshot)])
         if screenshot_result.returncode != 0:
@@ -3506,12 +3748,17 @@ def agent_browser_profile_workflow_run(
         terminate_process(browser_process)
 
     visible_text = "\n".join(part for part in visible_text_parts if part)
-    output = extract_workflow_output_from_text(visible_text, provider=provider_id, mode=spec["mode"])
+    output = extract_workflow_output_from_text(latest_response_text or visible_text, provider=provider_id, mode=spec["mode"])
+    cleaned_output_text = clean_workflow_response_text(output["text"], provider=provider_id, prompt=prompt)
+    if cleaned_output_text:
+        output = {**output, "text": cleaned_output_text, "text_length": len(cleaned_output_text)}
     verification = verify_visible_text(visible_text, provider=provider_id, mode=spec["mode"]) if visible_text else None
     if output["status"] == "complete" and status in {"submitted", "started"}:
         status = "verified"
     elif output["status"] == "running" and status == "submitted":
         status = "started"
+
+    clipboard_payload = {"requested": bool(copy_output), "copied": False, "text_length": 0}
 
     cache_payload = None
     if cache_root and visible_text.strip():
@@ -3538,6 +3785,8 @@ def agent_browser_profile_workflow_run(
     final_inventory = extract_provider_inventory(provider_id, visible_text)
     real_session_preflight = build_real_session_preflight(browser=browser, profile=profile, provider=provider_id)
     status, final_inventory = apply_real_session_requirement(status, final_inventory, real_session_preflight)
+    if copy_output and status in {"submitted", "started", "verified", "captured"} and output["text"]:
+        clipboard_payload = copy_text_to_clipboard(output["text"])
     payload = {
         **plan,
         "status": status,
@@ -3551,6 +3800,7 @@ def agent_browser_profile_workflow_run(
         "verification": verification,
         "workflow_events": workflow_events,
         "output": output,
+        "clipboard": clipboard_payload,
         "cache": cache_payload,
         "commands": commands,
         "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -3576,6 +3826,8 @@ def agent_browser_live_workflow_run(
     submit: bool = False,
     confirm_start: bool = False,
     wait_seconds: int = 30,
+    response_timeout: float = 180.0,
+    copy_output: bool = False,
     timeout: float = 90.0,
     cache_root: Path | None = None,
     refresh_cache: bool = True,
@@ -3604,6 +3856,8 @@ def agent_browser_live_workflow_run(
         submit=submit,
         confirm_start=confirm_start,
         wait_seconds=wait_seconds,
+        response_timeout=response_timeout,
+        copy_output=copy_output,
         attachments=attachments,
     )
     real_session_preflight = build_real_session_preflight(
@@ -3680,6 +3934,7 @@ def agent_browser_live_workflow_run(
     visible_text_parts: list[str] = []
     screenshot = paths["screenshot_png"]
     current_url = ""
+    latest_response_text = ""
     status = "blocked"
 
     tab_result = invoke("open-background-tab", ["tab", "new", spec["url"]])
@@ -3877,23 +4132,42 @@ def agent_browser_live_workflow_run(
                 if confirm_result.get("clicked") or confirm_result.get("running_marker_seen"):
                     status = "started"
                     invoke("wait-after-confirm", ["wait", str(max(1000, min(wait_seconds, 30) * 1000))])
+            response_event = wait_for_workflow_response(
+                invoke=invoke,
+                provider=provider_id,
+                mode=spec["mode"],
+                output_selectors=list(spec.get("output_selectors", [])),
+                visible_text_parts=visible_text_parts,
+                response_timeout=response_timeout,
+            )
+            workflow_events.append(response_event)
+            if response_event.get("status") in {"complete", "stable"}:
+                status = "verified"
+            elif response_event.get("output", {}).get("status") == "running" and status == "submitted":
+                status = "started"
 
     after_snapshot = invoke("snapshot-after", ["snapshot", "-i", "-c"])
     visible_text_parts.append(after_snapshot.stdout)
-    output_eval = invoke("extract-output", ["eval", browser_eval_body_and_report_script(list(spec.get("output_selectors", [])))])
+    output_eval = invoke("extract-output", ["eval", browser_eval_latest_response_script(provider_id, list(spec.get("output_selectors", [])))])
     visible_text_parts.append(output_eval.stdout)
+    latest_response_text = output_eval.stdout.strip()
     current_url = invoke("get-url", ["get", "url"]).stdout.strip()
     screenshot_result = invoke("screenshot", ["screenshot", str(screenshot)])
     if screenshot_result.returncode != 0:
         capture_cdp_screenshot(cdp_port, screenshot)
 
     visible_text = "\n".join(part for part in visible_text_parts if part)
-    output = extract_workflow_output_from_text(visible_text, provider=provider_id, mode=spec["mode"])
+    output = extract_workflow_output_from_text(latest_response_text or visible_text, provider=provider_id, mode=spec["mode"])
+    cleaned_output_text = clean_workflow_response_text(output["text"], provider=provider_id, prompt=prompt)
+    if cleaned_output_text:
+        output = {**output, "text": cleaned_output_text, "text_length": len(cleaned_output_text)}
     verification = verify_visible_text(visible_text, provider=provider_id, mode=spec["mode"]) if visible_text else None
     if output["status"] == "complete" and status in {"submitted", "started"}:
         status = "verified"
     elif output["status"] == "running" and status == "submitted":
         status = "started"
+
+    clipboard_payload = {"requested": bool(copy_output), "copied": False, "text_length": 0}
 
     cache_payload = None
     if cache_root and visible_text.strip():
@@ -3920,6 +4194,8 @@ def agent_browser_live_workflow_run(
     final_inventory = extract_provider_inventory(provider_id, visible_text)
     if allow_real_session_required:
         status, final_inventory = apply_real_session_requirement(status, final_inventory, real_session_preflight)
+    if copy_output and status in {"submitted", "started", "verified", "captured"} and output["text"]:
+        clipboard_payload = copy_text_to_clipboard(output["text"])
     payload = {
         **plan,
         "status": status,
@@ -3929,6 +4205,7 @@ def agent_browser_live_workflow_run(
         "verification": verification,
         "workflow_events": workflow_events,
         "output": output,
+        "clipboard": clipboard_payload,
         "cache": cache_payload,
         "screenshot": str(screenshot) if screenshot.exists() else "",
         "commands": commands,
@@ -5222,6 +5499,8 @@ def cmd_workflow_run(args: argparse.Namespace) -> int:
         submit=args.submit,
         confirm_start=args.confirm_start,
         wait_seconds=args.wait_seconds,
+        response_timeout=args.response_timeout,
+        copy_output=args.copy_output,
         timeout=args.timeout,
         cache_root=Path(args.cache_root).expanduser() if args.cache else None,
         refresh_cache=not args.no_refresh_cache,
@@ -5338,6 +5617,8 @@ def cmd_workflow_sibling_run(args: argparse.Namespace) -> int:
             submit=args.submit,
             confirm_start=args.confirm_start,
             wait_seconds=args.wait_seconds,
+            response_timeout=args.response_timeout,
+            copy_output=args.copy_output,
             timeout=args.timeout,
             cache_root=Path(args.cache_root).expanduser() if args.cache else None,
             refresh_cache=not args.no_refresh_cache,
@@ -6399,6 +6680,8 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_run.add_argument("--submit", action="store_true", help="Actually send the prompt.")
     workflow_run.add_argument("--confirm-start", action="store_true", help="Click the provider plan/start confirmation when visible.")
     workflow_run.add_argument("--wait-seconds", type=int, default=30)
+    workflow_run.add_argument("--response-timeout", type=float, default=180.0, help="When --submit is used, poll until the AI response is complete or stable.")
+    workflow_run.add_argument("--copy-output", action="store_true", help="Copy the extracted final response to the macOS clipboard after verification.")
     workflow_run.add_argument("--timeout", type=float, default=90.0)
     workflow_run.add_argument("--cache", action="store_true")
     workflow_run.add_argument("--cache-root", default=str(default_chat_cache_root()))
@@ -6419,6 +6702,8 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_live_run.add_argument("--submit", action="store_true", help="Actually send the prompt.")
     workflow_live_run.add_argument("--confirm-start", action="store_true", help="Click the provider plan/start confirmation when visible.")
     workflow_live_run.add_argument("--wait-seconds", type=int, default=30)
+    workflow_live_run.add_argument("--response-timeout", type=float, default=180.0, help="When --submit is used, poll until the AI response is complete or stable.")
+    workflow_live_run.add_argument("--copy-output", action="store_true", help="Copy the extracted final response to the macOS clipboard after verification.")
     workflow_live_run.add_argument("--timeout", type=float, default=90.0)
     workflow_live_run.add_argument("--cache", action="store_true")
     workflow_live_run.add_argument("--cache-root", default=str(default_chat_cache_root()))
@@ -6441,6 +6726,8 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_sibling_run.add_argument("--submit", action="store_true", help="Actually send the prompt.")
     workflow_sibling_run.add_argument("--confirm-start", action="store_true", help="Click the provider plan/start confirmation when visible.")
     workflow_sibling_run.add_argument("--wait-seconds", type=int, default=30)
+    workflow_sibling_run.add_argument("--response-timeout", type=float, default=180.0, help="When --submit is used, poll until the AI response is complete or stable.")
+    workflow_sibling_run.add_argument("--copy-output", action="store_true", help="Copy the extracted final response to the macOS clipboard after verification.")
     workflow_sibling_run.add_argument("--timeout", type=float, default=90.0)
     workflow_sibling_run.add_argument("--cache", action="store_true")
     workflow_sibling_run.add_argument("--cache-root", default=str(default_chat_cache_root()))

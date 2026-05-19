@@ -891,8 +891,9 @@ class AiResearchBrowserTest(unittest.TestCase):
 
         suite = module.build_primary_feature_suite(browsers, providers=["chatgpt"])
 
-        self.assertEqual([row["feature"] for row in suite], ["chat", "deep-research", "agent"])
-        self.assertEqual(suite[1]["model"], "GPT-5.5 Pro")
+        self.assertEqual([row["feature"] for row in suite], ["chat", "deep-research", "agent", "image"])
+        self.assertEqual(suite[1]["model"], "GPT-5.5")
+        self.assertNotIn("GPT-5.5 Pro", [row["model"] for row in suite])
         self.assertIn("deep-research-tool", suite[1]["must_verify"])
         self.assertEqual(suite[0]["status"], "queued")
 
@@ -1995,6 +1996,29 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertEqual(extracted["status"], "captured")
         self.assertEqual(extracted["completion_markers_found"], [])
 
+    def test_chatgpt_chat_treats_thinking_as_running(self):
+        module = load_module()
+
+        extracted = module.extract_workflow_output_from_text(
+            "End-to-end clipboard extraction test\nThinking\nStop answering",
+            provider="chatgpt",
+            mode="chat",
+        )
+
+        self.assertEqual(extracted["status"], "running")
+        self.assertIn("Stop answering", extracted["running_markers_found"])
+
+    def test_clean_workflow_response_removes_prompt_and_chatgpt_ui_lines(self):
+        module = load_module()
+
+        cleaned = module.clean_workflow_response_text(
+            "Reply only with this exact token: TOKEN_123\nThought for 5s\nTOKEN_123\nThinking\nIs this conversation helpful so far?",
+            provider="chatgpt",
+            prompt="Reply only with this exact token: TOKEN_123",
+        )
+
+        self.assertEqual(cleaned, "TOKEN_123")
+
     def test_cmd_workflow_plan_outputs_safe_json(self):
         module = load_module()
         original_discover = module.discover_browsers
@@ -2433,6 +2457,48 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertNotIn("--headless=new", args)
         self.assertEqual(args[-1], "https://gemini.google.com/app?hl=de")
 
+    def test_start_clone_waits_for_cdp_endpoint_not_only_open_port(self):
+        module = load_module()
+        root = Path(tempfile.mkdtemp())
+        attempts = []
+
+        class FakeProcess:
+            pid = 9090
+
+            def poll(self):
+                return None
+
+        original_popen = module.subprocess.Popen
+        original_is_port_open = module.is_port_open
+        original_detect = module.detect_cdp_endpoint
+        original_sleep = module.time.sleep
+        module.subprocess.Popen = lambda *args, **kwargs: FakeProcess()
+        module.is_port_open = lambda port: True
+
+        def fake_detect(port):
+            attempts.append(port)
+            return {"ok": len(attempts) >= 3, "base": "http://127.0.0.1:9444" if len(attempts) >= 3 else "", "attempts": []}
+
+        module.detect_cdp_endpoint = fake_detect
+        module.time.sleep = lambda seconds: None
+        try:
+            process, status = module.start_clone_cdp_browser(
+                launch_args=["/Applications/Fake.app/Contents/MacOS/Fake", "--remote-debugging-port=9444"],
+                port=9444,
+                log_path=root / "browser.log",
+                startup_timeout=1.0,
+            )
+        finally:
+            module.subprocess.Popen = original_popen
+            module.is_port_open = original_is_port_open
+            module.detect_cdp_endpoint = original_detect
+            module.time.sleep = original_sleep
+
+        self.assertIsNotNone(process)
+        self.assertTrue(status["ok"])
+        self.assertEqual(status["cdp_base"], "http://127.0.0.1:9444")
+        self.assertGreaterEqual(len(attempts), 3)
+
     def test_real_session_preflight_can_ignore_existing_non_cdp_for_sibling(self):
         module = load_module()
         original_endpoint = module.detect_cdp_endpoint
@@ -2558,6 +2624,8 @@ class AiResearchBrowserTest(unittest.TestCase):
         original_run = module.run_agent_browser
         original_js = module.run_cdp_javascript
         original_capture = module.capture_cdp_screenshot
+        original_clipboard = module.copy_text_to_clipboard
+        copied = []
         module.build_real_session_preflight = lambda **kwargs: {
             "can_attach": True,
             "session_evidence": {"confidence": "likely-logged-in"},
@@ -2580,6 +2648,7 @@ class AiResearchBrowserTest(unittest.TestCase):
         module.run_agent_browser = fake_run
         module.run_cdp_javascript = fake_js
         module.capture_cdp_screenshot = lambda port, screenshot, timeout=20.0: (screenshot.write_bytes(b"png") or True)
+        module.copy_text_to_clipboard = lambda text: copied.append(text) or {"copied": True, "text_length": len(text)}
         try:
             payload = module.agent_browser_live_workflow_run(
                 browser={"id": "comet", "display_name": "Comet"},
@@ -2590,15 +2659,121 @@ class AiResearchBrowserTest(unittest.TestCase):
                 artifact_root=root / "artifacts",
                 cdp_port=9335,
                 allow_real_session_required=True,
+                copy_output=True,
             )
         finally:
             module.build_real_session_preflight = original_preflight
             module.run_agent_browser = original_run
             module.run_cdp_javascript = original_js
             module.capture_cdp_screenshot = original_capture
+            module.copy_text_to_clipboard = original_clipboard
 
         self.assertEqual(payload["status"], "real-session-required")
         self.assertEqual(payload["inventory"]["login_state"], "signed-out-or-wall")
+        self.assertEqual(copied, [])
+        self.assertFalse(payload["clipboard"]["copied"])
+
+    def test_copy_text_to_clipboard_uses_pbcopy_without_echoing_text(self):
+        module = load_module()
+        calls = []
+        original_run = module.subprocess.run
+
+        def fake_run(cmd, **kwargs):
+            calls.append((cmd, kwargs))
+            return module.subprocess.CompletedProcess(cmd, 0, "", "")
+
+        module.subprocess.run = fake_run
+        try:
+            result = module.copy_text_to_clipboard("E2E_RESPONSE_READY")
+        finally:
+            module.subprocess.run = original_run
+
+        self.assertTrue(result["copied"])
+        self.assertEqual(result["text_length"], len("E2E_RESPONSE_READY"))
+        self.assertEqual(calls[0][0], ["pbcopy"])
+        self.assertEqual(calls[0][1]["input"], "E2E_RESPONSE_READY")
+        self.assertTrue(calls[0][1]["text"])
+        self.assertTrue(calls[0][1]["capture_output"])
+
+    def test_live_workflow_submit_waits_for_response_and_copies_output(self):
+        module = load_module()
+        root = Path(tempfile.mkdtemp())
+        original_preflight = module.build_real_session_preflight
+        original_run = module.run_agent_browser
+        original_js = module.run_cdp_javascript
+        original_keypress = module.run_cdp_keypress
+        original_capture = module.capture_cdp_screenshot
+        original_sleep = module.time.sleep
+        original_clipboard = module.copy_text_to_clipboard
+        eval_texts = iter(
+            [
+                "ChatGPT\nMessage ChatGPT",
+                "ChatGPT\nMessage ChatGPT",
+                "ChatGPT\nStop generating\nE2E answer is loading",
+                "ChatGPT\nFinal answer\nE2E_RESPONSE_READY\nDone",
+                "ChatGPT\nFinal answer\nE2E_RESPONSE_READY\nDone",
+            ]
+        )
+        copied = []
+        module.build_real_session_preflight = lambda **kwargs: {
+            "can_attach": True,
+            "session_evidence": {"confidence": "likely-logged-in"},
+            "blockers": [],
+        }
+
+        def fake_run(args, *, session="", timeout=45.0):
+            command = ["agent-browser", *args]
+            if "snapshot" in args:
+                return module.subprocess.CompletedProcess(command, 0, stdout='- textbox "Message ChatGPT" [ref=e1]\n', stderr="")
+            if args[:3] == ["--cdp", "9336", "tab"]:
+                return module.subprocess.CompletedProcess(command, 0, stdout="https://chatgpt.com/\n", stderr="")
+            return module.subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        def fake_js(port, script, timeout=15.0):
+            if "location.href" in script:
+                return module.subprocess.CompletedProcess(["js"], 0, "https://chatgpt.com/c/e2e", "")
+            if "__AI_RESEARCH_LATEST_RESPONSE__" in script:
+                return module.subprocess.CompletedProcess(["js"], 0, "E2E_RESPONSE_READY", "")
+            try:
+                text = next(eval_texts)
+            except StopIteration:
+                text = "ChatGPT\nFinal answer\nE2E_RESPONSE_READY\nDone"
+            return module.subprocess.CompletedProcess(["js"], 0, text, "")
+
+        module.run_agent_browser = fake_run
+        module.run_cdp_javascript = fake_js
+        module.run_cdp_keypress = lambda port, key, timeout=10.0: module.subprocess.CompletedProcess(["keypress"], 0, "", "")
+        module.capture_cdp_screenshot = lambda port, screenshot, timeout=20.0: (screenshot.write_bytes(b"png") or True)
+        module.time.sleep = lambda seconds: None
+        module.copy_text_to_clipboard = lambda text: copied.append(text) or {"copied": True, "text_length": len(text)}
+        try:
+            payload = module.agent_browser_live_workflow_run(
+                browser={"id": "brave", "display_name": "Brave Browser"},
+                profile={"directory": "Default", "name": "Automation"},
+                provider="chatgpt",
+                mode="chat",
+                prompt="Reply with E2E_RESPONSE_READY",
+                artifact_root=root / "artifacts",
+                cdp_port=9336,
+                submit=True,
+                wait_seconds=1,
+                response_timeout=3,
+                copy_output=True,
+            )
+        finally:
+            module.build_real_session_preflight = original_preflight
+            module.run_agent_browser = original_run
+            module.run_cdp_javascript = original_js
+            module.run_cdp_keypress = original_keypress
+            module.capture_cdp_screenshot = original_capture
+            module.time.sleep = original_sleep
+            module.copy_text_to_clipboard = original_clipboard
+
+        self.assertEqual(payload["status"], "verified")
+        self.assertEqual(payload["output"]["text"], "E2E_RESPONSE_READY")
+        self.assertEqual(copied, [payload["output"]["text"]])
+        self.assertTrue(payload["clipboard"]["copied"])
+        self.assertTrue(any(event["event"] == "wait-for-response" and event["status"] in {"complete", "stable"} for event in payload["workflow_events"]))
 
     def test_sibling_profile_init_opens_visible_manual_login_session(self):
         module = load_module()

@@ -40,6 +40,7 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 - Runs a real-session preflight that checks CDP reachability, default-port ownership, already-running browsers without remote debugging, and provider session evidence before any paid workflow is claimed as usable.
 - Runs Agent Browser backed E2E probes against a CDP-enabled browser profile and records provider inventory artifacts.
 - Runs an Agent Browser live suite against a real CDP-enabled browser session and can fail hard when the page is signed out or blocked.
+- Runs `workflow-live-run` against a real CDP-enabled background browser session, opens only a new automation tab, leaves existing tabs/windows alone, and leaves long-running Deep Research/Agent tabs open for later follow-up/export.
 - Fills a provider composer through Agent Browser, optionally submits the prompt, exports the visible output, and saves it into the local chat cache.
 - Builds a focused primary feature suite for ChatGPT chat/model selection, ChatGPT Deep Research, ChatGPT Agent, Gemini Deep Research, Claude Opus, Grok chat/research, and Perplexity chat/research.
 - Runs Agent Browser against disposable browser-profile clones and records `signed-out-or-wall` when the cloned session hits login or anti-automation pages.
@@ -56,6 +57,8 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 Do not quit or relaunch the user's already-open browser without explicit permission. If a browser is already running without `--remote-debugging-port`, run preflight and report the blocker. Prefer `launch-background --dry-run` or `launch-all-background --dry-run` before execution, so the user can see whether the run will attach, launch hidden, or be blocked. For live UI checks, use Computer Use against the existing window and record screenshots locally.
 
 For Agent Browser "truth" checks, prefer `agent-browser-live-suite --assert-login` against a known real CDP port. Do not trust `agent-browser --auto-connect` unless the captured provider UI proves the intended profile/account is logged in; auto-connect can attach to a signed-out clone or the wrong Chromium instance.
+
+For actual Deep Research or Agent execution in a standing background browser, prefer `workflow-live-run` or `workflow-orchestrate --live-cdp --port <port>`. These commands require `real-session-preflight.can_attach=true`; if the browser is already running without remote debugging, they report the blocker instead of closing or relaunching the user's browser.
 
 Do not commit private screenshots that contain account names, chat history, or private prompts to a public repository. Keep them as local artifacts unless the user explicitly asks for a sanitized export.
 

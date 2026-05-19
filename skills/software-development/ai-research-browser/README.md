@@ -419,6 +419,24 @@ Each workflow writes `status.json`, `visible-text.txt`, `output.txt`, and a scre
 
 For Gemini specifically, a profile clone can show `likely-logged-in` cookie evidence but still load a Google sign-in/consent wall. That is intentionally not treated as success. Use `real-session-preflight` and the hidden Gemini commands in its output before claiming Deep Research has started.
 
+When a real browser was already started intentionally with `--remote-debugging-port`, use the live workflow path. It opens a new Agent Browser-controlled tab in that CDP session, leaves existing tabs alone, leaves the automation tab open for long-running research, and writes the same artifacts as the clone workflow:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py workflow-live-run \
+  --browser brave \
+  --profile work \
+  --provider google \
+  --mode deep-research \
+  --cdp-port 9222 \
+  --prompt "Use Gemini Deep Research for this custom prompt." \
+  --submit \
+  --confirm-start \
+  --cache \
+  --output /tmp/gemini-live-deep-research.json
+```
+
+The live command blocks before touching the provider UI when preflight cannot attach to the requested CDP port. `workflow-orchestrate --live-cdp --port <port>` uses the same live path while also checking Unbrowser sessions, AI Exporter capabilities, follow-up eligibility, and Notion export readiness.
+
 Send a follow-up prompt into an existing provider chat, then export/cache the refreshed transcript:
 
 ```bash

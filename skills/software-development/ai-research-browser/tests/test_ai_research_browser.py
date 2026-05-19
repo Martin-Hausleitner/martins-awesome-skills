@@ -544,6 +544,7 @@ class AiResearchBrowserTest(unittest.TestCase):
             }
         ]
         try:
+            output_path = Path(tempfile.mkdtemp()) / "launch.json"
             out = StringIO()
             with redirect_stdout(out):
                 exit_code = module.main(
@@ -560,6 +561,8 @@ class AiResearchBrowserTest(unittest.TestCase):
                         "--model",
                         "Pro",
                         "--dry-run",
+                        "--output",
+                        str(output_path),
                     ]
                 )
         finally:
@@ -570,6 +573,7 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertFalse(payload["execution"]["started"])
         self.assertEqual(payload["plan"]["strategy"], "macos-open-hidden")
         self.assertEqual(payload["plan"]["provider"], "gemini")
+        self.assertEqual(json.loads(output_path.read_text(encoding="utf-8"))["plan"]["provider"], "gemini")
 
     def test_cmd_launch_all_background_outputs_all_launchable_browsers(self):
         module = load_module()
@@ -2177,6 +2181,172 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertTrue(Path(payload["export_markdown"]).exists())
         self.assertTrue(Path(payload["cache"]["text_path"]).exists())
         self.assertTrue(getattr(fake_process, "terminated", False))
+
+    def test_build_live_workflow_plan_opens_new_tab_and_preserves_existing_tabs(self):
+        module = load_module()
+
+        plan = module.build_live_ai_workflow_plan(
+            browser={"id": "brave", "display_name": "Brave Browser"},
+            profile={"directory": "Default", "name": "Work"},
+            provider="chatgpt",
+            mode="agent",
+            prompt="Test agent",
+            artifact_root=Path("/tmp/artifacts"),
+            cdp_port=9222,
+            submit=True,
+            confirm_start=True,
+        )
+
+        self.assertEqual(plan["isolation"], "live-cdp-background-tab")
+        self.assertEqual(plan["cdp_port"], 9222)
+        self.assertFalse(plan["safety"]["uses_profile_clone"])
+        self.assertTrue(plan["safety"]["opens_new_tab_only"])
+        self.assertTrue(plan["safety"]["does_not_close_existing_tabs"])
+        self.assertEqual(plan["actions"][0]["label"], "open-background-tab")
+        self.assertNotIn("open-provider", [action["label"] for action in plan["actions"]])
+
+    def test_live_workflow_uses_cdp_tab_new_and_leaves_tab_open(self):
+        module = load_module()
+        root = Path(tempfile.mkdtemp())
+        commands_seen: list[list[str]] = []
+
+        original_preflight = module.build_real_session_preflight
+        original_run = module.run_agent_browser
+        original_js = module.run_cdp_javascript
+        original_key = module.run_cdp_keypress
+        original_capture = module.capture_cdp_screenshot
+        module.build_real_session_preflight = lambda **kwargs: {
+            "can_attach": True,
+            "session_evidence": {"confidence": "likely-logged-in"},
+            "blockers": [],
+        }
+
+        def fake_run(args, *, session="", timeout=45.0):
+            commands_seen.append(args)
+            command = ["agent-browser", *args]
+            if args[:3] == ["--cdp", "9222", "tab"]:
+                return module.subprocess.CompletedProcess(command, 0, stdout="new tab", stderr="")
+            if "snapshot" in args:
+                return module.subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout='ChatGPT\nIsagi yoichi\nPro\ntextbox "Message ChatGPT" [ref=e35]',
+                    stderr="",
+                )
+            if "click" in args:
+                return module.subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+            return module.subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        def fake_js(port, script, timeout=15.0):
+            if "location.href" in script:
+                return module.subprocess.CompletedProcess(["js"], 0, "https://chatgpt.com/c/live", "")
+            if "const text =" in script:
+                return module.subprocess.CompletedProcess(["js"], 0, '{"ok":true}', "")
+            if "el.click()" in script:
+                return module.subprocess.CompletedProcess(["js"], 0, '{"ok":false,"reason":"not-found"}', "")
+            return module.subprocess.CompletedProcess(["js"], 0, "ChatGPT\nIsagi yoichi\nPro\nFinal answer\nReady", "")
+
+        module.run_agent_browser = fake_run
+        module.run_cdp_javascript = fake_js
+        module.run_cdp_keypress = lambda port, key, timeout=10.0: module.subprocess.CompletedProcess(["key"], 0, "ok", "")
+        module.capture_cdp_screenshot = lambda port, screenshot, timeout=20.0: (screenshot.write_bytes(b"png") or True)
+        try:
+            payload = module.agent_browser_live_workflow_run(
+                browser={"id": "brave", "display_name": "Brave Browser"},
+                profile={"directory": "Default", "name": "Work"},
+                provider="chatgpt",
+                mode="chat",
+                prompt="Say READY",
+                artifact_root=root / "artifacts",
+                cdp_port=9222,
+                wait_seconds=1,
+            )
+        finally:
+            module.build_real_session_preflight = original_preflight
+            module.run_agent_browser = original_run
+            module.run_cdp_javascript = original_js
+            module.run_cdp_keypress = original_key
+            module.capture_cdp_screenshot = original_capture
+
+        self.assertEqual(payload["status"], "opened")
+        self.assertEqual(payload["isolation"], "live-cdp-background-tab")
+        self.assertEqual(payload["chat_url"], "https://chatgpt.com/c/live")
+        self.assertTrue(any(args[:5] == ["--cdp", "9222", "tab", "new", "https://chatgpt.com/"] for args in commands_seen))
+        self.assertFalse(any("close" in args for args in commands_seen))
+        self.assertTrue(Path(payload["screenshot"]).exists())
+
+    def test_live_workflow_blocks_when_real_cdp_session_is_not_attachable(self):
+        module = load_module()
+        root = Path(tempfile.mkdtemp())
+        original_preflight = module.build_real_session_preflight
+        module.build_real_session_preflight = lambda **kwargs: {
+            "can_attach": False,
+            "session_evidence": {"confidence": "likely-logged-in"},
+            "blockers": ["browser-running-without-remote-debugging"],
+        }
+        try:
+            payload = module.agent_browser_live_workflow_run(
+                browser={"id": "brave", "display_name": "Brave Browser"},
+                profile={"directory": "Default", "name": "Work"},
+                provider="gemini",
+                mode="deep-research",
+                prompt="Research",
+                artifact_root=root / "artifacts",
+                cdp_port=9222,
+            )
+        finally:
+            module.build_real_session_preflight = original_preflight
+
+        self.assertEqual(payload["status"], "blocked")
+        self.assertIn("not attachable", payload["blocker"])
+        self.assertIn("browser-running-without-remote-debugging", payload["real_session_preflight"]["blockers"])
+
+    def test_cmd_workflow_live_run_outputs_blocker_without_closing_browser(self):
+        module = load_module()
+        original_discover = module.discover_browsers
+        original_preflight = module.build_real_session_preflight
+        module.discover_browsers = lambda: [
+            {
+                "id": "brave",
+                "display_name": "Brave Browser",
+                "default_port": 9222,
+                "profiles": [{"directory": "Default", "name": "Work", "path": ""}],
+            }
+        ]
+        module.build_real_session_preflight = lambda **kwargs: {
+            "can_attach": False,
+            "session_evidence": {"confidence": "likely-logged-in"},
+            "blockers": ["browser-running-without-remote-debugging"],
+        }
+        try:
+            out = StringIO()
+            with redirect_stdout(out):
+                exit_code = module.main(
+                    [
+                        "workflow-live-run",
+                        "--browser",
+                        "brave",
+                        "--profile",
+                        "work",
+                        "--provider",
+                        "google",
+                        "--mode",
+                        "deep-research",
+                        "--prompt",
+                        "Research safely",
+                        "--cdp-port",
+                        "9222",
+                    ]
+                )
+        finally:
+            module.discover_browsers = original_discover
+            module.build_real_session_preflight = original_preflight
+
+        payload = json.loads(out.getvalue())
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(payload["status"], "blocked")
+        self.assertEqual(payload["isolation"], "live-cdp-background-tab")
+        self.assertTrue(payload["safety"]["does_not_close_existing_browser_windows"])
 
 
 if __name__ == "__main__":

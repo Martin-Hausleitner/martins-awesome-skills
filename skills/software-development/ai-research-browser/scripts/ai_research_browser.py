@@ -1644,6 +1644,53 @@ def build_ai_workflow_plan(
     }
 
 
+def build_live_ai_workflow_plan(
+    *,
+    browser: dict[str, Any],
+    profile: dict[str, str],
+    provider: str,
+    mode: str,
+    prompt: str,
+    artifact_root: Path,
+    cdp_port: int,
+    submit: bool = False,
+    confirm_start: bool = False,
+    wait_seconds: int = 30,
+    attachments: list[Path] | None = None,
+) -> dict[str, Any]:
+    plan = build_ai_workflow_plan(
+        browser=browser,
+        profile=profile,
+        provider=provider,
+        mode=mode,
+        prompt=prompt,
+        artifact_root=artifact_root,
+        clone_root=Path(""),
+        submit=submit,
+        confirm_start=confirm_start,
+        wait_seconds=wait_seconds,
+        attachments=attachments,
+    )
+    live_plan = dict(plan)
+    live_plan["clone_root"] = ""
+    live_plan["cdp_port"] = int(cdp_port)
+    live_plan["isolation"] = "live-cdp-background-tab"
+    live_plan["safety"] = {
+        "uses_profile_clone": False,
+        "requires_existing_cdp_session": True,
+        "opens_new_tab_only": True,
+        "does_not_close_existing_browser_windows": True,
+        "does_not_close_existing_tabs": True,
+        "leaves_automation_tab_open": True,
+        "does_not_read_cookie_values": True,
+    }
+    live_plan["actions"] = [
+        {"label": "open-background-tab", "tool": "agent-browser tab new", "target": live_plan["workflow_spec"]["url"]},
+        *[action for action in plan["actions"] if action["label"] != "open-provider"],
+    ]
+    return live_plan
+
+
 def extract_workflow_output_from_text(text: str, *, provider: str, mode: str) -> dict[str, Any]:
     provider_id = normalize_provider_name(provider)
     spec = provider_workflow_spec(provider_id, mode)
@@ -3339,6 +3386,342 @@ def agent_browser_profile_workflow_run(
     }
 
 
+def agent_browser_live_workflow_run(
+    *,
+    browser: dict[str, Any],
+    profile: dict[str, str],
+    provider: str,
+    mode: str,
+    prompt: str,
+    artifact_root: Path,
+    cdp_port: int,
+    submit: bool = False,
+    confirm_start: bool = False,
+    wait_seconds: int = 30,
+    timeout: float = 90.0,
+    cache_root: Path | None = None,
+    refresh_cache: bool = True,
+    attachments: list[Path] | None = None,
+) -> dict[str, Any]:
+    provider_id = normalize_provider_name(provider)
+    spec = provider_workflow_spec(provider_id, mode)
+    browser_id = normalize_browser_name(str(browser.get("id", "")))
+    profile_directory = str(profile.get("directory", "Default"))
+    run_name = f"{browser_id}-{slug(profile_directory)}-{provider_id}-{slug(spec['mode'])}-live"
+    paths = build_artifact_paths(artifact_root.expanduser(), provider=provider_id, mode=f"{spec['mode']}-live", browser=browser_id, profile=profile_directory)
+    paths["run_dir"].mkdir(parents=True, exist_ok=True)
+    commands: list[dict[str, Any]] = []
+    workflow_events: list[dict[str, Any]] = []
+    plan = build_live_ai_workflow_plan(
+        browser=browser,
+        profile=profile,
+        provider=provider_id,
+        mode=spec["mode"],
+        prompt=prompt,
+        artifact_root=artifact_root,
+        cdp_port=cdp_port,
+        submit=submit,
+        confirm_start=confirm_start,
+        wait_seconds=wait_seconds,
+        attachments=attachments,
+    )
+    real_session_preflight = build_real_session_preflight(browser=browser, profile=profile, provider=provider_id, port=cdp_port)
+    if not real_session_preflight.get("can_attach"):
+        payload = {
+            **plan,
+            "status": "blocked",
+            "blocker": "real browser CDP session is not attachable",
+            "real_session_preflight": real_session_preflight,
+            "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        }
+        write_json(paths["status_json"], payload)
+        return {**payload, "status_json": str(paths["status_json"])}
+
+    session = f"ai-live-{run_name}"
+    snapshot_timeout = max(8.0, min(timeout, 18.0))
+
+    def command_timeout(label: str, extra_args: list[str]) -> float:
+        if extra_args[:1] == ["snapshot"]:
+            return snapshot_timeout
+        if extra_args[:1] == ["tab"]:
+            return min(timeout, 20.0)
+        if extra_args[:1] == ["eval"]:
+            return min(timeout, 15.0)
+        if extra_args == ["get", "url"]:
+            return min(timeout, 8.0)
+        if extra_args[:1] == ["press"]:
+            return min(timeout, 10.0)
+        if extra_args[:1] == ["wait"] and len(extra_args) > 1:
+            try:
+                return max(8.0, (int(str(extra_args[1])) / 1000.0) + 5.0)
+            except ValueError:
+                return min(timeout, 15.0)
+        return timeout
+
+    def invoke(label: str, extra_args: list[str]) -> subprocess.CompletedProcess[str]:
+        if extra_args[:1] == ["wait"] and len(extra_args) > 1:
+            try:
+                milliseconds = int(str(extra_args[1]))
+            except ValueError:
+                milliseconds = 1000
+            time.sleep(max(0, milliseconds) / 1000.0)
+            result = subprocess.CompletedProcess(["sleep", str(milliseconds)], 0, f"waited {milliseconds}ms", "")
+        elif extra_args[:1] == ["eval"] and len(extra_args) > 1:
+            result = run_cdp_javascript(cdp_port, extra_args[1], timeout=command_timeout(label, extra_args))
+        elif extra_args[:1] == ["press"] and len(extra_args) > 1 and str(extra_args[1]).lower() in {"enter", "return"}:
+            result = run_cdp_keypress(cdp_port, str(extra_args[1]), timeout=command_timeout(label, extra_args))
+        elif extra_args == ["get", "url"]:
+            result = run_cdp_javascript(cdp_port, "location.href", timeout=command_timeout(label, extra_args))
+        elif extra_args[:1] == ["screenshot"] and len(extra_args) > 1:
+            ok = capture_cdp_screenshot(cdp_port, Path(extra_args[1]), timeout=min(timeout, 20.0))
+            result = subprocess.CompletedProcess(["cdp-screenshot", str(cdp_port), extra_args[1]], 0 if ok else 1, str(extra_args[1]) if ok else "", "")
+        elif extra_args[:1] == ["close"]:
+            result = subprocess.CompletedProcess(["skip-close-live-tab"], 0, "skipped: live automation tab is left open", "")
+        else:
+            result = run_agent_browser(["--cdp", str(cdp_port), *extra_args], session=session, timeout=command_timeout(label, extra_args))
+        commands.append(
+            {
+                "label": label,
+                "args": ["agent-browser", "--session", session, "--cdp", str(cdp_port), *extra_args],
+                "returncode": result.returncode,
+                "stdout": result.stdout[-4000:],
+                "stderr": result.stderr[-4000:],
+            }
+        )
+        return result
+
+    visible_text_parts: list[str] = []
+    screenshot = paths["screenshot_png"]
+    current_url = ""
+    status = "blocked"
+
+    tab_result = invoke("open-background-tab", ["tab", "new", spec["url"]])
+    if tab_result.returncode != 0:
+        payload = {
+            **plan,
+            "status": "blocked",
+            "blocker": "agent-browser could not open a new live CDP tab",
+            "real_session_preflight": real_session_preflight,
+            "workflow_events": [{"event": "open-background-tab", "returncode": tab_result.returncode}],
+            "commands": commands,
+            "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        }
+        write_json(paths["status_json"], payload)
+        return {**payload, "status_json": str(paths["status_json"])}
+
+    invoke("wait-initial", ["wait", "4000"])
+    before_eval = invoke("eval-before-text", ["eval", browser_eval_visible_text_script()])
+    visible_text_parts.append(before_eval.stdout)
+    before_snapshot = invoke("snapshot-before", ["snapshot", "-i", "-c"])
+    current_snapshot_text = before_snapshot.stdout
+    visible_text_parts.append(current_snapshot_text)
+    consent_result = click_first_agent_browser_text(
+        invoke,
+        ["Alle annehmen", "Accept all", "I agree", "Agree", "Zustimmen"],
+        command_log_label="consent",
+        snapshot=current_snapshot_text,
+    )
+    if consent_result.get("clicked"):
+        workflow_events.append({"event": "consent", **consent_result})
+        invoke("wait-after-consent", ["wait", "2500"])
+        consent_eval = invoke("eval-after-consent", ["eval", browser_eval_visible_text_script()])
+        visible_text_parts.append(consent_eval.stdout)
+        consent_snapshot = invoke("snapshot-after-consent", ["snapshot", "-i", "-c"])
+        current_snapshot_text = consent_snapshot.stdout or current_snapshot_text
+        visible_text_parts.append(current_snapshot_text)
+
+    inventory = extract_provider_inventory(provider_id, "\n".join(visible_text_parts))
+    if inventory.get("login_state") == "signed-out-or-wall":
+        status = "signed-out-or-wall"
+    else:
+        status = "opened"
+        feature_result = {"clicked": False, "label": "", "attempts": []}
+        if spec.get("pre_prompt_triggers"):
+            pre_prompt_result = click_first_agent_browser_text(
+                invoke,
+                list(spec.get("pre_prompt_triggers", [])),
+                command_log_label="pre-prompt-trigger",
+                snapshot=current_snapshot_text,
+            )
+            workflow_events.append({"event": "pre-prompt-trigger", **pre_prompt_result})
+            if pre_prompt_result.get("clicked"):
+                invoke("wait-after-pre-prompt-trigger", ["wait", "1000"])
+                pre_prompt_snapshot = invoke("snapshot-after-pre-prompt-trigger", ["snapshot", "-i", "-c"])
+                current_snapshot_text = pre_prompt_snapshot.stdout or current_snapshot_text
+                visible_text_parts.append(current_snapshot_text)
+        if spec.get("feature_triggers"):
+            menu_result = click_first_agent_browser_text(
+                invoke,
+                list(spec.get("menu_triggers", [])),
+                command_log_label="open-feature-menu",
+                snapshot=current_snapshot_text,
+            )
+            if menu_result.get("clicked"):
+                workflow_events.append({"event": "open-feature-menu", **menu_result})
+                invoke("wait-after-feature-menu", ["wait", "1000"])
+                menu_snapshot = invoke("snapshot-after-feature-menu", ["snapshot", "-i", "-c"])
+                current_snapshot_text = menu_snapshot.stdout or current_snapshot_text
+                visible_text_parts.append(current_snapshot_text)
+            feature_result = click_first_agent_browser_text(
+                invoke,
+                list(spec["feature_triggers"]),
+                command_log_label="select-feature",
+                snapshot=current_snapshot_text,
+            )
+            workflow_events.append({"event": "select-feature", **feature_result})
+        if not feature_result.get("clicked") and spec.get("slash_triggers"):
+            slash = str(spec["slash_triggers"][0])
+            slash_result = fill_agent_browser_composer(
+                invoke,
+                snapshot=current_snapshot_text,
+                selector=spec["composer_selector"],
+                text=slash,
+                label="slash-feature",
+            )
+            workflow_events.append({"event": "slash-feature", "trigger": slash, "returncode": slash_result.returncode})
+            if slash_result.returncode == 0:
+                invoke("slash-enter", ["press", "Enter"])
+                invoke("wait-after-slash", ["wait", "1500"])
+                slash_snapshot = invoke("snapshot-after-slash", ["snapshot", "-i", "-c"])
+                current_snapshot_text = slash_snapshot.stdout or current_snapshot_text
+
+        fill_result = fill_agent_browser_composer(
+            invoke,
+            snapshot=current_snapshot_text,
+            selector=spec["composer_selector"],
+            text=prompt,
+            label="fill-prompt",
+        )
+        workflow_events.append({"event": "fill-prompt", "returncode": fill_result.returncode})
+        if fill_result.returncode == 0:
+            prepare_and_upload_attachments(
+                port=cdp_port,
+                attachments=attachments,
+                commands=commands,
+                workflow_events=workflow_events,
+                timeout=timeout,
+                invoke=invoke,
+                snapshot=current_snapshot_text,
+                menu_triggers=list(spec.get("attachment_triggers", [])),
+            )
+        if submit and fill_result.returncode == 0:
+            invoke("submit-prompt", ["press", "Enter"])
+            status = "submitted"
+            pre_confirm_wait_seconds = int(spec.get("pre_confirm_wait_seconds", 12))
+            invoke("wait-after-submit", ["wait", str(max(1000, min(wait_seconds, 8) * 1000))])
+            if confirm_start and spec.get("confirmation_triggers"):
+                confirm_attempts: list[dict[str, Any]] = []
+                confirm_result: dict[str, Any] = {"clicked": False, "label": "", "ref": "", "attempts": confirm_attempts}
+                confirm_deadline = time.monotonic() + max(1, pre_confirm_wait_seconds)
+                confirm_index = 0
+                while True:
+                    confirm_snapshot = invoke(f"snapshot-before-confirm-{confirm_index}", ["snapshot", "-i", "-c"])
+                    current_snapshot_text = confirm_snapshot.stdout or current_snapshot_text
+                    visible_text_parts.append(current_snapshot_text)
+                    exact_ref = find_confirmation_ref(current_snapshot_text, list(spec["confirmation_triggers"]))
+                    exact_label = ""
+                    if exact_ref:
+                        for trigger_label in spec["confirmation_triggers"]:
+                            if find_snapshot_ref(
+                                current_snapshot_text,
+                                str(trigger_label),
+                                roles=("button", "menuitem", "menuitemradio", "option"),
+                                exact_only=True,
+                            ) == exact_ref:
+                                exact_label = str(trigger_label)
+                                break
+                        click_result = invoke(f"confirm-start:{exact_label or exact_ref}", ["click", f"@{exact_ref}"])
+                        confirm_attempts.append({"label": exact_label, "ref": exact_ref, "returncode": click_result.returncode})
+                        if click_result.returncode == 0:
+                            confirm_result = {"clicked": True, "label": exact_label, "ref": exact_ref, "attempts": confirm_attempts}
+                            break
+                    else:
+                        marker_probe = extract_workflow_output_from_text(current_snapshot_text, provider=provider_id, mode=spec["mode"])
+                        confirm_attempts.append(
+                            {
+                                "label": "",
+                                "returncode": 1,
+                                "skipped": "no-exact-confirmation-control",
+                                "marker_status": marker_probe["status"],
+                                "running_markers_found": marker_probe.get("running_markers_found", []),
+                            }
+                        )
+                        if marker_probe["status"] == "running" and marker_probe.get("running_markers_found"):
+                            confirm_result = {"clicked": False, "label": "", "ref": "", "running_marker_seen": True, "attempts": confirm_attempts}
+                            break
+                    remaining = confirm_deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    confirm_index += 1
+                    invoke(f"wait-before-confirm-{confirm_index}", ["wait", wait_milliseconds(remaining, maximum_ms=3000)])
+                workflow_events.append({"event": "confirm-start", **confirm_result})
+                if confirm_result.get("clicked") or confirm_result.get("running_marker_seen"):
+                    status = "started"
+                    invoke("wait-after-confirm", ["wait", str(max(1000, min(wait_seconds, 30) * 1000))])
+
+    after_snapshot = invoke("snapshot-after", ["snapshot", "-i", "-c"])
+    visible_text_parts.append(after_snapshot.stdout)
+    output_eval = invoke("extract-output", ["eval", browser_eval_body_and_report_script(list(spec.get("output_selectors", [])))])
+    visible_text_parts.append(output_eval.stdout)
+    current_url = invoke("get-url", ["get", "url"]).stdout.strip()
+    screenshot_result = invoke("screenshot", ["screenshot", str(screenshot)])
+    if screenshot_result.returncode != 0:
+        capture_cdp_screenshot(cdp_port, screenshot)
+
+    visible_text = "\n".join(part for part in visible_text_parts if part)
+    output = extract_workflow_output_from_text(visible_text, provider=provider_id, mode=spec["mode"])
+    verification = verify_visible_text(visible_text, provider=provider_id, mode=spec["mode"]) if visible_text else None
+    if output["status"] == "complete" and status in {"submitted", "started"}:
+        status = "verified"
+    elif output["status"] == "running" and status == "submitted":
+        status = "started"
+
+    cache_payload = None
+    if cache_root and visible_text.strip():
+        record = save_chat_record(
+            cache_root=cache_root,
+            browser=browser_id,
+            profile=profile_directory,
+            provider=provider_id,
+            chat_url=current_url or spec["url"],
+            title=f"{provider_id} {spec['mode']} live workflow",
+            text=visible_text,
+            source="agent-browser-live-workflow",
+            refresh=refresh_cache,
+        )
+        cache_payload = {
+            "key": record["key"],
+            "metadata_path": str(record["metadata_path"]),
+            "text_path": str(record["text_path"]),
+            "cache_hit": record["cache_hit"],
+        }
+
+    (paths["run_dir"] / "visible-text.txt").write_text(visible_text, encoding="utf-8")
+    (paths["run_dir"] / "output.txt").write_text(output["text"], encoding="utf-8")
+    final_inventory = extract_provider_inventory(provider_id, visible_text)
+    payload = {
+        **plan,
+        "status": status,
+        "chat_url": current_url,
+        "inventory": final_inventory,
+        "real_session_preflight": real_session_preflight,
+        "verification": verification,
+        "workflow_events": workflow_events,
+        "output": output,
+        "cache": cache_payload,
+        "screenshot": str(screenshot) if screenshot.exists() else "",
+        "commands": commands,
+        "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    }
+    write_json(paths["status_json"], payload)
+    return {
+        **payload,
+        "status_json": str(paths["status_json"]),
+        "visible_text_path": str(paths["run_dir"] / "visible-text.txt"),
+        "output_text_path": str(paths["run_dir"] / "output.txt"),
+    }
+
+
 def agent_browser_profile_followup_run(
     *,
     browser: dict[str, Any],
@@ -4249,6 +4632,8 @@ def cmd_launch_background(args: argparse.Namespace) -> int:
     can_launch, reason = launchable_browser(browser)
     if not can_launch:
         payload = {"plan": None, "execution": {"started": False, "dry_run": args.dry_run, "error": reason}}
+        if args.output:
+            write_json(Path(args.output).expanduser(), payload)
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 2
     profile = resolve_profile(browser["profiles"], args.profile)
@@ -4269,10 +4654,15 @@ def cmd_launch_background(args: argparse.Namespace) -> int:
     )
     if blockers and not args.force:
         payload = {"plan": plan, "execution": {"started": False, "dry_run": args.dry_run, "blockers": blockers}}
+        if args.output:
+            write_json(Path(args.output).expanduser(), payload)
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0 if args.dry_run else 2
     execution = execute_background_launch(plan, dry_run=args.dry_run)
-    print(json.dumps({"plan": plan, "execution": execution}, ensure_ascii=False, indent=2))
+    payload = {"plan": plan, "execution": execution}
+    if args.output:
+        write_json(Path(args.output).expanduser(), payload)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -4298,7 +4688,10 @@ def cmd_launch_all_background(args: argparse.Namespace) -> int:
             executions.append({"started": False, "dry_run": args.dry_run, "blockers": blockers})
             continue
         executions.append(execute_background_launch(launch_plan, dry_run=args.dry_run))
-    print(json.dumps({"plan": plan, "executions": executions}, ensure_ascii=False, indent=2))
+    payload = {"plan": plan, "executions": executions}
+    if args.output:
+        write_json(Path(args.output).expanduser(), payload)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0 if all(execution.get("started") or execution.get("dry_run") for execution in executions) else 2
 
 
@@ -4610,6 +5003,31 @@ def cmd_workflow_run(args: argparse.Namespace) -> int:
         cache_root=Path(args.cache_root).expanduser() if args.cache else None,
         refresh_cache=not args.no_refresh_cache,
         include_extension_ids=extension_ids,
+        attachments=attachments,
+    )
+    if args.output:
+        write_json(Path(args.output).expanduser(), payload)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0 if payload.get("status") in {"opened", "submitted", "started", "verified", "captured"} else 1
+
+
+def cmd_workflow_live_run(args: argparse.Namespace) -> int:
+    browser, profile = resolve_workflow_browser_profile(args)
+    attachments = [Path(item).expanduser() for item in getattr(args, "attachment", []) or []]
+    payload = agent_browser_live_workflow_run(
+        browser=browser,
+        profile=profile,
+        provider=args.provider,
+        mode=args.mode,
+        prompt=workflow_prompt_from_args(args),
+        artifact_root=Path(args.artifact_root).expanduser(),
+        cdp_port=args.cdp_port,
+        submit=args.submit,
+        confirm_start=args.confirm_start,
+        wait_seconds=args.wait_seconds,
+        timeout=args.timeout,
+        cache_root=Path(args.cache_root).expanduser() if args.cache else None,
+        refresh_cache=not args.no_refresh_cache,
         attachments=attachments,
     )
     if args.output:
@@ -5207,23 +5625,41 @@ def cmd_workflow_orchestrate(args: argparse.Namespace) -> int:
     if ai_exporter_payload.get("rows"):
         ai_exporter_status_path = str(artifact_root / "ai-exporter-capabilities.json")
         write_json(Path(ai_exporter_status_path), ai_exporter_payload)
-    workflow_payload = agent_browser_profile_workflow_run(
-        browser=browser,
-        profile=profile,
-        provider=provider_id,
-        mode=args.mode,
-        prompt=prompt,
-        artifact_root=artifact_root,
-        clone_root=clone_root,
-        submit=args.submit,
-        confirm_start=args.confirm_start,
-        wait_seconds=args.wait_seconds,
-        timeout=args.timeout,
-        cache_root=Path(args.cache_root).expanduser() if args.cache else None,
-        refresh_cache=not args.no_refresh_cache,
-        include_extension_ids=extension_ids,
-        attachments=[Path(item).expanduser() for item in args.attachment],
-    )
+    if args.live_cdp:
+        workflow_payload = agent_browser_live_workflow_run(
+            browser=browser,
+            profile=profile,
+            provider=provider_id,
+            mode=args.mode,
+            prompt=prompt,
+            artifact_root=artifact_root,
+            cdp_port=args.port or int(browser.get("default_port") or 0),
+            submit=args.submit,
+            confirm_start=args.confirm_start,
+            wait_seconds=args.wait_seconds,
+            timeout=args.timeout,
+            cache_root=Path(args.cache_root).expanduser() if args.cache else None,
+            refresh_cache=not args.no_refresh_cache,
+            attachments=[Path(item).expanduser() for item in args.attachment],
+        )
+    else:
+        workflow_payload = agent_browser_profile_workflow_run(
+            browser=browser,
+            profile=profile,
+            provider=provider_id,
+            mode=args.mode,
+            prompt=prompt,
+            artifact_root=artifact_root,
+            clone_root=clone_root,
+            submit=args.submit,
+            confirm_start=args.confirm_start,
+            wait_seconds=args.wait_seconds,
+            timeout=args.timeout,
+            cache_root=Path(args.cache_root).expanduser() if args.cache else None,
+            refresh_cache=not args.no_refresh_cache,
+            include_extension_ids=extension_ids,
+            attachments=[Path(item).expanduser() for item in args.attachment],
+        )
     followup_payload = None
     if args.followup and workflow_payload.get("chat_url") and workflow_payload.get("status") in {"submitted", "started", "verified", "captured"}:
         followup_payload = agent_browser_profile_followup_run(
@@ -5258,6 +5694,7 @@ def cmd_workflow_orchestrate(args: argparse.Namespace) -> int:
         "mode": args.mode,
         "browser": browser.get("id", ""),
         "profile": profile,
+        "execution_mode": "live-cdp-background-tab" if args.live_cdp else "temporary-profile-clone-cdp",
         "real_session_preflight": preflight,
         "unbrowser": compact_unbrowser_payload(unbrowser_payload),
         "unbrowser_session": compact_unbrowser_payload(unbrowser_session_payload),
@@ -5438,6 +5875,7 @@ def build_parser() -> argparse.ArgumentParser:
     launch_background.add_argument("--headless", action="store_true")
     launch_background.add_argument("--dry-run", action="store_true")
     launch_background.add_argument("--force", action="store_true", help="Launch even when preflight reports a running non-CDP browser.")
+    launch_background.add_argument("--output", default="")
     launch_all_background = sub.add_parser("launch-all-background")
     launch_all_background.add_argument("--provider", choices=provider_cli_choices(), required=True)
     launch_all_background.add_argument("--mode", default="chat")
@@ -5447,6 +5885,7 @@ def build_parser() -> argparse.ArgumentParser:
     launch_all_background.add_argument("--force", action="store_true", help="Launch even when preflight reports running non-CDP browsers.")
     launch_all_background.add_argument("--all-profiles", action="store_true")
     launch_all_background.add_argument("--port-offset", type=int, default=100)
+    launch_all_background.add_argument("--output", default="")
     account_audit = sub.add_parser("account-audit")
     account_audit.add_argument("--providers", default="", help="Comma-separated providers. Defaults to every provider.")
     account_audit.add_argument("--text-dir", default="", help="Directory containing <browser>-<profile>-<provider>.txt UI captures.")
@@ -5550,6 +5989,24 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_run.add_argument("--include-ai-exporter", action="store_true", help="Copy/load SaveAI / AI Exporter into the temporary clone.")
     workflow_run.add_argument("--attachment", action="append", default=[], help="Local file/image path to attach through the provider file input when visible.")
     workflow_run.add_argument("--output", default="")
+    workflow_live_run = sub.add_parser("workflow-live-run")
+    workflow_live_run.add_argument("--artifact-root", default="/tmp/hermes-ai-research-live-workflows")
+    workflow_live_run.add_argument("--browser", default="brave")
+    workflow_live_run.add_argument("--profile", default="work")
+    workflow_live_run.add_argument("--provider", choices=provider_cli_choices(), required=True)
+    workflow_live_run.add_argument("--mode", default="chat")
+    workflow_live_run.add_argument("--prompt", default="")
+    workflow_live_run.add_argument("--prompt-file", default="")
+    workflow_live_run.add_argument("--cdp-port", type=int, required=True, help="Attach to an already-started background browser with this CDP port.")
+    workflow_live_run.add_argument("--submit", action="store_true", help="Actually send the prompt.")
+    workflow_live_run.add_argument("--confirm-start", action="store_true", help="Click the provider plan/start confirmation when visible.")
+    workflow_live_run.add_argument("--wait-seconds", type=int, default=30)
+    workflow_live_run.add_argument("--timeout", type=float, default=90.0)
+    workflow_live_run.add_argument("--cache", action="store_true")
+    workflow_live_run.add_argument("--cache-root", default=str(default_chat_cache_root()))
+    workflow_live_run.add_argument("--no-refresh-cache", action="store_true")
+    workflow_live_run.add_argument("--attachment", action="append", default=[], help="Local file/image path to attach through the provider file input when visible.")
+    workflow_live_run.add_argument("--output", default="")
     workflow_followup = sub.add_parser("workflow-followup")
     workflow_followup.add_argument("--artifact-root", default="/tmp/hermes-ai-research-workflow-followups")
     workflow_followup.add_argument("--clone-root", default="/tmp/hermes-ai-research-workflow-followup-clones")
@@ -5608,6 +6065,7 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_orchestrate.add_argument("--wait-seconds", type=int, default=30)
     workflow_orchestrate.add_argument("--timeout", type=float, default=90.0)
     workflow_orchestrate.add_argument("--port", type=int, help="Real browser CDP port to preflight.")
+    workflow_orchestrate.add_argument("--live-cdp", action="store_true", help="Use the real CDP session and open a new background tab instead of a disposable clone.")
     workflow_orchestrate.add_argument("--cache", action="store_true")
     workflow_orchestrate.add_argument("--cache-root", default=str(default_chat_cache_root()))
     workflow_orchestrate.add_argument("--no-refresh-cache", action="store_true")
@@ -5754,6 +6212,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_workflow_plan(args)
     if args.command == "workflow-run":
         return cmd_workflow_run(args)
+    if args.command == "workflow-live-run":
+        return cmd_workflow_live_run(args)
     if args.command == "workflow-followup":
         return cmd_workflow_followup(args)
     if args.command == "workflow-suite":

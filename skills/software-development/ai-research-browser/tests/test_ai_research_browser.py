@@ -1789,6 +1789,51 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertIn("external-write-not-enabled", plan["blocked_reasons"])
         self.assertEqual(plan["ai_exporter_rows"][0]["notion_session_confidence"], "likely-logged-in")
 
+    def test_unbrowser_session_management_arguments(self):
+        module = load_module()
+
+        args = module.build_unbrowser_tool_arguments(
+            tool="session_management",
+            session_action="health",
+            session_domain="gemini.google.com",
+            session_profile="martin-work",
+        )
+
+        self.assertEqual(
+            args,
+            {
+                "action": "health",
+                "domain": "gemini.google.com",
+                "sessionProfile": "martin-work",
+            },
+        )
+
+    def test_provider_domain_uses_provider_url(self):
+        module = load_module()
+
+        self.assertEqual(module.provider_domain("google"), "gemini.google.com")
+        self.assertEqual(module.provider_domain("chatgpt"), "chatgpt.com")
+
+    def test_compact_unbrowser_payload_keeps_status_without_schema_noise(self):
+        module = load_module()
+
+        compact = module.compact_unbrowser_payload(
+            {
+                "backend": "unbrowser-local",
+                "status": "ok",
+                "profile": "core",
+                "tool": "session_management",
+                "tools": ["smart_browse", "session_management"],
+                "tool_schemas": [{"name": "very-large-schema"}],
+                "call_response": {"result": {"content": [{"type": "text", "text": "x" * 2000}]}},
+                "events_path": "/tmp/events.json",
+            }
+        )
+
+        self.assertEqual(compact["status"], "ok")
+        self.assertNotIn("tool_schemas", compact)
+        self.assertEqual(len(compact["call_text_preview"]), 1200)
+
     def test_ai_workflow_spec_has_required_research_and_agent_triggers(self):
         module = load_module()
 

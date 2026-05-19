@@ -208,13 +208,26 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
   --mode deep-research \
   --prompt "Custom Deep Research prompt" \
   --unbrowser \
+  --unbrowser-session \
   --include-ai-exporter \
   --followup \
   --notion-sync \
   --output /tmp/hermes-gemini-orchestrate.json
 ```
 
-`workflow-orchestrate` runs real-session preflight, optional Unbrowser Local MCP proof, SaveAI / AI Exporter capability parsing, the Agent Browser workflow, optional "Fass zusammen" follow-up, and a Notion export eligibility plan. It does not quit or relaunch existing browsers. Notion sync remains ineligible unless `--allow-external-write` is set and a local exportable output exists.
+`workflow-orchestrate` runs real-session preflight, optional Unbrowser Local MCP proof, optional Unbrowser `session_management` list/health, SaveAI / AI Exporter capability parsing, the Agent Browser workflow, optional "Fass zusammen" follow-up, and a Notion export eligibility plan. It does not quit or relaunch existing browsers. Notion sync remains ineligible unless `--allow-external-write` is set and a local exportable output exists.
+
+Check Unbrowser saved session state directly:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py unbrowser-session \
+  --action health \
+  --domain gemini.google.com \
+  --session-profile default \
+  --output /tmp/hermes-unbrowser-gemini-session.json
+```
+
+Use Unbrowser session checks as supporting evidence only. A paid or long-running provider workflow still needs a real CDP/browser proof before Hermes claims that Deep Research or Agent actually started.
 
 Attach an image or file when the provider exposes a file input:
 

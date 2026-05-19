@@ -691,6 +691,10 @@ def provider_url(provider: str) -> str:
     return str(providers[provider]["url"])
 
 
+def provider_domain(provider: str) -> str:
+    return urllib.parse.urlparse(provider_url(provider)).hostname or ""
+
+
 def normalize_provider_name(name: str) -> str:
     lowered = name.lower()
     for key, cfg in provider_registry().items():
@@ -4653,14 +4657,7 @@ def build_unbrowser_plan(
 ) -> dict[str, Any]:
     package = "@unbrowser/local" if local else "@unbrowser/cloud"
     server_command = ["npx", "-y", package, f"--profile={profile}"]
-    arguments: dict[str, Any] = {}
-    if url:
-        arguments["url"] = url
-    if tool == "smart_browse":
-        arguments.setdefault("contentType", "main_content")
-        arguments.setdefault("maxChars", 12000)
-    if prompt:
-        arguments["scope" if tool == "research" else "prompt"] = prompt
+    arguments = build_unbrowser_tool_arguments(tool=tool, url=url, prompt=prompt)
     return {
         "backend": "unbrowser-local" if local else "unbrowser-cloud",
         "package": package,
@@ -4697,6 +4694,37 @@ def cmd_unbrowser_plan(args: argparse.Namespace) -> int:
         write_json(Path(args.output).expanduser(), payload)
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
+
+
+def build_unbrowser_tool_arguments(
+    *,
+    tool: str,
+    url: str = "",
+    prompt: str = "",
+    max_chars: int = 12000,
+    session_action: str = "",
+    session_domain: str = "",
+    session_profile: str = "default",
+) -> dict[str, Any]:
+    if tool == "session_management":
+        arguments: dict[str, Any] = {"action": session_action or "list"}
+        if session_domain:
+            arguments["domain"] = session_domain
+        if session_profile:
+            arguments["sessionProfile"] = session_profile
+        return arguments
+    if tool == "research":
+        return {"scope": prompt or url, "maxResults": 5}
+    arguments = {}
+    if url:
+        arguments["url"] = url
+    if tool == "smart_browse":
+        arguments.update({"contentType": "main_content", "maxChars": max_chars})
+    elif tool == "quick_fetch":
+        arguments.update({"maxChars": max_chars})
+    if prompt:
+        arguments["prompt"] = prompt
+    return arguments
 
 
 def mcp_send_json_line(process: subprocess.Popen[bytes], payload: dict[str, Any]) -> None:
@@ -4762,6 +4790,9 @@ def run_unbrowser_mcp_probe(
     artifact_root: Path = Path("/tmp/hermes-unbrowser-mcp-probe"),
     timeout: float = 90.0,
     max_chars: int = 12000,
+    session_action: str = "",
+    session_domain: str = "",
+    session_profile: str = "default",
 ) -> dict[str, Any]:
     artifact_root = artifact_root.expanduser()
     artifact_root.mkdir(parents=True, exist_ok=True)
@@ -4794,14 +4825,16 @@ def run_unbrowser_mcp_probe(
         mcp_send_json_line(process, {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
         tools_response = mcp_read_until_id(process, 2, timeout=min(timeout, 45.0), buffer=stdout_buffer, events=events)
         call_response = None
-        if url:
-            arguments: dict[str, Any] = {"url": url}
-            if tool == "smart_browse":
-                arguments.update({"contentType": "main_content", "maxChars": max_chars})
-            elif tool == "quick_fetch":
-                arguments.update({"maxChars": max_chars})
-            elif tool == "research":
-                arguments = {"scope": prompt or url, "maxResults": 5}
+        if url or tool == "session_management":
+            arguments = build_unbrowser_tool_arguments(
+                tool=tool,
+                url=url,
+                prompt=prompt,
+                max_chars=max_chars,
+                session_action=session_action,
+                session_domain=session_domain,
+                session_profile=session_profile,
+            )
             mcp_send_json_line(process, {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": tool, "arguments": arguments}})
             call_response = mcp_read_until_id(process, 3, timeout=timeout, buffer=stdout_buffer, events=events)
     finally:
@@ -4823,8 +4856,12 @@ def run_unbrowser_mcp_probe(
         "profile": profile,
         "tool": tool,
         "url": url,
+        "session_action": session_action,
+        "session_domain": session_domain,
+        "session_profile": session_profile,
         "server_info": (init_response or {}).get("result", {}).get("serverInfo", {}),
         "tools": tools,
+        "tool_schemas": (tools_response or {}).get("result", {}).get("tools", []),
         "call_response": call_response,
         "events_path": str(artifact_root / "events.json"),
         "stderr_tail": stderr[-4000:],
@@ -4844,6 +4881,26 @@ def cmd_unbrowser_mcp_probe(args: argparse.Namespace) -> int:
         artifact_root=Path(args.artifact_root).expanduser(),
         timeout=args.timeout,
         max_chars=args.max_chars,
+        session_action=getattr(args, "session_action", ""),
+        session_domain=getattr(args, "session_domain", ""),
+        session_profile=getattr(args, "session_profile", "default"),
+    )
+    if args.output:
+        write_json(Path(args.output).expanduser(), payload)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0 if payload.get("status") == "ok" else 1
+
+
+def cmd_unbrowser_session(args: argparse.Namespace) -> int:
+    payload = run_unbrowser_mcp_probe(
+        url="",
+        tool="session_management",
+        profile=args.profile,
+        artifact_root=Path(args.artifact_root).expanduser(),
+        timeout=args.timeout,
+        session_action=args.action,
+        session_domain=args.domain,
+        session_profile=args.session_profile,
     )
     if args.output:
         write_json(Path(args.output).expanduser(), payload)
@@ -4903,6 +4960,31 @@ def compact_workflow_run_payload(payload: dict[str, Any]) -> dict[str, Any]:
             "profile_directory": clone.get("profile_directory", ""),
             "clone_user_data": clone.get("clone_user_data", ""),
         },
+    }
+
+
+def compact_unbrowser_payload(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not payload:
+        return None
+    call_response = payload.get("call_response") or {}
+    content = ((call_response.get("result") or {}).get("content") or []) if isinstance(call_response, dict) else []
+    text = ""
+    if content and isinstance(content[0], dict):
+        text = str(content[0].get("text", ""))
+    return {
+        "backend": payload.get("backend", ""),
+        "status": payload.get("status", ""),
+        "profile": payload.get("profile", ""),
+        "tool": payload.get("tool", ""),
+        "url": payload.get("url", ""),
+        "session_action": payload.get("session_action", ""),
+        "session_domain": payload.get("session_domain", ""),
+        "session_profile": payload.get("session_profile", ""),
+        "server_info": payload.get("server_info", {}),
+        "tools": payload.get("tools", []),
+        "call_text_preview": text[:1200],
+        "events_path": payload.get("events_path", ""),
+        "duration_seconds": payload.get("duration_seconds", 0),
     }
 
 
@@ -5108,6 +5190,18 @@ def cmd_workflow_orchestrate(args: argparse.Namespace) -> int:
             timeout=args.timeout,
             max_chars=args.unbrowser_max_chars,
         )
+    unbrowser_session_payload = None
+    if args.unbrowser_session:
+        unbrowser_session_payload = run_unbrowser_mcp_probe(
+            url="",
+            tool="session_management",
+            profile=args.unbrowser_profile,
+            artifact_root=Path(args.unbrowser_artifact_root).expanduser() / "session",
+            timeout=args.timeout,
+            session_action=args.unbrowser_session_action,
+            session_domain=args.unbrowser_session_domain or provider_domain(provider_id),
+            session_profile=args.unbrowser_session_profile,
+        )
     ai_exporter_payload = build_ai_exporter_capabilities() if args.include_ai_exporter or args.notion_sync else {"rows": []}
     ai_exporter_status_path = ""
     if ai_exporter_payload.get("rows"):
@@ -5165,7 +5259,8 @@ def cmd_workflow_orchestrate(args: argparse.Namespace) -> int:
         "browser": browser.get("id", ""),
         "profile": profile,
         "real_session_preflight": preflight,
-        "unbrowser": unbrowser_payload,
+        "unbrowser": compact_unbrowser_payload(unbrowser_payload),
+        "unbrowser_session": compact_unbrowser_payload(unbrowser_session_payload),
         "ai_exporter_capabilities": {
             "row_count": len(ai_exporter_payload.get("rows", [])),
             "actions": ai_exporter_payload.get("actions", []),
@@ -5178,6 +5273,7 @@ def cmd_workflow_orchestrate(args: argparse.Namespace) -> int:
             "workflow_status_json": workflow_payload.get("status_json", ""),
             "followup_status_json": (followup_payload or {}).get("status_json", ""),
             "unbrowser_events": (unbrowser_payload or {}).get("events_path", ""),
+            "unbrowser_session_events": (unbrowser_session_payload or {}).get("events_path", ""),
         },
     }
     if args.output:
@@ -5263,17 +5359,28 @@ def build_parser() -> argparse.ArgumentParser:
     unbrowser_plan.add_argument("--output-path", default="")
     unbrowser_plan.add_argument("--cloud", action="store_true")
     unbrowser_plan.add_argument("--profile", default="core", choices=["core", "api", "full"])
-    unbrowser_plan.add_argument("--tool", default="quick_fetch", choices=["quick_fetch", "smart_browse", "research"])
+    unbrowser_plan.add_argument("--tool", default="quick_fetch", choices=["quick_fetch", "smart_browse", "research", "session_management"])
     unbrowser_plan.add_argument("--output", default="")
     unbrowser_probe = sub.add_parser("unbrowser-mcp-probe")
     unbrowser_probe.add_argument("--url", default="")
     unbrowser_probe.add_argument("--prompt", default="")
     unbrowser_probe.add_argument("--profile", default="core", choices=["core", "api", "full"])
-    unbrowser_probe.add_argument("--tool", default="quick_fetch", choices=["quick_fetch", "smart_browse", "research"])
+    unbrowser_probe.add_argument("--tool", default="quick_fetch", choices=["quick_fetch", "smart_browse", "research", "session_management"])
     unbrowser_probe.add_argument("--artifact-root", default="/tmp/hermes-unbrowser-mcp-probe")
     unbrowser_probe.add_argument("--timeout", type=float, default=90.0)
     unbrowser_probe.add_argument("--max-chars", type=int, default=12000)
+    unbrowser_probe.add_argument("--session-action", default="list", choices=["list", "health"])
+    unbrowser_probe.add_argument("--session-domain", default="")
+    unbrowser_probe.add_argument("--session-profile", default="default")
     unbrowser_probe.add_argument("--output", default="")
+    unbrowser_session = sub.add_parser("unbrowser-session")
+    unbrowser_session.add_argument("--profile", default="core", choices=["core", "api", "full"])
+    unbrowser_session.add_argument("--action", default="list", choices=["list", "health"])
+    unbrowser_session.add_argument("--domain", default="")
+    unbrowser_session.add_argument("--session-profile", default="default")
+    unbrowser_session.add_argument("--artifact-root", default="/tmp/hermes-unbrowser-session")
+    unbrowser_session.add_argument("--timeout", type=float, default=90.0)
+    unbrowser_session.add_argument("--output", default="")
     probe_specs = sub.add_parser("probe-specs")
     probe_specs.add_argument("--provider", choices=provider_cli_choices(), default="")
     oracle_plan = sub.add_parser("oracle-plan")
@@ -5521,6 +5628,10 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_orchestrate.add_argument("--unbrowser-tool", default="quick_fetch", choices=["quick_fetch", "smart_browse", "research"])
     workflow_orchestrate.add_argument("--unbrowser-artifact-root", default="/tmp/hermes-unbrowser-orchestrate")
     workflow_orchestrate.add_argument("--unbrowser-max-chars", type=int, default=12000)
+    workflow_orchestrate.add_argument("--unbrowser-session", action="store_true", help="Run Unbrowser session_management list/health as workflow evidence.")
+    workflow_orchestrate.add_argument("--unbrowser-session-action", default="list", choices=["list", "health"])
+    workflow_orchestrate.add_argument("--unbrowser-session-domain", default="")
+    workflow_orchestrate.add_argument("--unbrowser-session-profile", default="default")
     workflow_orchestrate.add_argument("--notion-sync", action="store_true", help="Plan AI Exporter Save to Notion after local export.")
     workflow_orchestrate.add_argument("--allow-external-write", action="store_true", help="Allow the orchestrator to mark external Notion write as eligible.")
     workflow_orchestrate.add_argument("--notion-workspace", default="Martin Workspace")
@@ -5571,6 +5682,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_unbrowser_plan(args)
     if args.command == "unbrowser-mcp-probe":
         return cmd_unbrowser_mcp_probe(args)
+    if args.command == "unbrowser-session":
+        return cmd_unbrowser_session(args)
     if args.command == "probe-specs":
         return cmd_probe_specs(args)
     if args.command == "oracle-plan":

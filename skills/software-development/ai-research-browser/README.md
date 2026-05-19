@@ -125,13 +125,14 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
   --mode deep-research \
   --prompt "Custom Deep Research prompt" \
   --unbrowser \
+  --unbrowser-session \
   --include-ai-exporter \
   --followup \
   --notion-sync \
   --output /tmp/hermes-gemini-orchestrate.json
 ```
 
-`workflow-orchestrate` does not quit or relaunch existing browsers. It records the exact blocker when the real session is not CDP-attachable, still runs the safe clone workflow for selector/upload evidence, and marks the Notion step as ineligible unless `--allow-external-write` is set and an exportable output exists. This keeps AI Exporter / Notion writes explicit while still showing whether the installed extension and Notion session are ready.
+`workflow-orchestrate` does not quit or relaunch existing browsers. It records the exact blocker when the real session is not CDP-attachable, still runs the safe clone workflow for selector/upload evidence, can query Unbrowser's saved session state, and marks the Notion step as ineligible unless `--allow-external-write` is set and an exportable output exists. This keeps AI Exporter / Notion writes explicit while still showing whether the installed extension and Notion session are ready.
 
 Use the interactive picker:
 
@@ -276,6 +277,18 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 ```
 
 The probe writes `events.json` and `status.json` under the artifact root. It is meant for public-page extraction and pattern-learning checks; provider UI actions that start paid Deep Research or Agent runs stay in the CDP workflow where mode, account state, and screenshots are recorded explicitly.
+
+Check Unbrowser Local saved sessions without touching provider UI:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py unbrowser-session \
+  --action health \
+  --domain gemini.google.com \
+  --session-profile default \
+  --output /tmp/hermes-unbrowser-gemini-session.json
+```
+
+The session command wraps Unbrowser's MCP `session_management` tool for `list` and `health`. It is useful evidence for authenticated-content readiness, but it does not replace the real browser CDP proof required before spending Deep Research or Agent quota.
 
 Show provider-specific probe hints before writing or running selectors:
 

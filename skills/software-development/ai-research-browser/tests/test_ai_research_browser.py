@@ -72,6 +72,16 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertEqual(resolved["directory"], "Profile 2")
         self.assertEqual(resolved["account"], "work@example.test")
 
+    def test_work_alias_falls_back_to_single_profile(self):
+        module = load_module()
+
+        resolved = module.resolve_profile(
+            [{"directory": "Default", "name": "Neptune", "account": "", "account_state": "signed-in-hidden"}],
+            "work",
+        )
+
+        self.assertEqual(resolved["name"], "Neptune")
+
     def test_provider_registry_contains_chatgpt_gemini_modes_and_models(self):
         module = load_module()
 
@@ -1712,6 +1722,45 @@ class AiResearchBrowserTest(unittest.TestCase):
         payload = json.loads(out.getvalue())
         self.assertEqual(exit_code, 2)
         self.assertIn("no profiles discovered for Microsoft Edge", payload["blockers"])
+
+    def test_real_session_preflight_reports_cdp_blocker_and_session_evidence(self):
+        module = load_module()
+        original_endpoint = module.detect_cdp_endpoint
+        original_owner = module.lsof_port_owner
+        original_args = module.browser_main_process_args
+        original_evidence = module.provider_session_evidence
+        module.detect_cdp_endpoint = lambda port, hosts=None: {"ok": False, "base": "", "version": {}, "attempts": []}
+        module.lsof_port_owner = lambda port: {"port": port, "listening": True, "command": "Code\\x20H", "pid": "123", "raw": ""}
+        module.browser_main_process_args = lambda browser: ["/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"]
+        module.provider_session_evidence = lambda profile, provider: {"provider": provider, "confidence": "likely-logged-in"}
+        try:
+            payload = module.build_real_session_preflight(
+                browser={"id": "brave", "display_name": "Brave Browser", "default_port": 9223, "binary_path": "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"},
+                profile={"directory": "Default", "name": "Work"},
+                provider="google",
+            )
+        finally:
+            module.detect_cdp_endpoint = original_endpoint
+            module.lsof_port_owner = original_owner
+            module.browser_main_process_args = original_args
+            module.provider_session_evidence = original_evidence
+
+        self.assertFalse(payload["can_attach"])
+        self.assertIn("port-owned-by-other-process", payload["blockers"])
+        self.assertIn("browser-running-without-remote-debugging", payload["blockers"])
+        self.assertEqual(payload["session_evidence"]["confidence"], "likely-logged-in")
+
+    def test_real_session_requirement_preserves_login_wall_as_blocker(self):
+        module = load_module()
+
+        status, inventory = module.apply_real_session_requirement(
+            "opened",
+            {"login_state": "signed-out-or-wall"},
+            {"session_evidence": {"confidence": "likely-logged-in"}},
+        )
+
+        self.assertEqual(status, "real-session-required")
+        self.assertEqual(inventory["login_state"], "signed-out-or-wall")
 
     def test_ai_workflow_spec_has_required_research_and_agent_triggers(self):
         module = load_module()

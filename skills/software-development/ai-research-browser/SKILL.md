@@ -37,6 +37,7 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 - Reverse-engineers installed SaveAI / AI Exporter capabilities, including supported provider hosts, Markdown/PDF/JSON/image export actions, Notion sync actions, and local Notion session evidence without cookie values.
 - Extracts visible provider account, plan/subscription, model, quota, and usage text when a real UI snapshot is supplied.
 - Scans local profile site data for provider session evidence without reading or emitting cookie values.
+- Runs a real-session preflight that checks CDP reachability, default-port ownership, already-running browsers without remote debugging, and provider session evidence before any paid workflow is claimed as usable.
 - Runs Agent Browser backed E2E probes against a CDP-enabled browser profile and records provider inventory artifacts.
 - Runs an Agent Browser live suite against a real CDP-enabled browser session and can fail hard when the page is signed out or blocked.
 - Fills a provider composer through Agent Browser, optionally submits the prompt, exports the visible output, and saves it into the local chat cache.
@@ -157,6 +158,20 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 ```
 
 Use `--plan-only` to inspect the queue first, `--max-runs 1` for a smoke test, and `--timeout 15` when a cloned browser is flaky. Treat `signed-out-or-wall` and `timeout` as real failed-login/automation-wall findings, not as success. For final account, plan, model, and quota proof, verify with a real running browser through Computer Use or a hidden CDP launch.
+
+Before starting Gemini Deep Research or any paid workflow that must reuse the real account, run the real-session preflight:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py real-session-preflight \
+  --browser brave \
+  --profile work \
+  --provider google \
+  --output /tmp/hermes-real-session-preflight-brave-gemini.json
+```
+
+`real-session-preflight` reports `can_attach`, CDP endpoint attempts, port owner, running-browser blockers, and provider session evidence. If a disposable clone lands on a sign-in page while the real profile still has local provider session evidence, workflow runs are marked `real-session-required`. Do not claim Gemini Deep Research, ChatGPT Agent, or ChatGPT Deep Research started until a real CDP-enabled browser session or a dedicated minimized browser window confirms the provider UI state.
+
+The profile alias `work` resolves by exact directory/name/account first, then by Work/Arbeit labels, and finally to the only discovered profile when a browser has exactly one local profile. This lets Comet/Komet single-profile setups such as `Neptune` run through `--profile work` without hard-coding a local-only directory name.
 
 Run fixed provider workflows from a temporary profile clone:
 

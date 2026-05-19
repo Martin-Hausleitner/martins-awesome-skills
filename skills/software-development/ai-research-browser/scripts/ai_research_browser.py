@@ -461,6 +461,8 @@ def resolve_profile(profiles: list[dict[str, str]], requested: str) -> dict[str,
             haystack = " ".join([profile.get("directory", ""), profile.get("name", ""), profile.get("account", "")]).lower()
             if "work" in haystack or "arbeit" in haystack:
                 return profile
+        if len(profiles) == 1:
+            return profiles[0]
     raise ValueError(f"profile not found: {requested}")
 
 
@@ -3305,8 +3307,8 @@ def agent_browser_profile_workflow_run(
     (paths["run_dir"] / "visible-text.txt").write_text(visible_text, encoding="utf-8")
     (paths["run_dir"] / "output.txt").write_text(output["text"], encoding="utf-8")
     final_inventory = extract_provider_inventory(provider_id, visible_text)
-    if status in {"submitted", "started", "verified"} and final_inventory.get("login_state") == "signed-out-or-wall":
-        final_inventory["login_state"] = "signed-in-or-ready"
+    real_session_preflight = build_real_session_preflight(browser=browser, profile=profile, provider=provider_id)
+    status, final_inventory = apply_real_session_requirement(status, final_inventory, real_session_preflight)
     payload = {
         **plan,
         "status": status,
@@ -3316,6 +3318,7 @@ def agent_browser_profile_workflow_run(
         "screenshot": str(screenshot) if screenshot.exists() else "",
         "chat_url": current_url,
         "inventory": final_inventory,
+        "real_session_preflight": real_session_preflight,
         "verification": verification,
         "workflow_events": workflow_events,
         "output": output,
@@ -3521,8 +3524,8 @@ def agent_browser_profile_followup_run(
     if output["status"] in {"running", "complete"} and status == "submitted":
         status = "verified" if output["status"] == "complete" else "started"
     final_inventory = extract_provider_inventory(provider_id, visible_text)
-    if status in {"submitted", "started", "verified"} and final_inventory.get("login_state") == "signed-out-or-wall":
-        final_inventory["login_state"] = "signed-in-or-ready"
+    real_session_preflight = build_real_session_preflight(browser=browser, profile=profile, provider=provider_id)
+    status, final_inventory = apply_real_session_requirement(status, final_inventory, real_session_preflight)
     cache_payload = None
     if cache_root and visible_text.strip():
         record = save_chat_record(
@@ -3560,6 +3563,7 @@ def agent_browser_profile_followup_run(
         "launch": launch_status,
         "screenshot": str(screenshot) if screenshot.exists() else "",
         "inventory": final_inventory,
+        "real_session_preflight": real_session_preflight,
         "workflow_events": workflow_events,
         "output": output,
         "cache": cache_payload,
@@ -3724,6 +3728,146 @@ def provider_session_evidence(profile: dict[str, str], provider: str) -> dict[st
         "indexeddb_origins": origins[:40],
         "note": "Cookie values are intentionally not read or emitted.",
     }
+
+
+def endpoint_json_version(base: str) -> dict[str, Any] | None:
+    try:
+        with urllib.request.urlopen(base.rstrip("/") + "/json/version", timeout=1.5) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return None
+
+
+def cdp_hosts_for_port(port: int) -> list[str]:
+    return [f"http://127.0.0.1:{port}", f"http://[::1]:{port}"]
+
+
+def detect_cdp_endpoint(port: int, hosts: list[str] | None = None) -> dict[str, Any]:
+    attempts: list[dict[str, Any]] = []
+    for base in hosts or cdp_hosts_for_port(port):
+        version = endpoint_json_version(base)
+        attempts.append({"base": base, "ok": bool(version), "version": version or {}})
+        if version:
+            return {"ok": True, "base": base, "version": version, "attempts": attempts}
+    return {"ok": False, "base": "", "version": {}, "attempts": attempts}
+
+
+def lsof_port_owner(port: int) -> dict[str, Any]:
+    result = subprocess.run(["lsof", "-nP", f"-iTCP:{int(port)}", "-sTCP:LISTEN"], capture_output=True, text=True)
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    if result.returncode != 0 or len(lines) < 2:
+        return {"port": int(port), "listening": False, "command": "", "pid": "", "raw": result.stdout}
+    parts = lines[1].split()
+    return {
+        "port": int(port),
+        "listening": True,
+        "command": parts[0] if parts else "",
+        "pid": parts[1] if len(parts) > 1 else "",
+        "raw": result.stdout,
+    }
+
+
+def browser_main_process_args(browser: dict[str, Any]) -> list[str]:
+    binary_path = str(browser.get("binary_path", ""))
+    app_path = str(browser.get("app_path", ""))
+    result = subprocess.run(["ps", "-ww", "-axo", "args="], capture_output=True, text=True)
+    if result.returncode != 0:
+        return []
+    matches: list[str] = []
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            continue
+        if " Helper" in line:
+            continue
+        if binary_path and binary_path in line:
+            matches.append(line)
+            continue
+        if app_path and app_path in line and "Contents/MacOS" in line:
+            matches.append(line)
+    return matches
+
+
+def build_real_session_preflight(
+    *,
+    browser: dict[str, Any],
+    profile: dict[str, str],
+    provider: str = "gemini",
+    port: int | None = None,
+) -> dict[str, Any]:
+    provider_id = normalize_provider_name(provider)
+    browser_id = normalize_browser_name(str(browser.get("id", "")))
+    cdp_port = int(port or browser.get("default_port") or 0)
+    endpoint = detect_cdp_endpoint(cdp_port) if cdp_port else {"ok": False, "base": "", "version": {}, "attempts": []}
+    owner = lsof_port_owner(cdp_port) if cdp_port else {"port": 0, "listening": False, "command": "", "pid": "", "raw": ""}
+    main_args = browser_main_process_args(browser)
+    running_without_cdp = bool(main_args) and not any("--remote-debugging-port" in line for line in main_args)
+    expected_name = str(browser.get("display_name", browser_id)).lower()
+    owner_command = str(owner.get("command", "")).lower()
+    owner_matches_browser = bool(owner_command) and any(part in owner_command for part in [browser_id.lower(), expected_name.split()[0]])
+    blockers: list[str] = []
+    if owner.get("listening") and not endpoint.get("ok"):
+        blockers.append("port-listener-is-not-cdp")
+    if owner.get("listening") and not owner_matches_browser and not endpoint.get("ok"):
+        blockers.append("port-owned-by-other-process")
+    if running_without_cdp:
+        blockers.append("browser-running-without-remote-debugging")
+    if not endpoint.get("ok") and not blockers:
+        blockers.append("cdp-endpoint-not-reachable")
+    session_evidence = provider_session_evidence(profile, provider_id)
+    return {
+        "browser": browser_id,
+        "browser_name": browser.get("display_name", ""),
+        "profile_directory": profile.get("directory", ""),
+        "profile_name": profile.get("name", ""),
+        "provider": provider_id,
+        "port": cdp_port,
+        "can_attach": bool(endpoint.get("ok")) and not blockers,
+        "blockers": blockers,
+        "cdp_endpoint": endpoint,
+        "port_owner": owner,
+        "browser_main_process_count": len(main_args),
+        "browser_main_process_has_remote_debugging": any("--remote-debugging-port" in line for line in main_args),
+        "session_evidence": session_evidence,
+        "safe_next_steps": [
+            "Use an already-running browser only when this preflight reports can_attach=true.",
+            "Do not quit or relaunch the user's active browser automatically.",
+            "For Gemini Deep Research, profile clones may preserve cookie evidence but still fail entitlement/login checks; use a real CDP-enabled session for final E2E.",
+        ],
+        "hidden_gemini_commands": {
+            "check": [
+                "python3",
+                "~/.hermes/scripts/deep_research_hidden.py",
+                "check-deep-research-started",
+                "--browser",
+                browser_id,
+            ],
+            "start": [
+                "python3",
+                "~/.hermes/scripts/deep_research_hidden.py",
+                "start-deep-research",
+                "--browser",
+                browser_id,
+                "--prompt",
+                "<prompt>",
+            ],
+        },
+    }
+
+
+def apply_real_session_requirement(
+    status: str,
+    inventory: dict[str, Any],
+    real_session_preflight: dict[str, Any],
+) -> tuple[str, dict[str, Any]]:
+    session_confidence = real_session_preflight.get("session_evidence", {}).get("confidence")
+    clone_shows_login_wall = inventory.get("login_state") == "signed-out-or-wall"
+    if clone_shows_login_wall and session_confidence in {"likely-logged-in", "site-data-present"}:
+        return "real-session-required", inventory
+    if status in {"submitted", "started", "verified"} and clone_shows_login_wall:
+        updated_inventory = dict(inventory)
+        updated_inventory["login_state"] = "signed-in-or-ready"
+        return status, updated_inventory
+    return status, inventory
 
 
 def build_account_audit_matrix(
@@ -4076,6 +4220,20 @@ def cmd_preflight(args: argparse.Namespace) -> int:
     )
     print(json.dumps({"browser": browser, "profile": profile, "port": port, "blockers": blockers}, ensure_ascii=False, indent=2))
     return 2 if blockers else 0
+
+
+def cmd_real_session_preflight(args: argparse.Namespace) -> int:
+    browser, profile = resolve_workflow_browser_profile(args)
+    payload = build_real_session_preflight(
+        browser=browser,
+        profile=profile,
+        provider=args.provider,
+        port=args.port or None,
+    )
+    if args.output:
+        write_json(Path(args.output).expanduser(), payload)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0 if payload.get("can_attach") else 1
 
 
 def cmd_launch_background(args: argparse.Namespace) -> int:
@@ -4991,6 +5149,12 @@ def build_parser() -> argparse.ArgumentParser:
     preflight.add_argument("--browser", required=True)
     preflight.add_argument("--profile", default="Default")
     preflight.add_argument("--port", type=int)
+    real_session_preflight = sub.add_parser("real-session-preflight")
+    real_session_preflight.add_argument("--browser", default="brave")
+    real_session_preflight.add_argument("--profile", default="work")
+    real_session_preflight.add_argument("--provider", choices=provider_cli_choices(), default="google")
+    real_session_preflight.add_argument("--port", type=int)
+    real_session_preflight.add_argument("--output", default="")
     launch = sub.add_parser("launch-args")
     launch.add_argument("--browser", required=True)
     launch.add_argument("--profile", default="Default")
@@ -5228,6 +5392,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_wizard(args)
     if args.command == "preflight":
         return cmd_preflight(args)
+    if args.command == "real-session-preflight":
+        return cmd_real_session_preflight(args)
     if args.command == "launch-background":
         return cmd_launch_background(args)
     if args.command == "launch-all-background":

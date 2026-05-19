@@ -85,6 +85,20 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 
 This is the "truth" path for Agent Browser. The target browser must already be running with `--remote-debugging-port=<port>` against the intended profile. If Agent Browser auto-connects to a signed-out clone or a different Chromium instance, the live suite records `signed-out-or-wall` and exits non-zero instead of treating the capture as usable.
 
+Before starting Gemini Deep Research or any paid workflow that must reuse the real account, run the real-session preflight:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py real-session-preflight \
+  --browser brave \
+  --profile work \
+  --provider google \
+  --output /tmp/hermes-real-session-preflight-brave-gemini.json
+```
+
+`real-session-preflight` checks whether the intended browser/profile has a reachable CDP endpoint, whether the default port is occupied by another process, whether the browser is already running without `--remote-debugging-port`, and whether local site data shows provider session evidence. If a clone run lands on a sign-in page while session evidence exists, workflow results are marked `real-session-required`; final Gemini Deep Research E2E needs a real CDP-enabled session or a dedicated minimized browser window, not a disposable clone.
+
+The profile alias `work` resolves by exact directory/name/account first, then by Work/Arbeit labels, and finally to the only discovered profile when a browser has exactly one local profile. This keeps Comet/Komet setups such as a single `Neptune` profile usable through `--profile work` without hard-coding a machine-specific directory name.
+
 Fill a provider composer and export the visible transcript/output through the same real CDP session:
 
 ```bash
@@ -371,6 +385,8 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 By default the suite covers ChatGPT Agent, ChatGPT Deep Research, Gemini Deep Research, Perplexity Research, Grok Research/DeepSearch, and Claude Research/Search. Use `--features chatgpt:agent,gemini:deep-research`, `--providers chatgpt,gemini`, `--max-runs 1`, or `--plan-only` to narrow or preview the queue. Use `--all-features` when you want every workflow mode implemented by `workflow-run`.
 
 Each workflow writes `status.json`, `visible-text.txt`, `output.txt`, and a screenshot under the artifact root. The JSON records the clicked feature trigger, confirmation trigger, current URL, extracted output text, account inventory, and cache metadata when `--cache` is set. Confirmation clicks are exact-control only, so generic labels such as `Start` cannot accidentally hit dictation or voice controls; if a provider keeps the feature chip selected but never renders an exact research/agent start control, the run remains `submitted` instead of being reported as started.
+
+For Gemini specifically, a profile clone can show `likely-logged-in` cookie evidence but still load a Google sign-in/consent wall. That is intentionally not treated as success. Use `real-session-preflight` and the hidden Gemini commands in its output before claiming Deep Research has started.
 
 Send a follow-up prompt into an existing provider chat, then export/cache the refreshed transcript:
 

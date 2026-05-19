@@ -114,6 +114,18 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 
 `workflow-sibling-run` creates or reuses a separate `--user-data-dir` under `~/.cache/ai-research-browser/sibling-profiles/<browser-profile>/user-data`, starts the real browser binary headful but offscreen with a fresh CDP port, opens only the automation page, and never launches the source profile directory while the user's visible browser is running. Use `--sibling-user-data <dir>` for a named persistent automation profile, `--refresh-sibling` to re-seed it from the source profile, and `--close-after` for smoke tests. A provider may still reject a hot-cloned session: in a real Comet/Gemini smoke, Google accepted consent and loaded Gemini, but displayed `Anmelden`, so that run was correctly recorded as `signed-out-or-wall` rather than success. For production, seed a dedicated sibling profile once, log into the required providers there, and then reuse it for background E2E workflows.
 
+Initialize that dedicated sibling profile with a visible one-time login window:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py sibling-profile-init \
+  --browser comet \
+  --profile work \
+  --provider google \
+  --sibling-user-data ~/.cache/ai-research-browser/sibling-profiles/comet-google/user-data
+```
+
+`sibling-profile-init` intentionally opens the automation profile visibly so the provider can bind its session to that persistent browser profile/device state. After manual login, future `workflow-sibling-run` calls can reuse the same `--sibling-user-data` offscreen. This avoids relying on copied cookies alone, which modern providers can reject through device-bound session credentials or server-side anomaly checks.
+
 The profile alias `work` resolves by exact directory/name/account first, then by Work/Arbeit labels, and finally to the only discovered profile when a browser has exactly one local profile. This keeps Comet/Komet setups such as a single `Neptune` profile usable through `--profile work` without hard-coding a machine-specific directory name.
 
 Fill a provider composer and export the visible transcript/output through the same real CDP session:
@@ -363,6 +375,8 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 ```
 
 For the first setup of a fresh sibling profile, omit `--submit` and `--close-after`, then authenticate the provider in that dedicated automation profile. Subsequent runs reuse the same profile and can run in the background without touching the user's active browser windows.
+
+If `workflow-sibling-run` sees local provider session evidence but the visible UI still shows a sign-in wall, it returns `real-session-required`. That status means the sibling profile exists but needs a real manual login or provider challenge resolution; it is not a successful Deep Research/Agent start.
 
 Preview the exact safe plan:
 

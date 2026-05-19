@@ -2551,6 +2551,118 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertTrue(payload["closed_after"])
         self.assertTrue(getattr(fake_process, "terminated", False))
 
+    def test_sibling_workflow_escalates_cookie_evidence_wall_to_real_session_required(self):
+        module = load_module()
+        root = Path(tempfile.mkdtemp())
+        original_preflight = module.build_real_session_preflight
+        original_run = module.run_agent_browser
+        original_js = module.run_cdp_javascript
+        original_capture = module.capture_cdp_screenshot
+        module.build_real_session_preflight = lambda **kwargs: {
+            "can_attach": True,
+            "session_evidence": {"confidence": "likely-logged-in"},
+            "blockers": [],
+        }
+
+        def fake_run(args, *, session="", timeout=45.0):
+            command = ["agent-browser", *args]
+            if "snapshot" in args:
+                return module.subprocess.CompletedProcess(command, 0, stdout='- link "Anmelden" [ref=e2]\n- textbox "Einen Prompt für Gemini eingeben" [ref=e25]:\n', stderr="")
+            if args[:3] == ["--cdp", "9335", "tab"]:
+                return module.subprocess.CompletedProcess(command, 0, stdout="https://gemini.google.com/app?hl=de\n", stderr="")
+            return module.subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        def fake_js(port, script, timeout=15.0):
+            if "location.href" in script:
+                return module.subprocess.CompletedProcess(["js"], 0, "https://gemini.google.com/app?hl=de", "")
+            return module.subprocess.CompletedProcess(["js"], 0, "Anmelden\nGemini\nEinen Prompt für Gemini eingeben", "")
+
+        module.run_agent_browser = fake_run
+        module.run_cdp_javascript = fake_js
+        module.capture_cdp_screenshot = lambda port, screenshot, timeout=20.0: (screenshot.write_bytes(b"png") or True)
+        try:
+            payload = module.agent_browser_live_workflow_run(
+                browser={"id": "comet", "display_name": "Comet"},
+                profile={"directory": "Default", "name": "Automation"},
+                provider="google",
+                mode="deep-research",
+                prompt="Research",
+                artifact_root=root / "artifacts",
+                cdp_port=9335,
+                allow_real_session_required=True,
+            )
+        finally:
+            module.build_real_session_preflight = original_preflight
+            module.run_agent_browser = original_run
+            module.run_cdp_javascript = original_js
+            module.capture_cdp_screenshot = original_capture
+
+        self.assertEqual(payload["status"], "real-session-required")
+        self.assertEqual(payload["inventory"]["login_state"], "signed-out-or-wall")
+
+    def test_sibling_profile_init_opens_visible_manual_login_session(self):
+        module = load_module()
+        root = Path(tempfile.mkdtemp())
+        source_root = root / "source"
+        source_profile = source_root / "Default"
+        source_profile.mkdir(parents=True)
+        (source_root / "Local State").write_text("{}", encoding="utf-8")
+        (source_profile / "Preferences").write_text("{}", encoding="utf-8")
+
+        class FakeProcess:
+            pid = 5151
+
+            def poll(self):
+                return None
+
+        original_discover = module.discover_browsers
+        original_start = module.start_sibling_cdp_browser
+        module.discover_browsers = lambda: [
+            {
+                "id": "comet",
+                "display_name": "Comet",
+                "binary_path": "/Applications/Comet.app/Contents/MacOS/Comet",
+                "user_data_dir": str(source_root),
+                "default_port": 9223,
+                "profiles": [{"directory": "Default", "name": "Neptune", "path": str(source_profile)}],
+            }
+        ]
+
+        def fake_start(**kwargs):
+            self.assertIn("--window-position=80,80", kwargs["launch_args"])
+            self.assertNotIn("--window-position=-9999,0", kwargs["launch_args"])
+            return FakeProcess(), {"ok": True, "pid": 5151, "port": kwargs["port"], "launch_args": kwargs["launch_args"]}
+
+        module.start_sibling_cdp_browser = fake_start
+        try:
+            out = StringIO()
+            with redirect_stdout(out):
+                exit_code = module.main(
+                    [
+                        "sibling-profile-init",
+                        "--browser",
+                        "comet",
+                        "--profile",
+                        "work",
+                        "--provider",
+                        "google",
+                        "--cdp-port",
+                        "9445",
+                        "--sibling-user-data",
+                        str(root / "sibling" / "user-data"),
+                    ]
+                )
+        finally:
+            module.discover_browsers = original_discover
+            module.start_sibling_cdp_browser = original_start
+
+        payload = json.loads(out.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["status"], "opened-for-manual-login")
+        self.assertEqual(payload["execution_mode"], "sibling-profile-init")
+        self.assertTrue(payload["manual_action_required"])
+        self.assertEqual(payload["sibling_profile"]["status"], "seeded")
+
     def test_live_workflow_navigation_fallback_is_opt_in_for_sibling(self):
         module = load_module()
         root = Path(tempfile.mkdtemp())

@@ -2682,6 +2682,7 @@ def build_sibling_cdp_launch_args(
     port: int,
     provider: str,
     headless: bool = False,
+    offscreen: bool = True,
     extension_paths: list[str] | None = None,
 ) -> list[str]:
     args = [
@@ -2701,8 +2702,10 @@ def build_sibling_cdp_launch_args(
     ]
     if headless:
         args.append("--headless=new")
-    else:
+    elif offscreen:
         args.extend(["--window-position=-9999,0", "--window-size=1400,1000"])
+    else:
+        args.extend(["--window-position=80,80", "--window-size=1400,1000"])
     if extension_paths:
         extension_arg = ",".join(str(path) for path in extension_paths if path)
         if extension_arg:
@@ -3579,6 +3582,7 @@ def agent_browser_live_workflow_run(
     attachments: list[Path] | None = None,
     ignore_existing_non_cdp: bool = False,
     allow_active_tab_navigation_fallback: bool = False,
+    allow_real_session_required: bool = False,
 ) -> dict[str, Any]:
     provider_id = normalize_provider_name(provider)
     spec = provider_workflow_spec(provider_id, mode)
@@ -3914,6 +3918,8 @@ def agent_browser_live_workflow_run(
     (paths["run_dir"] / "visible-text.txt").write_text(visible_text, encoding="utf-8")
     (paths["run_dir"] / "output.txt").write_text(output["text"], encoding="utf-8")
     final_inventory = extract_provider_inventory(provider_id, visible_text)
+    if allow_real_session_required:
+        status, final_inventory = apply_real_session_requirement(status, final_inventory, real_session_preflight)
     payload = {
         **plan,
         "status": status,
@@ -5338,6 +5344,7 @@ def cmd_workflow_sibling_run(args: argparse.Namespace) -> int:
             attachments=[Path(item).expanduser() for item in args.attachment],
             ignore_existing_non_cdp=True,
             allow_active_tab_navigation_fallback=True,
+            allow_real_session_required=True,
         )
         payload = {
             **workflow_payload,
@@ -5356,6 +5363,95 @@ def cmd_workflow_sibling_run(args: argparse.Namespace) -> int:
         write_json(Path(args.output).expanduser(), payload)
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0 if payload.get("status") in {"opened", "submitted", "started", "verified", "captured"} else 1
+
+
+def cmd_sibling_profile_init(args: argparse.Namespace) -> int:
+    browser, source_profile = resolve_workflow_browser_profile(args)
+    provider_id = normalize_provider_name(args.provider)
+    extension_ids = requested_extension_ids(getattr(args, "include_extension", None), include_ai_exporter=getattr(args, "include_ai_exporter", False))
+    sibling_user_data = Path(args.sibling_user_data).expanduser() if args.sibling_user_data else default_sibling_user_data_dir(
+        browser=str(browser.get("id", "")),
+        profile=str(source_profile.get("directory", args.profile)),
+    )
+    sibling_profile = prepare_sibling_profile(
+        browser=browser,
+        profile=source_profile,
+        sibling_user_data=sibling_user_data,
+        refresh=args.refresh_sibling,
+        include_extension_ids=extension_ids,
+    )
+    if not sibling_profile.get("ok"):
+        payload = {
+            "status": "blocked",
+            "execution_mode": "sibling-profile-init",
+            "provider": provider_id,
+            "sibling_profile": sibling_profile,
+            "manual_action_required": False,
+        }
+        if args.output:
+            write_json(Path(args.output).expanduser(), payload)
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 2
+    cdp_port = args.cdp_port or find_available_port()
+    extension_paths = [item["path"] for item in discover_profile_extensions(source_profile, extension_ids=extension_ids)] if extension_ids else None
+    launch_args = build_sibling_cdp_launch_args(
+        browser,
+        sibling_user_data=str(sibling_user_data),
+        profile_directory=str(sibling_profile["profile_directory"]),
+        port=cdp_port,
+        provider=provider_id,
+        headless=False,
+        offscreen=False,
+        extension_paths=extension_paths,
+    )
+    artifact_root = Path(args.artifact_root).expanduser()
+    log_path = artifact_root / f"sibling-init-{normalize_browser_name(str(browser.get('id', '')))}-{slug(str(sibling_profile['profile_directory']))}.log"
+    if args.dry_run:
+        payload = {
+            "status": "planned",
+            "execution_mode": "sibling-profile-init",
+            "browser": normalize_browser_name(str(browser.get("id", ""))),
+            "provider": provider_id,
+            "sibling_profile": sibling_profile,
+            "cdp_port": cdp_port,
+            "launch_args": launch_args,
+            "login_url": provider_url(provider_id),
+            "manual_action_required": True,
+        }
+        if args.output:
+            write_json(Path(args.output).expanduser(), payload)
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+    process, launch_status = start_sibling_cdp_browser(launch_args=launch_args, port=cdp_port, log_path=log_path)
+    payload = {
+        "status": "opened-for-manual-login" if launch_status.get("ok") else "blocked",
+        "execution_mode": "sibling-profile-init",
+        "browser": normalize_browser_name(str(browser.get("id", ""))),
+        "browser_name": browser.get("display_name", browser.get("id", "")),
+        "profile": source_profile.get("directory", args.profile),
+        "profile_name": source_profile.get("name", ""),
+        "provider": provider_id,
+        "sibling_profile": sibling_profile,
+        "cdp_port": cdp_port,
+        "login_url": provider_url(provider_id),
+        "launch": launch_status,
+        "manual_action_required": bool(launch_status.get("ok")),
+        "instructions": [
+            "Use this dedicated automation profile for the one-time provider login.",
+            "Do not log in by copying cookie values from the source profile.",
+            "After login completes, close this automation browser or reuse it for workflow-sibling-run.",
+        ],
+    }
+    if args.close_after:
+        terminate_process(process)
+        clean_sibling_profile_locks(sibling_user_data, str(sibling_profile.get("profile_directory", source_profile.get("directory", "Default"))))
+        payload["closed_after"] = True
+    else:
+        payload["closed_after"] = False
+    if args.output:
+        write_json(Path(args.output).expanduser(), payload)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0 if launch_status.get("ok") else 1
 
 
 def cmd_workflow_followup(args: argparse.Namespace) -> int:
@@ -6353,6 +6449,19 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_sibling_run.add_argument("--include-ai-exporter", action="store_true", help="Copy/load SaveAI / AI Exporter into the sibling session.")
     workflow_sibling_run.add_argument("--attachment", action="append", default=[], help="Local file/image path to attach through the provider file input when visible.")
     workflow_sibling_run.add_argument("--output", default="")
+    sibling_profile_init = sub.add_parser("sibling-profile-init")
+    sibling_profile_init.add_argument("--artifact-root", default="/tmp/hermes-ai-research-sibling-profile-init")
+    sibling_profile_init.add_argument("--browser", default="brave")
+    sibling_profile_init.add_argument("--profile", default="work")
+    sibling_profile_init.add_argument("--provider", choices=provider_cli_choices(), required=True)
+    sibling_profile_init.add_argument("--cdp-port", type=int, help="CDP port for the setup browser. Uses a free port when omitted.")
+    sibling_profile_init.add_argument("--sibling-user-data", default="", help="Dedicated automation user-data-dir. Defaults to ~/.cache/ai-research-browser/sibling-profiles/<browser-profile>/user-data.")
+    sibling_profile_init.add_argument("--refresh-sibling", action="store_true", help="Re-seed the sibling profile from the source profile before launch.")
+    sibling_profile_init.add_argument("--include-extension", action="append", help="Copy/load an extension id or alias into the sibling setup session.")
+    sibling_profile_init.add_argument("--include-ai-exporter", action="store_true", help="Copy/load SaveAI / AI Exporter into the sibling setup session.")
+    sibling_profile_init.add_argument("--dry-run", action="store_true")
+    sibling_profile_init.add_argument("--close-after", action="store_true", help="Close the launched setup browser immediately after startup; mainly for smoke tests.")
+    sibling_profile_init.add_argument("--output", default="")
     workflow_followup = sub.add_parser("workflow-followup")
     workflow_followup.add_argument("--artifact-root", default="/tmp/hermes-ai-research-workflow-followups")
     workflow_followup.add_argument("--clone-root", default="/tmp/hermes-ai-research-workflow-followup-clones")
@@ -6562,6 +6671,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_workflow_live_run(args)
     if args.command == "workflow-sibling-run":
         return cmd_workflow_sibling_run(args)
+    if args.command == "sibling-profile-init":
+        return cmd_sibling_profile_init(args)
     if args.command == "workflow-followup":
         return cmd_workflow_followup(args)
     if args.command == "workflow-suite":

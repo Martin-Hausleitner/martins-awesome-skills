@@ -63,6 +63,8 @@ For actual Deep Research or Agent execution in a standing background browser, pr
 
 When the running browser is not CDP-attachable and must not be closed, use `workflow-sibling-run`. It never starts a second process on the original profile directory; it seeds or reuses a dedicated sibling profile, removes only stale locks there, launches the browser offscreen/headful with a fresh CDP port, and optionally closes only that launched sibling process with `--close-after`. Treat hot-cloned provider sessions as provisional: if Google, ChatGPT, or another provider shows `Anmelden`/sign-in after clone seeding, record `signed-out-or-wall` and seed a persistent sibling profile with a real one-time login instead of claiming the workflow worked.
 
+Use `sibling-profile-init` for that one-time setup. It opens the separate automation profile visibly so the user can complete login, DBSC/device-bound checks, consent, or provider challenges inside the sibling profile. Future `workflow-sibling-run` calls then reuse the same `--sibling-user-data` in the background.
+
 Do not commit private screenshots that contain account names, chat history, or private prompts to a public repository. Keep them as local artifacts unless the user explicitly asks for a sanitized export.
 
 ## Commands
@@ -219,6 +221,18 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 ```
 
 Use `--sibling-user-data <dir>` for an explicit automation profile, `--refresh-sibling` to re-seed it from the source profile, and `--close-after` for smoke tests. Omit `--submit` for setup/dry-runs and do not claim Deep Research/Agent started unless the status artifacts show the provider UI was logged in and the requested mode was visible.
+
+Initialize a fresh sibling profile for manual provider login:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py sibling-profile-init \
+  --browser comet \
+  --profile work \
+  --provider google \
+  --sibling-user-data ~/.cache/ai-research-browser/sibling-profiles/comet-google/user-data
+```
+
+If the workflow later reports `real-session-required`, the UI evidence contradicted local cookie/session evidence. Treat that as a required manual login/challenge step in the sibling profile, not as a started provider workflow.
 
 Run the complete orchestrated evidence path for Gemini/ChatGPT/Perplexity/Grok workflows:
 

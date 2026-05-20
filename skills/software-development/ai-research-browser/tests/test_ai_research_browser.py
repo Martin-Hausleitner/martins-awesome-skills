@@ -398,6 +398,17 @@ class AiResearchBrowserTest(unittest.TestCase):
 
         self.assertEqual(inventory["login_state"], "signed-in-or-ready")
 
+    def test_research_text_about_cloudflare_is_not_a_login_wall(self):
+        module = load_module()
+
+        inventory = module.extract_provider_inventory(
+            "gemini",
+            "Unterhaltung mit Gemini\nDu hast gesagt\nGemini hat gesagt\n"
+            "A report about Cloudflare Turnstile and safe browser automation practices.",
+        )
+
+        self.assertEqual(inventory["login_state"], "signed-in-or-ready")
+
     def test_provider_login_urls_are_hard_login_walls(self):
         module = load_module()
 
@@ -2712,6 +2723,119 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertIn("output-too-short:7<500", payload["results"][0]["quality_errors"])
         self.assertIn("login-state-not-ready:unknown", payload["results"][0]["quality_errors"])
         self.assertEqual(payload["summary"]["quality_failed"], 1)
+
+    def test_session_regression_tracking_flags_disappearing_account(self):
+        module = load_module()
+        state = {"version": 1, "entries": {}, "history": []}
+        ok_result = {
+            "browser": "comet",
+            "profile_directory": "Default",
+            "provider": "gemini",
+            "run_status": "verified",
+            "ok": True,
+            "chat_url": "https://gemini.google.com/app/good",
+            "inventory": {"login_state": "signed-in-or-ready"},
+            "output": {"text_length": 1200},
+        }
+
+        recorded, event = module.apply_session_regression_tracking(ok_result, state, now=1000)
+        self.assertIsNone(event)
+        self.assertEqual(recorded["session_baseline"]["status"], "recorded")
+
+        bad_result = {
+            "browser": "comet",
+            "profile_directory": "Default",
+            "provider": "gemini",
+            "run_status": "verified",
+            "ok": True,
+            "chat_url": "https://gemini.google.com/app",
+            "inventory": {"login_state": "signed-out-or-wall"},
+            "output": {"text_length": 80},
+        }
+        regressed, event = module.apply_session_regression_tracking(bad_result, state, now=1200)
+
+        self.assertIsNotNone(event)
+        self.assertEqual(regressed["run_status"], "session-regressed")
+        self.assertFalse(regressed["ok"])
+        self.assertEqual(event["previous_chat_url"], "https://gemini.google.com/app/good")
+
+    def test_workflow_suite_marks_session_regression_from_state_file(self):
+        module = load_module()
+        root = Path(tempfile.mkdtemp())
+        state_path = root / "session-state.json"
+        state_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "entries": {
+                        "comet|default|chatgpt": {
+                            "key": "comet|default|chatgpt",
+                            "browser": "comet",
+                            "profile": "Default",
+                            "provider": "chatgpt",
+                            "login_state": "signed-in-or-ready",
+                            "last_ok_at": 1000,
+                            "last_chat_url": "https://chatgpt.com/c/previous",
+                        }
+                    },
+                    "history": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        original_discover = module.discover_browsers
+        original_run = module.run_sibling_workflow_payload
+        module.discover_browsers = lambda: [
+            {
+                "id": "comet",
+                "display_name": "Comet",
+                "binary_path": "/Applications/Comet.app/Contents/MacOS/Comet",
+                "user_data_dir": str(root / "comet"),
+                "profiles": [{"directory": "Default", "name": "Default", "path": str(root / "comet" / "Default")}],
+            }
+        ]
+
+        def fake_run(**kwargs):
+            return {
+                "status": "verified",
+                "provider": kwargs["provider"],
+                "mode": kwargs["mode"],
+                "browser": kwargs["browser"]["id"],
+                "profile": kwargs["source_profile"]["directory"],
+                "chat_url": "https://chatgpt.com/",
+                "inventory": {"login_state": "unknown"},
+                "output": {"status": "captured", "text_length": 80},
+            }
+
+        module.run_sibling_workflow_payload = fake_run
+        try:
+            out = StringIO()
+            with redirect_stdout(out):
+                exit_code = module.main(
+                    [
+                        "workflow-suite",
+                        "--sibling",
+                        "--browsers",
+                        "comet",
+                        "--profile",
+                        "Default",
+                        "--features",
+                        "chatgpt:chat",
+                        "--submit",
+                        "--continue-on-failure",
+                        "--session-state",
+                        str(state_path),
+                    ]
+                )
+        finally:
+            module.discover_browsers = original_discover
+            module.run_sibling_workflow_payload = original_run
+
+        payload = json.loads(out.getvalue())
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(payload["summary"]["session_regressed"], 1)
+        self.assertEqual(payload["results"][0]["run_status"], "session-regressed")
+        self.assertEqual(payload["results"][0]["session_regression"]["previous_chat_url"], "https://chatgpt.com/c/previous")
 
     def test_sibling_workflow_real_session_required_includes_healing_command(self):
         module = load_module()

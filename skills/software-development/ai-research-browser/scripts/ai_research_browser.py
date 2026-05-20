@@ -1059,7 +1059,8 @@ def infer_login_state(text: str, provider: str) -> str:
         "checking if the site connection is secure",
         "verify you are human",
         "enable javascript and cookies",
-        "cloudflare",
+        "cloudflare ray id",
+        "cloudflare turnstile challenge",
     ]
     if any(marker in lowered for marker in wall_markers):
         return "signed-out-or-wall"
@@ -2000,6 +2001,92 @@ def detect_rate_limit_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
                     pass
     detected = detect_rate_limit_from_text("\n".join(fragments))
     return detected
+
+
+def session_baseline_key(*, browser: str, profile: str, provider: str) -> str:
+    return "|".join([normalize_browser_name(browser), slug(profile or "Default"), normalize_provider_name(provider)])
+
+
+def default_session_state_path() -> Path:
+    return Path.home() / ".cache" / "ai-research-browser" / "session-state.json"
+
+
+def load_session_state(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {"version": 1, "entries": {}, "history": []}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"version": 1, "entries": {}, "history": []}
+    if not isinstance(data, dict):
+        return {"version": 1, "entries": {}, "history": []}
+    data.setdefault("version", 1)
+    data.setdefault("entries", {})
+    data.setdefault("history", [])
+    return data
+
+
+def write_session_state(path: Path, state: dict[str, Any]) -> None:
+    write_json(path.expanduser(), state)
+
+
+def apply_session_regression_tracking(
+    result: dict[str, Any],
+    state: dict[str, Any],
+    *,
+    now: float | None = None,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    now = time.time() if now is None else now
+    provider = normalize_provider_name(str(result.get("provider", "")))
+    browser = normalize_browser_name(str(result.get("browser", "")))
+    profile = str(result.get("profile_directory", "") or result.get("profile", "") or "Default")
+    if not provider or not browser:
+        return result, None
+    key = session_baseline_key(browser=browser, profile=profile, provider=provider)
+    entries = state.setdefault("entries", {})
+    history = state.setdefault("history", [])
+    previous = entries.get(key) if isinstance(entries.get(key), dict) else None
+    inventory = result.get("inventory") or {}
+    output = result.get("output") or {}
+    login_state = str(inventory.get("login_state") or "")
+    ok = bool(result.get("ok"))
+    if ok and login_state == "signed-in-or-ready":
+        entry = {
+            "key": key,
+            "browser": browser,
+            "profile": profile,
+            "provider": provider,
+            "login_state": login_state,
+            "last_ok_at": now,
+            "last_run_status": result.get("run_status", ""),
+            "last_chat_url": result.get("chat_url", ""),
+            "last_output_text_length": int(output.get("text_length") or 0),
+            "success_count": int((previous or {}).get("success_count", 0) or 0) + 1,
+        }
+        entries[key] = entry
+        return {**result, "session_baseline": {"key": key, "status": "recorded", "last_ok_at": now}}, None
+    if previous and previous.get("login_state") == "signed-in-or-ready" and login_state in {"", "unknown", "signed-out-or-wall"}:
+        event = {
+            "event": "session-regression",
+            "key": key,
+            "browser": browser,
+            "profile": profile,
+            "provider": provider,
+            "previous_login_state": previous.get("login_state", ""),
+            "current_login_state": login_state or "missing",
+            "previous_last_ok_at": previous.get("last_ok_at"),
+            "previous_chat_url": previous.get("last_chat_url", ""),
+            "current_chat_url": result.get("chat_url", ""),
+            "run_status": result.get("run_status", ""),
+            "detected_at": now,
+        }
+        history.append(event)
+        del history[:-100]
+        if result.get("run_status") not in {"real-session-required", "signed-out-or-wall", "blocked", "error", "timeout", "quality-failed", "rate-limited"}:
+            result = {**result, "run_status": "session-regressed", "raw_run_status": result.get("run_status", ""), "ok": False}
+        result = {**result, "session_regression": event}
+        return result, event
+    return result, None
 
 
 class WorkflowRowTimeoutError(TimeoutError):
@@ -7184,6 +7271,9 @@ def cmd_workflow_suite(args: argparse.Namespace) -> int:
     rate_limit_state = load_rate_limit_state(rate_limit_state_path) if args.rate_limit else {"version": 1, "entries": {}, "history": []}
     cleanup_expired_rate_limits(rate_limit_state)
     rate_limit_events: list[dict[str, Any]] = []
+    session_state_path = Path(args.session_state).expanduser()
+    session_state = load_session_state(session_state_path) if args.session_regression else {"version": 1, "entries": {}, "history": []}
+    session_events: list[dict[str, Any]] = []
     results: list[dict[str, Any]] = []
     for row in rows:
         if args.max_runs and len([item for item in results if item.get("status") != "skipped"]) >= args.max_runs:
@@ -7319,19 +7409,23 @@ def cmd_workflow_suite(args: argparse.Namespace) -> int:
                     compact_payload = compact_workflow_run_payload(run_payload)
                     if not args.keep_clones:
                         cleanup_workflow_clone(run_payload)
-                    results.append(
-                        {
-                            **row,
-                            "run_status": "rate-limited",
-                            "ok": False,
-                            "rate_limit": rate_limit_event,
-                            "fallback": {
-                                "continued_to_next_row": bool(args.rate_limit_fallback),
-                                "reason": "rate-limit-detected",
-                            },
-                            **compact_payload,
-                        }
-                    )
+                    result = {
+                        **row,
+                        "run_status": "rate-limited",
+                        "ok": False,
+                        "rate_limit": rate_limit_event,
+                        "fallback": {
+                            "continued_to_next_row": bool(args.rate_limit_fallback),
+                            "reason": "rate-limit-detected",
+                        },
+                        **compact_payload,
+                    }
+                    if args.session_regression:
+                        result, event = apply_session_regression_tracking(result, session_state)
+                        if event:
+                            session_events.append(event)
+                        write_session_state(session_state_path, session_state)
+                    results.append(result)
                     if not (args.continue_on_failure or args.rate_limit_fallback):
                         break
                     break
@@ -7351,16 +7445,20 @@ def cmd_workflow_suite(args: argparse.Namespace) -> int:
                         require_login_state=args.require_login_state,
                     )
                 final_run_status = "quality-failed" if quality_errors else run_status
-                results.append(
-                    {
-                        **row,
-                        "run_status": final_run_status,
-                        "raw_run_status": run_status,
-                        "ok": final_run_status in ok_statuses,
-                        **({"quality_errors": quality_errors} if quality_errors else {}),
-                        **compact_payload,
-                    }
-                )
+                result = {
+                    **row,
+                    "run_status": final_run_status,
+                    "raw_run_status": run_status,
+                    "ok": final_run_status in ok_statuses,
+                    **({"quality_errors": quality_errors} if quality_errors else {}),
+                    **compact_payload,
+                }
+                if args.session_regression:
+                    result, event = apply_session_regression_tracking(result, session_state)
+                    if event:
+                        session_events.append(event)
+                    write_session_state(session_state_path, session_state)
+                results.append(result)
                 if final_run_status not in ok_statuses and not args.continue_on_failure:
                     break
                 break
@@ -7375,7 +7473,7 @@ def cmd_workflow_suite(args: argparse.Namespace) -> int:
                     break
                 break
 
-    blocked_statuses = {"blocked", "error", "timeout", "real-session-required", "signed-out-or-wall", "quality-failed"}
+    blocked_statuses = {"blocked", "error", "timeout", "real-session-required", "signed-out-or-wall", "quality-failed", "session-regressed"}
     summary = {
         "total": len(results),
         "ok": sum(1 for item in results if item.get("ok")),
@@ -7384,6 +7482,7 @@ def cmd_workflow_suite(args: argparse.Namespace) -> int:
         "blocked": sum(1 for item in results if item.get("run_status") in blocked_statuses),
         "real_session_required": sum(1 for item in results if item.get("run_status") == "real-session-required"),
         "quality_failed": sum(1 for item in results if item.get("run_status") == "quality-failed"),
+        "session_regressed": sum(1 for item in results if item.get("session_regression") or item.get("run_status") == "session-regressed"),
         "rate_limited": sum(1 for item in results if item.get("run_status") == "rate-limited"),
     }
     payload = {
@@ -7402,6 +7501,12 @@ def cmd_workflow_suite(args: argparse.Namespace) -> int:
             "state_path": str(rate_limit_state_path),
             "events": rate_limit_events,
             "active_entries": rate_limit_state.get("entries", {}) if args.rate_limit else {},
+        },
+        "session_regression": {
+            "enabled": bool(args.session_regression),
+            "state_path": str(session_state_path),
+            "events": session_events,
+            "known_good_entries": session_state.get("entries", {}) if args.session_regression else {},
         },
         "summary": summary,
         "results": results,
@@ -7964,6 +8069,9 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_suite.add_argument("--rate-limit-retries", type=int, default=1, help="How often to retry the same row after waiting for a detected cooldown.")
     workflow_suite.add_argument("--rate-limit-fallback", action="store_true", default=True, help="Continue to later rows so another browser/profile/account can be used after a rate limit.")
     workflow_suite.add_argument("--no-rate-limit-fallback", dest="rate_limit_fallback", action="store_false", help="Stop the suite instead of trying later browser/profile rows after a rate limit.")
+    workflow_suite.add_argument("--session-regression", dest="session_regression", action="store_true", default=True, help="Persist known-good signed-in provider states and flag future disappearing accounts as regressions.")
+    workflow_suite.add_argument("--no-session-regression", dest="session_regression", action="store_false", help="Disable persisted account/session regression tracking.")
+    workflow_suite.add_argument("--session-state", default=str(default_session_state_path()), help="JSON state file for known-good signed-in browser/profile/provider baselines.")
     workflow_suite.add_argument("--keep-clones", action="store_true", help="Keep temporary profile clones after each suite row for debugging.")
     workflow_suite.add_argument("--output", default="")
     workflow_orchestrate = sub.add_parser("workflow-orchestrate")

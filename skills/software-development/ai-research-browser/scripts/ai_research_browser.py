@@ -2130,6 +2130,13 @@ def parse_json_stdout(text: str) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def cdp_js_click_succeeded(result: subprocess.CompletedProcess[str]) -> bool:
+    if result.returncode != 0:
+        return False
+    payload = parse_json_stdout(result.stdout)
+    return bool(payload.get("ok") is True)
+
+
 def submit_agent_browser_prompt(
     *,
     invoke: Any,
@@ -3672,7 +3679,7 @@ def click_first_agent_browser_text(
         if prefer_js and str(label).lower() not in {"start", "confirm", "allow", "begin"}:
             result = invoke(f"{command_log_label}:{label}:js-click", ["eval", click_text_js_script(str(label))])
             attempts.append({"label": label, "returncode": result.returncode, "method": "js"})
-            if result.returncode == 0 and '"ok":false' not in result.stdout and "not-found" not in result.stdout:
+            if cdp_js_click_succeeded(result):
                 return {"clicked": True, "label": label, "attempts": attempts}
         ref = find_snapshot_ref(snapshot, str(label), roles=("button", "menuitem", "option", "link")) if snapshot else ""
         if ref:
@@ -3686,7 +3693,7 @@ def click_first_agent_browser_text(
             continue
         result = invoke(f"{command_log_label}:{label}:js-click", ["eval", click_text_js_script(str(label))])
         attempts.append({"label": label, "returncode": result.returncode})
-        if result.returncode == 0 and '"ok":false' not in result.stdout and "not-found" not in result.stdout:
+        if cdp_js_click_succeeded(result):
             return {"clicked": True, "label": label, "attempts": attempts}
     return {"clicked": False, "label": "", "attempts": attempts}
 
@@ -3837,6 +3844,8 @@ def agent_browser_profile_workflow_run(
             result = subprocess.CompletedProcess(["sleep", str(milliseconds)], 0, f"waited {milliseconds}ms", "")
         elif extra_args[:1] == ["eval"] and len(extra_args) > 1:
             result = run_cdp_javascript(cdp_port, extra_args[1], timeout=command_timeout(label, extra_args))
+        elif extra_args[:1] == ["snapshot"]:
+            result = run_cdp_javascript(cdp_port, browser_eval_visible_text_script(), timeout=command_timeout(label, extra_args))
         elif extra_args[:1] == ["press"] and len(extra_args) > 1 and str(extra_args[1]).lower() in {"enter", "return"}:
             result = run_cdp_keypress(cdp_port, str(extra_args[1]), timeout=command_timeout(label, extra_args))
         elif extra_args == ["get", "url"]:
@@ -4259,8 +4268,12 @@ def agent_browser_live_workflow_run(
                 milliseconds = 1000
             time.sleep(max(0, milliseconds) / 1000.0)
             result = subprocess.CompletedProcess(["sleep", str(milliseconds)], 0, f"waited {milliseconds}ms", "")
+        elif extra_args[:2] == ["tab", "new"] and len(extra_args) > 2:
+            result = run_cdp_navigate(cdp_port, str(extra_args[2]), timeout=command_timeout(label, extra_args))
         elif extra_args[:1] == ["eval"] and len(extra_args) > 1:
             result = run_cdp_javascript(cdp_port, extra_args[1], timeout=command_timeout(label, extra_args))
+        elif extra_args[:1] == ["snapshot"]:
+            result = run_cdp_javascript(cdp_port, browser_eval_visible_text_script(), timeout=command_timeout(label, extra_args))
         elif extra_args[:1] == ["press"] and len(extra_args) > 1 and str(extra_args[1]).lower() in {"enter", "return"}:
             result = run_cdp_keypress(cdp_port, str(extra_args[1]), timeout=command_timeout(label, extra_args))
         elif extra_args == ["get", "url"]:
@@ -4337,9 +4350,14 @@ def agent_browser_live_workflow_run(
     invoke("wait-initial", ["wait", "4000"])
     before_eval = invoke("eval-before-text", ["eval", browser_eval_visible_text_script()])
     visible_text_parts.append(before_eval.stdout)
-    before_snapshot = invoke("snapshot-before", ["snapshot", "-i", "-c"])
-    current_snapshot_text = before_snapshot.stdout
-    visible_text_parts.append(current_snapshot_text)
+    eval_inventory = extract_provider_inventory(provider_id, before_eval.stdout)
+    current_snapshot_text = ""
+    if eval_inventory.get("login_state") == "signed-out-or-wall":
+        workflow_events.append({"event": "snapshot-skipped", "reason": "cdp-eval-already-proved-login-wall"})
+    else:
+        before_snapshot = invoke("snapshot-before", ["snapshot", "-i", "-c"])
+        current_snapshot_text = before_snapshot.stdout
+        visible_text_parts.append(current_snapshot_text)
     consent_result = click_first_agent_browser_text(
         invoke,
         ["Alle akzeptieren", "Alle annehmen", "Accept all", "I agree", "Agree", "Zustimmen"],
@@ -4510,15 +4528,21 @@ def agent_browser_live_workflow_run(
             elif response_event.get("output", {}).get("status") == "running" and status == "submitted":
                 status = "started"
 
-    after_snapshot = invoke("snapshot-after", ["snapshot", "-i", "-c"])
-    visible_text_parts.append(after_snapshot.stdout)
-    output_eval = invoke("extract-output", ["eval", browser_eval_latest_response_script(provider_id, list(spec.get("output_selectors", [])))])
-    visible_text_parts.append(output_eval.stdout)
-    latest_response_text = output_eval.stdout.strip()
-    current_url = invoke("get-url", ["get", "url"]).stdout.strip()
-    screenshot_result = invoke("screenshot", ["screenshot", str(screenshot)])
-    if screenshot_result.returncode != 0:
-        capture_cdp_screenshot(cdp_port, screenshot)
+    if status == "signed-out-or-wall":
+        current_url = invoke("get-url", ["get", "url"]).stdout.strip()
+        screenshot_result = invoke("screenshot", ["screenshot", str(screenshot)])
+        if screenshot_result.returncode != 0:
+            capture_cdp_screenshot(cdp_port, screenshot)
+    else:
+        after_snapshot = invoke("snapshot-after", ["snapshot", "-i", "-c"])
+        visible_text_parts.append(after_snapshot.stdout)
+        output_eval = invoke("extract-output", ["eval", browser_eval_latest_response_script(provider_id, list(spec.get("output_selectors", [])))])
+        visible_text_parts.append(output_eval.stdout)
+        latest_response_text = output_eval.stdout.strip()
+        current_url = invoke("get-url", ["get", "url"]).stdout.strip()
+        screenshot_result = invoke("screenshot", ["screenshot", str(screenshot)])
+        if screenshot_result.returncode != 0:
+            capture_cdp_screenshot(cdp_port, screenshot)
 
     visible_text = "\n".join(part for part in visible_text_parts if part)
     output = extract_workflow_output_from_text(latest_response_text or visible_text, provider=provider_id, mode=spec["mode"])
@@ -5642,6 +5666,7 @@ def cmd_real_session_preflight(args: argparse.Namespace) -> int:
         profile=profile,
         provider=args.provider,
         port=args.port or None,
+        ignore_existing_non_cdp=args.ignore_existing_non_cdp,
     )
     if args.output:
         write_json(Path(args.output).expanduser(), payload)
@@ -7258,6 +7283,7 @@ def build_parser() -> argparse.ArgumentParser:
     real_session_preflight.add_argument("--profile", default="work")
     real_session_preflight.add_argument("--provider", choices=provider_cli_choices(), default="google")
     real_session_preflight.add_argument("--port", type=int)
+    real_session_preflight.add_argument("--ignore-existing-non-cdp", action="store_true", help="Allow a separate CDP-enabled sibling session even if the user's normal browser is running without CDP.")
     real_session_preflight.add_argument("--output", default="")
     launch = sub.add_parser("launch-args")
     launch.add_argument("--browser", required=True)

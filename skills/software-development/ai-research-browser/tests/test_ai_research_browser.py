@@ -2525,6 +2525,7 @@ class AiResearchBrowserTest(unittest.TestCase):
 
         original_preflight = module.build_real_session_preflight
         original_run = module.run_agent_browser
+        original_nav = module.run_cdp_navigate
         original_js = module.run_cdp_javascript
         original_key = module.run_cdp_keypress
         original_capture = module.capture_cdp_screenshot
@@ -2560,6 +2561,7 @@ class AiResearchBrowserTest(unittest.TestCase):
             return module.subprocess.CompletedProcess(["js"], 0, "ChatGPT\nIsagi yoichi\nPro\nFinal answer\nReady", "")
 
         module.run_agent_browser = fake_run
+        module.run_cdp_navigate = lambda port, url, timeout=20.0: module.subprocess.CompletedProcess(["nav"], 0, url, "")
         module.run_cdp_javascript = fake_js
         module.run_cdp_keypress = lambda port, key, timeout=10.0: module.subprocess.CompletedProcess(["key"], 0, "ok", "")
         module.capture_cdp_screenshot = lambda port, screenshot, timeout=20.0: (screenshot.write_bytes(b"png") or True)
@@ -2577,6 +2579,7 @@ class AiResearchBrowserTest(unittest.TestCase):
         finally:
             module.build_real_session_preflight = original_preflight
             module.run_agent_browser = original_run
+            module.run_cdp_navigate = original_nav
             module.run_cdp_javascript = original_js
             module.run_cdp_keypress = original_key
             module.capture_cdp_screenshot = original_capture
@@ -2584,7 +2587,7 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertEqual(payload["status"], "opened")
         self.assertEqual(payload["isolation"], "live-cdp-background-tab")
         self.assertEqual(payload["chat_url"], "https://chatgpt.com/c/live")
-        self.assertTrue(any(args[:5] == ["--cdp", "9222", "tab", "new", "https://chatgpt.com/"] for args in commands_seen))
+        self.assertFalse(any(args[:3] == ["--cdp", "9222", "tab"] for args in commands_seen))
         self.assertFalse(any("close" in args for args in commands_seen))
         self.assertTrue(Path(payload["screenshot"]).exists())
 
@@ -2815,6 +2818,44 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertEqual(payload["blockers"], [])
         self.assertTrue(payload["ignored_existing_non_cdp_processes"])
 
+    def test_real_session_preflight_cli_passes_ignore_existing_non_cdp(self):
+        module = load_module()
+        original_resolve = module.resolve_workflow_browser_profile
+        original_preflight = module.build_real_session_preflight
+        captured = {}
+        module.resolve_workflow_browser_profile = lambda args: (
+            {"id": "brave", "display_name": "Brave Browser", "default_port": 9444},
+            {"directory": "Default", "name": "Work"},
+        )
+
+        def fake_preflight(**kwargs):
+            captured.update(kwargs)
+            return {"can_attach": True, "blockers": [], "ignored_existing_non_cdp_processes": kwargs.get("ignore_existing_non_cdp")}
+
+        module.build_real_session_preflight = fake_preflight
+        try:
+            args = module.build_parser().parse_args(
+                [
+                    "real-session-preflight",
+                    "--browser",
+                    "brave",
+                    "--profile",
+                    "Default",
+                    "--provider",
+                    "chatgpt",
+                    "--port",
+                    "9444",
+                    "--ignore-existing-non-cdp",
+                ]
+            )
+            rc = module.cmd_real_session_preflight(args)
+        finally:
+            module.resolve_workflow_browser_profile = original_resolve
+            module.build_real_session_preflight = original_preflight
+
+        self.assertEqual(rc, 0)
+        self.assertTrue(captured["ignore_existing_non_cdp"])
+
     def test_workflow_sibling_run_prepares_launches_and_uses_live_runner(self):
         module = load_module()
         root = Path(tempfile.mkdtemp())
@@ -2911,10 +2952,12 @@ class AiResearchBrowserTest(unittest.TestCase):
         root = Path(tempfile.mkdtemp())
         original_preflight = module.build_real_session_preflight
         original_run = module.run_agent_browser
+        original_nav = module.run_cdp_navigate
         original_js = module.run_cdp_javascript
         original_capture = module.capture_cdp_screenshot
         original_clipboard = module.copy_text_to_clipboard
         copied = []
+        agent_browser_calls = []
         module.build_real_session_preflight = lambda **kwargs: {
             "can_attach": True,
             "session_evidence": {"confidence": "likely-logged-in"},
@@ -2922,9 +2965,10 @@ class AiResearchBrowserTest(unittest.TestCase):
         }
 
         def fake_run(args, *, session="", timeout=45.0):
+            agent_browser_calls.append(args)
             command = ["agent-browser", *args]
             if "snapshot" in args:
-                return module.subprocess.CompletedProcess(command, 0, stdout='- link "Anmelden" [ref=e2]\n- textbox "Einen Prompt für Gemini eingeben" [ref=e25]:\n', stderr="")
+                return module.subprocess.CompletedProcess(command, 124, stdout="", stderr="snapshot should be skipped")
             if args[:3] == ["--cdp", "9335", "tab"]:
                 return module.subprocess.CompletedProcess(command, 0, stdout="https://gemini.google.com/app?hl=de\n", stderr="")
             return module.subprocess.CompletedProcess(command, 0, stdout="", stderr="")
@@ -2935,6 +2979,7 @@ class AiResearchBrowserTest(unittest.TestCase):
             return module.subprocess.CompletedProcess(["js"], 0, "Anmelden\nGemini\nEinen Prompt für Gemini eingeben", "")
 
         module.run_agent_browser = fake_run
+        module.run_cdp_navigate = lambda port, url, timeout=20.0: module.subprocess.CompletedProcess(["nav"], 0, url, "")
         module.run_cdp_javascript = fake_js
         module.capture_cdp_screenshot = lambda port, screenshot, timeout=20.0: (screenshot.write_bytes(b"png") or True)
         module.copy_text_to_clipboard = lambda text: copied.append(text) or {"copied": True, "text_length": len(text)}
@@ -2953,6 +2998,7 @@ class AiResearchBrowserTest(unittest.TestCase):
         finally:
             module.build_real_session_preflight = original_preflight
             module.run_agent_browser = original_run
+            module.run_cdp_navigate = original_nav
             module.run_cdp_javascript = original_js
             module.capture_cdp_screenshot = original_capture
             module.copy_text_to_clipboard = original_clipboard
@@ -2963,6 +3009,7 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertIn("sibling-profile-init", payload["healing"]["command"])
         self.assertEqual(copied, [])
         self.assertFalse(payload["clipboard"]["copied"])
+        self.assertFalse(any("snapshot" in call for call in agent_browser_calls))
 
     def test_live_login_heal_clicks_login_and_reports_healed(self):
         module = load_module()
@@ -3104,6 +3151,7 @@ class AiResearchBrowserTest(unittest.TestCase):
         root = Path(tempfile.mkdtemp())
         original_preflight = module.build_real_session_preflight
         original_run = module.run_agent_browser
+        original_nav = module.run_cdp_navigate
         original_js = module.run_cdp_javascript
         original_keypress = module.run_cdp_keypress
         original_capture = module.capture_cdp_screenshot
@@ -3145,6 +3193,7 @@ class AiResearchBrowserTest(unittest.TestCase):
             return module.subprocess.CompletedProcess(["js"], 0, text, "")
 
         module.run_agent_browser = fake_run
+        module.run_cdp_navigate = lambda port, url, timeout=20.0: module.subprocess.CompletedProcess(["nav"], 0, url, "")
         module.run_cdp_javascript = fake_js
         module.run_cdp_keypress = lambda port, key, timeout=10.0: module.subprocess.CompletedProcess(["keypress"], 0, "", "")
         module.capture_cdp_screenshot = lambda port, screenshot, timeout=20.0: (screenshot.write_bytes(b"png") or True)
@@ -3167,6 +3216,7 @@ class AiResearchBrowserTest(unittest.TestCase):
         finally:
             module.build_real_session_preflight = original_preflight
             module.run_agent_browser = original_run
+            module.run_cdp_navigate = original_nav
             module.run_cdp_javascript = original_js
             module.run_cdp_keypress = original_keypress
             module.capture_cdp_screenshot = original_capture
@@ -3292,8 +3342,8 @@ class AiResearchBrowserTest(unittest.TestCase):
             module.capture_cdp_screenshot = original_capture
 
         self.assertNotEqual(payload["status"], "blocked")
-        self.assertTrue(any(item.endswith("-p9334") for item in sessions))
-        self.assertTrue(any(event["event"] == "open-background-tab-fallback-navigate" for event in payload["workflow_events"]))
+        self.assertEqual(sessions, [])
+        self.assertFalse(any(event["event"] == "open-background-tab-fallback-navigate" for event in payload["workflow_events"]))
 
     def test_cdp_helpers_use_detected_loopback_endpoint(self):
         module = load_module()

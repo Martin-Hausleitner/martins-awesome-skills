@@ -4484,6 +4484,14 @@ def agent_browser_live_workflow_run(
     final_inventory = extract_provider_inventory(provider_id, visible_text)
     if allow_real_session_required:
         status, final_inventory = apply_real_session_requirement(status, final_inventory, real_session_preflight)
+    healing_payload = None
+    if status in {"real-session-required", "signed-out-or-wall"}:
+        healing_payload = build_real_session_healing_command(
+            browser=browser_id,
+            profile=profile_directory,
+            provider=provider_id,
+            sibling_user_data=default_sibling_user_data_dir(browser=browser_id, profile=profile_directory),
+        )
     if copy_output and status in {"verified", "captured"} and output["text"]:
         clipboard_payload = copy_text_to_clipboard(output["text"])
     payload = {
@@ -4496,6 +4504,7 @@ def agent_browser_live_workflow_run(
         "workflow_events": workflow_events,
         "output": output,
         "clipboard": clipboard_payload,
+        "healing": healing_payload,
         "cache": cache_payload,
         "screenshot": str(screenshot) if screenshot.exists() else "",
         "commands": commands,

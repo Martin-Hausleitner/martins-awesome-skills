@@ -2959,6 +2959,8 @@ class AiResearchBrowserTest(unittest.TestCase):
 
         self.assertEqual(payload["status"], "real-session-required")
         self.assertEqual(payload["inventory"]["login_state"], "signed-out-or-wall")
+        self.assertEqual(payload["healing"]["reason"], "provider-login-or-consent-required-in-sibling-profile")
+        self.assertIn("sibling-profile-init", payload["healing"]["command"])
         self.assertEqual(copied, [])
         self.assertFalse(payload["clipboard"]["copied"])
 

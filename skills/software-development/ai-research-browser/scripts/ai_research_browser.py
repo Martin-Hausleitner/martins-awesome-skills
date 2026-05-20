@@ -1804,6 +1804,186 @@ def clean_workflow_response_text(text: str, *, provider: str, prompt: str = "") 
     return "\n".join(cleaned).strip()
 
 
+RATE_LIMIT_PATTERNS: list[tuple[re.Pattern[str], int]] = [
+    (re.compile(r"\b(?:rate[-\s]?limit(?:ed)?|too many requests|temporarily limited|usage limit|message limit|weekly limit|daily limit|limit reached|no .*left|nicht mehr übrig|limit erreicht|zu viele anfragen)\b", re.I), 5 * 60),
+    (re.compile(r"\b(?:try again|retry|please wait|warte|versuch(?:e)? es erneut)\b", re.I), 5 * 60),
+]
+
+
+def parse_wait_seconds_from_text(text: str) -> int | None:
+    expanded = expand_agent_browser_eval_text(text or "")
+    patterns = [
+        (re.compile(r"(\d+)\s*(?:hours?|hrs?|stunden?)", re.I), 3600),
+        (re.compile(r"(\d+)\s*(?:minutes?|mins?|minuten?)", re.I), 60),
+        (re.compile(r"(\d+)\s*(?:seconds?|secs?|sekunden?)", re.I), 1),
+        (re.compile(r"(?:wait|warte|try again in|retry in)[^\d]{0,20}(\d+)", re.I), 60),
+    ]
+    for pattern, multiplier in patterns:
+        match = pattern.search(expanded)
+        if match:
+            return max(1, int(match.group(1)) * multiplier)
+    clock_match = re.search(r"\b(\d{1,2}):(\d{2})\b", expanded)
+    if clock_match:
+        hour = int(clock_match.group(1))
+        minute = int(clock_match.group(2))
+        local_now = time.localtime()
+        target = time.mktime(
+            (
+                local_now.tm_year,
+                local_now.tm_mon,
+                local_now.tm_mday,
+                hour,
+                minute,
+                0,
+                local_now.tm_wday,
+                local_now.tm_yday,
+                local_now.tm_isdst,
+            )
+        )
+        now = time.time()
+        if target <= now:
+            target += 24 * 3600
+        return max(1, int(target - now))
+    return None
+
+
+def detect_rate_limit_from_text(text: str, *, default_wait_seconds: int = 5 * 60) -> dict[str, Any]:
+    expanded = expand_agent_browser_eval_text(text or "")
+    lowered = expanded.lower()
+    matched = [pattern.pattern for pattern, _ in RATE_LIMIT_PATTERNS if pattern.search(expanded)]
+    if not matched:
+        return {"limited": False, "wait_seconds": 0, "matched_patterns": [], "text_preview": expanded[:500]}
+    wait_seconds = parse_wait_seconds_from_text(expanded)
+    if wait_seconds is None:
+        waits = [fallback for pattern, fallback in RATE_LIMIT_PATTERNS if pattern.search(expanded)]
+        wait_seconds = max(waits) if waits else default_wait_seconds
+    confidence = "high" if any(term in lowered for term in ["rate", "limit", "too many", "nicht mehr", "zu viele"]) else "medium"
+    return {
+        "limited": True,
+        "wait_seconds": int(max(1, wait_seconds)),
+        "matched_patterns": matched,
+        "confidence": confidence,
+        "text_preview": expanded[:500],
+    }
+
+
+def rate_limit_key(*, browser: str, profile: str, provider: str, mode: str) -> str:
+    return "|".join([normalize_browser_name(browser), slug(profile or "Default"), normalize_provider_name(provider), slug(mode or "chat")])
+
+
+def default_rate_limit_state_path() -> Path:
+    return Path.home() / ".cache" / "ai-research-browser" / "rate-limit-state.json"
+
+
+def load_rate_limit_state(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {"version": 1, "entries": {}, "history": []}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"version": 1, "entries": {}, "history": []}
+    if not isinstance(data, dict):
+        return {"version": 1, "entries": {}, "history": []}
+    data.setdefault("version", 1)
+    data.setdefault("entries", {})
+    data.setdefault("history", [])
+    return data
+
+
+def write_rate_limit_state(path: Path, state: dict[str, Any]) -> None:
+    write_json(path.expanduser(), state)
+
+
+def cleanup_expired_rate_limits(state: dict[str, Any], *, now: float | None = None) -> None:
+    now = time.time() if now is None else now
+    entries = state.setdefault("entries", {})
+    for key in list(entries):
+        try:
+            until = float(entries[key].get("cooldown_until", 0))
+        except (TypeError, ValueError):
+            until = 0
+        if until <= now:
+            entries.pop(key, None)
+
+
+def active_rate_limit(state: dict[str, Any], key: str, *, now: float | None = None) -> dict[str, Any] | None:
+    now = time.time() if now is None else now
+    entry = (state.get("entries") or {}).get(key)
+    if not isinstance(entry, dict):
+        return None
+    try:
+        until = float(entry.get("cooldown_until", 0))
+    except (TypeError, ValueError):
+        return None
+    remaining = int(math.ceil(until - now))
+    if remaining <= 0:
+        return None
+    return {**entry, "remaining_seconds": remaining}
+
+
+def record_rate_limit(
+    state: dict[str, Any],
+    key: str,
+    *,
+    wait_seconds: int,
+    browser: str,
+    profile: str,
+    provider: str,
+    mode: str,
+    reason: str,
+    source: str,
+    now: float | None = None,
+) -> dict[str, Any]:
+    now = time.time() if now is None else now
+    entries = state.setdefault("entries", {})
+    previous = entries.get(key) if isinstance(entries.get(key), dict) else {}
+    previous_wait = int(previous.get("learned_wait_seconds", 0) or 0)
+    learned_wait = max(int(wait_seconds), previous_wait, 60)
+    entry = {
+        "key": key,
+        "browser": normalize_browser_name(browser),
+        "profile": profile,
+        "provider": normalize_provider_name(provider),
+        "mode": mode,
+        "reason": reason,
+        "source": source,
+        "learned_wait_seconds": learned_wait,
+        "cooldown_started": now,
+        "cooldown_until": now + learned_wait,
+        "hits": int(previous.get("hits", 0) or 0) + 1,
+    }
+    entries[key] = entry
+    history = state.setdefault("history", [])
+    history.append({**entry, "cooldown_started": now, "cooldown_until": entry["cooldown_until"]})
+    del history[:-100]
+    return entry
+
+
+def detect_rate_limit_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    output = payload.get("output") or {}
+    fragments = [
+        str(payload.get("status", "")),
+        str(payload.get("blocker", "")),
+        str(payload.get("error", "")),
+    ]
+    if isinstance(output, dict):
+        fragments.append(str(output.get("text", "")))
+        fragments.append(str(output.get("status", "")))
+        fragments.extend(str(item) for item in output.get("completion_markers_found", []) or [])
+        fragments.extend(str(item) for item in output.get("running_markers_found", []) or [])
+    for path_key in ["output_text_path", "visible_text_path"]:
+        path_value = payload.get(path_key)
+        if path_value:
+            path = Path(str(path_value)).expanduser()
+            if path.exists() and path.is_file():
+                try:
+                    fragments.append(path.read_text(encoding="utf-8", errors="replace")[:20000])
+                except OSError:
+                    pass
+    detected = detect_rate_limit_from_text("\n".join(fragments))
+    return detected
+
+
 def browser_eval_body_and_report_script(selectors: list[str]) -> str:
     selectors_json = json.dumps(selectors)
     return (
@@ -6903,6 +7083,10 @@ def cmd_workflow_suite(args: argparse.Namespace) -> int:
         return 0
 
     browser_map = {normalize_browser_name(str(browser.get("id", ""))): browser for browser in browsers}
+    rate_limit_state_path = Path(args.rate_limit_state).expanduser()
+    rate_limit_state = load_rate_limit_state(rate_limit_state_path) if args.rate_limit else {"version": 1, "entries": {}, "history": []}
+    cleanup_expired_rate_limits(rate_limit_state)
+    rate_limit_events: list[dict[str, Any]] = []
     results: list[dict[str, Any]] = []
     for row in rows:
         if args.max_runs and len([item for item in results if item.get("status") != "skipped"]) >= args.max_runs:
@@ -6910,6 +7094,42 @@ def cmd_workflow_suite(args: argparse.Namespace) -> int:
         if row.get("status") == "skipped":
             results.append({**row, "run_status": "skipped"})
             continue
+        limiter_key = rate_limit_key(
+            browser=str(row.get("browser", "")),
+            profile=str(row.get("profile_directory", "")),
+            provider=str(row.get("provider", "")),
+            mode=str(row.get("mode", "")),
+        )
+        cooldown = active_rate_limit(rate_limit_state, limiter_key) if args.rate_limit else None
+        if cooldown:
+            event = {
+                "event": "rate-limit-cooldown-active",
+                "key": limiter_key,
+                "remaining_seconds": cooldown["remaining_seconds"],
+                "cooldown_until": cooldown.get("cooldown_until"),
+                "reason": cooldown.get("reason", ""),
+            }
+            rate_limit_events.append(event)
+            if args.rate_limit_wait and int(cooldown["remaining_seconds"]) <= args.rate_limit_max_wait_seconds:
+                time.sleep(max(0, int(cooldown["remaining_seconds"])))
+                rate_limit_events.append({"event": "rate-limit-waited", "key": limiter_key, "seconds": int(cooldown["remaining_seconds"])})
+                cleanup_expired_rate_limits(rate_limit_state)
+            else:
+                results.append(
+                    {
+                        **row,
+                        "run_status": "rate-limited",
+                        "ok": False,
+                        "rate_limit": event,
+                        "fallback": {
+                            "continued_to_next_row": bool(args.rate_limit_fallback),
+                            "reason": "cooldown-active",
+                        },
+                    }
+                )
+                if not (args.continue_on_failure or args.rate_limit_fallback):
+                    break
+                continue
         browser = browser_map.get(str(row.get("browser", "")))
         if not browser:
             results.append({**row, "run_status": "blocked", "blocker": "browser not discovered at execution time"})
@@ -6923,69 +7143,120 @@ def cmd_workflow_suite(args: argparse.Namespace) -> int:
             if not args.continue_on_failure:
                 break
             continue
-        try:
-            if args.sibling:
-                run_payload = run_sibling_workflow_payload(
-                    browser=browser,
-                    source_profile=profile,
-                    provider=str(row["provider"]),
-                    mode=str(row["mode"]),
-                    prompt=str(row["prompt"]),
-                    artifact_root=artifact_root,
-                    submit=args.submit,
-                    confirm_start=args.confirm_start,
-                    wait_seconds=args.wait_seconds,
-                    response_timeout=args.response_timeout,
-                    copy_output=args.copy_output,
-                    timeout=args.timeout,
-                    cache_root=Path(args.cache_root).expanduser() if args.cache else None,
-                    refresh_cache=not args.no_refresh_cache,
-                    include_extension_ids=extension_ids,
-                    attachments=suite_attachments,
-                    close_after=args.close_after,
-                    headless=args.headless,
-                    refresh_sibling=args.refresh_sibling,
+        retry_index = 0
+        while True:
+            try:
+                if args.sibling:
+                    run_payload = run_sibling_workflow_payload(
+                        browser=browser,
+                        source_profile=profile,
+                        provider=str(row["provider"]),
+                        mode=str(row["mode"]),
+                        prompt=str(row["prompt"]),
+                        artifact_root=artifact_root,
+                        submit=args.submit,
+                        confirm_start=args.confirm_start,
+                        wait_seconds=args.wait_seconds,
+                        response_timeout=args.response_timeout,
+                        copy_output=args.copy_output,
+                        timeout=args.timeout,
+                        cache_root=Path(args.cache_root).expanduser() if args.cache else None,
+                        refresh_cache=not args.no_refresh_cache,
+                        include_extension_ids=extension_ids,
+                        attachments=suite_attachments,
+                        close_after=args.close_after,
+                        headless=args.headless,
+                        refresh_sibling=args.refresh_sibling,
+                    )
+                else:
+                    run_payload = agent_browser_profile_workflow_run(
+                        browser=browser,
+                        profile=profile,
+                        provider=str(row["provider"]),
+                        mode=str(row["mode"]),
+                        prompt=str(row["prompt"]),
+                        artifact_root=artifact_root,
+                        clone_root=clone_root,
+                        submit=args.submit,
+                        confirm_start=args.confirm_start,
+                        wait_seconds=args.wait_seconds,
+                        response_timeout=args.response_timeout,
+                        copy_output=args.copy_output,
+                        timeout=args.timeout,
+                        cache_root=Path(args.cache_root).expanduser() if args.cache else None,
+                        refresh_cache=not args.no_refresh_cache,
+                        include_extension_ids=extension_ids,
+                        attachments=suite_attachments,
+                    )
+                run_status = str(run_payload.get("status", "unknown"))
+                detected_rate_limit = detect_rate_limit_from_payload(run_payload) if args.rate_limit else {"limited": False}
+                if detected_rate_limit.get("limited"):
+                    entry = record_rate_limit(
+                        rate_limit_state,
+                        limiter_key,
+                        wait_seconds=int(detected_rate_limit.get("wait_seconds") or args.rate_limit_default_wait_seconds),
+                        browser=str(row.get("browser", "")),
+                        profile=str(row.get("profile_directory", "")),
+                        provider=str(row.get("provider", "")),
+                        mode=str(row.get("mode", "")),
+                        reason=str(detected_rate_limit.get("text_preview", ""))[:240],
+                        source=str((run_payload.get("status_json") or run_payload.get("visible_text_path") or "")),
+                    )
+                    write_rate_limit_state(rate_limit_state_path, rate_limit_state)
+                    rate_limit_event = {
+                        "event": "rate-limit-detected",
+                        "key": limiter_key,
+                        "wait_seconds": int(entry["learned_wait_seconds"]),
+                        "cooldown_until": entry["cooldown_until"],
+                        "retry_index": retry_index,
+                        "detection": detected_rate_limit,
+                    }
+                    rate_limit_events.append(rate_limit_event)
+                    if args.rate_limit_wait and retry_index < args.rate_limit_retries and int(entry["learned_wait_seconds"]) <= args.rate_limit_max_wait_seconds:
+                        time.sleep(max(0, int(entry["learned_wait_seconds"])))
+                        retry_index += 1
+                        rate_limit_events.append({"event": "rate-limit-retry", "key": limiter_key, "retry_index": retry_index})
+                        continue
+                    compact_payload = compact_workflow_run_payload(run_payload)
+                    if not args.keep_clones:
+                        cleanup_workflow_clone(run_payload)
+                    results.append(
+                        {
+                            **row,
+                            "run_status": "rate-limited",
+                            "ok": False,
+                            "rate_limit": rate_limit_event,
+                            "fallback": {
+                                "continued_to_next_row": bool(args.rate_limit_fallback),
+                                "reason": "rate-limit-detected",
+                            },
+                            **compact_payload,
+                        }
+                    )
+                    if not (args.continue_on_failure or args.rate_limit_fallback):
+                        break
+                    break
+                compact_payload = compact_workflow_run_payload(run_payload)
+                if not args.keep_clones:
+                    cleanup_workflow_clone(run_payload)
+                ok_statuses = {"opened", "submitted", "started", "verified", "captured"}
+                if args.require_started:
+                    ok_statuses = {"started", "verified"}
+                results.append(
+                    {
+                        **row,
+                        "run_status": run_status,
+                        "ok": run_status in ok_statuses,
+                        **compact_payload,
+                    }
                 )
-            else:
-                run_payload = agent_browser_profile_workflow_run(
-                    browser=browser,
-                    profile=profile,
-                    provider=str(row["provider"]),
-                    mode=str(row["mode"]),
-                    prompt=str(row["prompt"]),
-                    artifact_root=artifact_root,
-                    clone_root=clone_root,
-                    submit=args.submit,
-                    confirm_start=args.confirm_start,
-                    wait_seconds=args.wait_seconds,
-                    response_timeout=args.response_timeout,
-                    copy_output=args.copy_output,
-                    timeout=args.timeout,
-                    cache_root=Path(args.cache_root).expanduser() if args.cache else None,
-                    refresh_cache=not args.no_refresh_cache,
-                    include_extension_ids=extension_ids,
-                    attachments=suite_attachments,
-                )
-            run_status = str(run_payload.get("status", "unknown"))
-            compact_payload = compact_workflow_run_payload(run_payload)
-            if not args.keep_clones:
-                cleanup_workflow_clone(run_payload)
-            ok_statuses = {"opened", "submitted", "started", "verified", "captured"}
-            if args.require_started:
-                ok_statuses = {"started", "verified"}
-            results.append(
-                {
-                    **row,
-                    "run_status": run_status,
-                    "ok": run_status in ok_statuses,
-                    **compact_payload,
-                }
-            )
-            if run_status not in ok_statuses and not args.continue_on_failure:
+                if run_status not in ok_statuses and not args.continue_on_failure:
+                    break
                 break
-        except Exception as exc:
-            results.append({**row, "run_status": "error", "ok": False, "error": str(exc)})
-            if not args.continue_on_failure:
+            except Exception as exc:
+                results.append({**row, "run_status": "error", "ok": False, "error": str(exc)})
+                if not args.continue_on_failure:
+                    break
                 break
 
     summary = {
@@ -6994,6 +7265,7 @@ def cmd_workflow_suite(args: argparse.Namespace) -> int:
         "started_or_verified": sum(1 for item in results if item.get("run_status") in {"started", "verified"}),
         "submitted": sum(1 for item in results if item.get("run_status") == "submitted"),
         "blocked": sum(1 for item in results if item.get("run_status") in {"blocked", "error"}),
+        "rate_limited": sum(1 for item in results if item.get("run_status") == "rate-limited"),
     }
     payload = {
         "status": "completed",
@@ -7006,13 +7278,33 @@ def cmd_workflow_suite(args: argparse.Namespace) -> int:
         "copy_output": args.copy_output,
         "attachments": [str(path) for path in suite_attachments],
         "require_started": args.require_started,
+        "rate_limit": {
+            "enabled": bool(args.rate_limit),
+            "state_path": str(rate_limit_state_path),
+            "events": rate_limit_events,
+            "active_entries": rate_limit_state.get("entries", {}) if args.rate_limit else {},
+        },
         "summary": summary,
         "results": results,
     }
     if args.output:
         write_json(Path(args.output).expanduser(), payload)
     print(json.dumps(payload, ensure_ascii=False, indent=2))
-    return 0 if results and all(item.get("ok") or item.get("run_status") == "skipped" for item in results) else 1
+    strict_success = bool(results) and all(item.get("ok") or item.get("run_status") == "skipped" for item in results)
+    fallback_success = False
+    if args.rate_limit_fallback and results:
+        target_status: dict[tuple[str, str], dict[str, bool]] = {}
+        for item in results:
+            if item.get("run_status") == "skipped":
+                continue
+            target = (str(item.get("provider", "")), str(item.get("mode", "")))
+            status = target_status.setdefault(target, {"ok": False, "only_ok_or_rate_limited": True})
+            if item.get("ok"):
+                status["ok"] = True
+            elif item.get("run_status") != "rate-limited":
+                status["only_ok_or_rate_limited"] = False
+        fallback_success = bool(target_status) and all(status["ok"] and status["only_ok_or_rate_limited"] for status in target_status.values())
+    return 0 if strict_success or fallback_success else 1
 
 
 def cmd_workflow_orchestrate(args: argparse.Namespace) -> int:
@@ -7539,6 +7831,16 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_suite.add_argument("--include-ai-exporter", action="store_true", help="Copy/load SaveAI / AI Exporter into each temporary clone.")
     workflow_suite.add_argument("--attachment", action="append", default=[], help="Local file/image/video path to attach to every row when the provider exposes a file input.")
     workflow_suite.add_argument("--with-test-assets", action="store_true", help="Generate tiny text, PNG, and MP4 attachment smoke files under the artifact root and attach them.")
+    workflow_suite.add_argument("--rate-limit", dest="rate_limit", action="store_true", default=True, help="Detect provider rate limits, persist cooldowns, and avoid immediately re-triggering limited accounts.")
+    workflow_suite.add_argument("--no-rate-limit", dest="rate_limit", action="store_false", help="Disable rate-limit detection and cooldown persistence.")
+    workflow_suite.add_argument("--rate-limit-state", default=str(default_rate_limit_state_path()), help="JSON state file for learned provider/browser/account cooldowns.")
+    workflow_suite.add_argument("--rate-limit-wait", dest="rate_limit_wait", action="store_true", default=True, help="Wait automatically when a detected cooldown is shorter than --rate-limit-max-wait-seconds.")
+    workflow_suite.add_argument("--no-rate-limit-wait", dest="rate_limit_wait", action="store_false", help="Do not sleep for active cooldowns; skip to fallback rows instead.")
+    workflow_suite.add_argument("--rate-limit-max-wait-seconds", type=int, default=300, help="Maximum cooldown duration the suite may wait automatically before falling back.")
+    workflow_suite.add_argument("--rate-limit-default-wait-seconds", type=int, default=300, help="Cooldown used when the provider says a limit was hit but does not expose a duration.")
+    workflow_suite.add_argument("--rate-limit-retries", type=int, default=1, help="How often to retry the same row after waiting for a detected cooldown.")
+    workflow_suite.add_argument("--rate-limit-fallback", action="store_true", default=True, help="Continue to later rows so another browser/profile/account can be used after a rate limit.")
+    workflow_suite.add_argument("--no-rate-limit-fallback", dest="rate_limit_fallback", action="store_false", help="Stop the suite instead of trying later browser/profile rows after a rate limit.")
     workflow_suite.add_argument("--keep-clones", action="store_true", help="Keep temporary profile clones after each suite row for debugging.")
     workflow_suite.add_argument("--output", default="")
     workflow_orchestrate = sub.add_parser("workflow-orchestrate")

@@ -2309,6 +2309,184 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertEqual(calls[0]["browser"]["user_data_dir"], str(module.default_sibling_user_data_dir(browser="brave", profile="Default")))
         self.assertTrue(getattr(fake_process, "terminated", False))
 
+    def test_detect_rate_limit_from_text_parses_wait_minutes(self):
+        module = load_module()
+
+        detected = module.detect_rate_limit_from_text("Rate limit reached. Please wait 5 minutes before trying again.")
+        detected_de = module.detect_rate_limit_from_text("Bitte warte 7 Minuten, bevor du es erneut versuchst.")
+
+        self.assertTrue(detected["limited"])
+        self.assertEqual(detected["wait_seconds"], 300)
+        self.assertTrue(detected_de["limited"])
+        self.assertEqual(detected_de["wait_seconds"], 420)
+
+    def test_rate_limit_state_records_and_blocks_active_key(self):
+        module = load_module()
+        state = {"version": 1, "entries": {}, "history": []}
+        key = module.rate_limit_key(browser="brave", profile="Default", provider="chatgpt", mode="chat")
+
+        entry = module.record_rate_limit(
+            state,
+            key,
+            wait_seconds=120,
+            browser="brave",
+            profile="Default",
+            provider="chatgpt",
+            mode="chat",
+            reason="Please wait 2 minutes",
+            source="/tmp/status.json",
+            now=1000,
+        )
+        active = module.active_rate_limit(state, key, now=1050)
+        module.cleanup_expired_rate_limits(state, now=1201)
+
+        self.assertEqual(entry["learned_wait_seconds"], 120)
+        self.assertIsNotNone(active)
+        self.assertEqual(active["remaining_seconds"], 70)
+        self.assertNotIn(key, state["entries"])
+
+    def test_workflow_suite_skips_active_rate_limited_row_and_falls_back(self):
+        module = load_module()
+        root = Path(tempfile.mkdtemp())
+        state_path = root / "rate-limit-state.json"
+        state = {"version": 1, "entries": {}, "history": []}
+        key = module.rate_limit_key(browser="brave", profile="Default", provider="chatgpt", mode="chat")
+        module.record_rate_limit(
+            state,
+            key,
+            wait_seconds=3600,
+            browser="brave",
+            profile="Default",
+            provider="chatgpt",
+            mode="chat",
+            reason="message limit",
+            source="/tmp/status.json",
+        )
+        module.write_rate_limit_state(state_path, state)
+        calls = []
+        original_discover = module.discover_browsers
+        original_run = module.run_sibling_workflow_payload
+        module.discover_browsers = lambda: [
+            {
+                "id": "brave",
+                "display_name": "Brave Browser",
+                "binary_path": "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+                "user_data_dir": str(root / "brave"),
+                "profiles": [{"directory": "Default", "name": "Default", "path": str(root / "brave" / "Default")}],
+            },
+            {
+                "id": "comet",
+                "display_name": "Comet",
+                "binary_path": "/Applications/Comet.app/Contents/MacOS/Comet",
+                "user_data_dir": str(root / "comet"),
+                "profiles": [{"directory": "Default", "name": "Default", "path": str(root / "comet" / "Default")}],
+            },
+        ]
+
+        def fake_run(**kwargs):
+            calls.append(kwargs)
+            return {
+                "status": "verified",
+                "provider": kwargs["provider"],
+                "mode": kwargs["mode"],
+                "browser": kwargs["browser"]["id"],
+                "profile": kwargs["source_profile"]["directory"],
+            }
+
+        module.run_sibling_workflow_payload = fake_run
+        try:
+            out = StringIO()
+            with redirect_stdout(out):
+                exit_code = module.main(
+                    [
+                        "workflow-suite",
+                        "--sibling",
+                        "--browsers",
+                        "brave,comet",
+                        "--profile",
+                        "Default",
+                        "--providers",
+                        "chatgpt",
+                        "--features",
+                        "chatgpt:chat",
+                        "--submit",
+                        "--no-rate-limit-wait",
+                        "--rate-limit-state",
+                        str(state_path),
+                    ]
+                )
+        finally:
+            module.discover_browsers = original_discover
+            module.run_sibling_workflow_payload = original_run
+
+        payload = json.loads(out.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["summary"]["rate_limited"], 1)
+        self.assertEqual(payload["summary"]["ok"], 1)
+        self.assertEqual(payload["results"][0]["run_status"], "rate-limited")
+        self.assertTrue(payload["results"][0]["fallback"]["continued_to_next_row"])
+        self.assertEqual(payload["results"][1]["run_status"], "verified")
+        self.assertEqual([call["browser"]["id"] for call in calls], ["comet"])
+
+    def test_workflow_suite_records_rate_limit_from_payload(self):
+        module = load_module()
+        root = Path(tempfile.mkdtemp())
+        state_path = root / "rate-limit-state.json"
+        output_text = root / "output.txt"
+        output_text.write_text("Message limit reached. Please wait 2 minutes before trying again.", encoding="utf-8")
+        original_discover = module.discover_browsers
+        original_run = module.run_sibling_workflow_payload
+        module.discover_browsers = lambda: [
+            {
+                "id": "brave",
+                "display_name": "Brave Browser",
+                "binary_path": "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+                "user_data_dir": str(root / "brave"),
+                "profiles": [{"directory": "Default", "name": "Default", "path": str(root / "brave" / "Default")}],
+            }
+        ]
+        module.run_sibling_workflow_payload = lambda **kwargs: {
+            "status": "captured",
+            "provider": kwargs["provider"],
+            "mode": kwargs["mode"],
+            "browser": kwargs["browser"]["id"],
+            "profile": kwargs["source_profile"]["directory"],
+            "output_text_path": str(output_text),
+        }
+        try:
+            out = StringIO()
+            with redirect_stdout(out):
+                exit_code = module.main(
+                    [
+                        "workflow-suite",
+                        "--sibling",
+                        "--browsers",
+                        "brave",
+                        "--profile",
+                        "Default",
+                        "--providers",
+                        "chatgpt",
+                        "--features",
+                        "chatgpt:chat",
+                        "--submit",
+                        "--no-rate-limit-wait",
+                        "--rate-limit-state",
+                        str(state_path),
+                    ]
+                )
+        finally:
+            module.discover_browsers = original_discover
+            module.run_sibling_workflow_payload = original_run
+
+        payload = json.loads(out.getvalue())
+        stored_state = json.loads(state_path.read_text(encoding="utf-8"))
+        key = module.rate_limit_key(browser="brave", profile="Default", provider="chatgpt", mode="chat")
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(payload["summary"]["rate_limited"], 1)
+        self.assertEqual(payload["results"][0]["run_status"], "rate-limited")
+        self.assertIn(key, stored_state["entries"])
+        self.assertEqual(stored_state["entries"][key]["learned_wait_seconds"], 120)
+
     def test_sibling_workflow_real_session_required_includes_healing_command(self):
         module = load_module()
         root = Path(tempfile.mkdtemp())

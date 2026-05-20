@@ -1901,6 +1901,8 @@ def wait_for_workflow_response(
     visible_text_parts: list[str],
     response_timeout: float,
     poll_interval: float = 2.0,
+    prompt: str = "",
+    attachment_names: list[str] | None = None,
 ) -> dict[str, Any]:
     deadline = time.monotonic() + max(0.1, response_timeout)
     max_polls = max(1, int(math.ceil(max(0.1, response_timeout) / max(0.2, poll_interval))))
@@ -1928,30 +1930,68 @@ def wait_for_workflow_response(
             visible_text_parts.append(output_eval.stdout)
         combined = "\n".join(part for part in [snapshot.stdout, output_eval.stdout] if part)
         latest_output = extract_workflow_output_from_text(combined, provider=provider, mode=mode)
+        ignored_composer_output = looks_like_composer_only_output(
+            latest_output.get("text", ""),
+            provider=provider,
+            prompt=prompt,
+            attachment_names=attachment_names or [],
+        )
         current_text = latest_output.get("text", "")
+        if ignored_composer_output:
+            current_text = ""
         if current_text and current_text == last_text and latest_output.get("status") != "running":
             stable_polls += 1
         else:
             stable_polls = 0
         last_text = current_text
-        polls.append(
-            {
-                "index": index,
-                "status": latest_output.get("status"),
-                "text_length": latest_output.get("text_length", 0),
-                "completion_markers_found": latest_output.get("completion_markers_found", []),
-                "running_markers_found": latest_output.get("running_markers_found", []),
-            }
-        )
-        if latest_output.get("status") == "complete":
+        poll_record = {
+            "index": index,
+            "status": latest_output.get("status"),
+            "text_length": latest_output.get("text_length", 0),
+            "completion_markers_found": latest_output.get("completion_markers_found", []),
+            "running_markers_found": latest_output.get("running_markers_found", []),
+        }
+        if ignored_composer_output:
+            poll_record["ignored_composer_output"] = True
+        polls.append(poll_record)
+        if latest_output.get("status") == "complete" and not ignored_composer_output:
             return {"event": "wait-for-response", "status": "complete", "polls": polls, "output": latest_output}
-        if stable_polls >= 1 and int(latest_output.get("text_length", 0)) > 0:
+        if stable_polls >= 1 and int(latest_output.get("text_length", 0)) > 0 and not ignored_composer_output:
             return {"event": "wait-for-response", "status": "stable", "polls": polls, "output": latest_output}
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
         time.sleep(min(max(0.2, poll_interval), remaining))
     return {"event": "wait-for-response", "status": "timeout", "polls": polls, "output": latest_output}
+
+
+def looks_like_composer_only_output(text: str, *, provider: str, prompt: str = "", attachment_names: list[str] | None = None) -> bool:
+    provider_id = normalize_provider_name(provider)
+    expanded = expand_agent_browser_eval_text(text or "")
+    if not expanded.strip():
+        return False
+    normalized = " ".join(expanded.split()).lower()
+    prompt_norm = " ".join((prompt or "").split()).lower()
+    attachment_names = attachment_names or []
+    attachment_hits = [name for name in attachment_names if name and name.lower() in normalized]
+    if prompt_norm and prompt_norm not in normalized:
+        return False
+    if provider_id == "chatgpt":
+        landing_markers = [
+            "how can i help",
+            "message chatgpt",
+            "chat with chatgpt",
+            "send prompt",
+            "start dictation",
+        ]
+        composer_markers = ["document", "file", "extended pro", "temporary chat"]
+        if any(marker in normalized for marker in landing_markers) and (attachment_hits or any(marker in normalized for marker in composer_markers)):
+            return True
+    if provider_id == "gemini":
+        landing_markers = ["ask gemini", "gemini", "anmelden", "einen prompt"]
+        if any(marker in normalized for marker in landing_markers) and attachment_hits:
+            return True
+    return False
 
 
 def wait_milliseconds(seconds: float, *, minimum_ms: int = 1000, maximum_ms: int | None = None) -> str:
@@ -2001,6 +2041,153 @@ def composer_js_fill_script(text: str) -> str:
         "return {ok:true, tag:el.tagName, role:el.getAttribute('role') || '', textLength:text.length};"
         "})()"
     )
+
+
+def composer_submission_state_script(prompt: str, attachment_names: list[str] | None = None) -> str:
+    prompt_json = json.dumps(" ".join((prompt or "").split()))
+    names_json = json.dumps([str(name) for name in attachment_names or [] if str(name)])
+    return (
+        "(() => {"
+        "/* __AI_RESEARCH_COMPOSER_STATE__ */"
+        f"const prompt = {prompt_json};"
+        f"const attachmentNames = {names_json};"
+        "const visible = (el) => {"
+        "  if (!el) return false;"
+        "  const rect = el.getBoundingClientRect();"
+        "  const style = window.getComputedStyle(el);"
+        "  return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';"
+        "};"
+        "const textOf = (el) => (el && (el.innerText || el.value || el.textContent) || '').trim();"
+        "const norm = (text) => String(text || '').replace(/\\s+/g, ' ').trim();"
+        "const composers = [];"
+        "for (const selector of ['textarea', 'input[type=\"text\"]', '[contenteditable=\"true\"]', '[role=\"textbox\"]']) {"
+        "  for (const el of document.querySelectorAll(selector)) {"
+        "    if (visible(el) && !el.disabled && el.getAttribute('aria-disabled') !== 'true') composers.push(el);"
+        "  }"
+        "}"
+        "composers.sort((a, b) => b.getBoundingClientRect().bottom - a.getBoundingClientRect().bottom);"
+        "const composer = composers[0] || null;"
+        "const composerText = norm(textOf(composer));"
+        "const bodyText = document.body ? norm(document.body.innerText || document.body.textContent || '') : '';"
+        "const attachmentNamesFound = attachmentNames.filter(name => bodyText.includes(name));"
+        "const buttonLabels = /^(send|send prompt|submit|senden|absenden|abschicken)$/i;"
+        "const buttons = Array.from(document.querySelectorAll('button')).filter(visible).map((button) => {"
+        "  const label = norm(button.getAttribute('aria-label') || button.getAttribute('title') || button.innerText || button.textContent || '');"
+        "  const disabled = !!button.disabled || button.getAttribute('aria-disabled') === 'true' || button.matches('[disabled]');"
+        "  const rect = button.getBoundingClientRect();"
+        "  return {label, disabled, bottom: rect.bottom, right: rect.right};"
+        "});"
+        "const sendButtons = buttons.filter(button => buttonLabels.test(button.label) || /send prompt/i.test(button.label));"
+        "sendButtons.sort((a, b) => (b.bottom - a.bottom) || (b.right - a.right));"
+        "const sendReady = sendButtons.some(button => !button.disabled);"
+        "const sendDisabled = sendButtons.length > 0 && !sendReady;"
+        "const busy = !!document.querySelector('[aria-busy=\"true\"], [role=\"progressbar\"], progress');"
+        "return {ok:true, composerFound: !!composer, composerText, composerHasPrompt: !!prompt && composerText.includes(prompt), attachmentNamesFound, sendButtonCount: sendButtons.length, sendReady, sendDisabled, busy};"
+        "})()"
+    )
+
+
+def submit_prompt_js_script(provider: str) -> str:
+    provider_id = normalize_provider_name(provider)
+    return (
+        "(() => {"
+        "/* __AI_RESEARCH_SUBMIT_PROMPT__ */"
+        f"const provider = {json.dumps(provider_id)};"
+        "const visible = (el) => {"
+        "  if (!el) return false;"
+        "  const rect = el.getBoundingClientRect();"
+        "  const style = window.getComputedStyle(el);"
+        "  return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';"
+        "};"
+        "const norm = (text) => String(text || '').replace(/\\s+/g, ' ').trim();"
+        "const composers = [];"
+        "for (const selector of ['textarea', 'input[type=\"text\"]', '[contenteditable=\"true\"]', '[role=\"textbox\"]']) {"
+        "  for (const el of document.querySelectorAll(selector)) {"
+        "    if (visible(el) && !el.disabled && el.getAttribute('aria-disabled') !== 'true') composers.push(el);"
+        "  }"
+        "}"
+        "composers.sort((a, b) => b.getBoundingClientRect().bottom - a.getBoundingClientRect().bottom);"
+        "if (composers[0]) composers[0].focus();"
+        "const sendRe = /^(send|send prompt|submit|senden|absenden|abschicken)$/i;"
+        "const sendButtons = Array.from(document.querySelectorAll('button')).filter((button) => {"
+        "  if (!visible(button) || button.disabled || button.getAttribute('aria-disabled') === 'true' || button.matches('[disabled]')) return false;"
+        "  const label = norm(button.getAttribute('aria-label') || button.getAttribute('title') || button.innerText || button.textContent || '');"
+        "  return sendRe.test(label) || /send prompt/i.test(label);"
+        "});"
+        "sendButtons.sort((a, b) => (b.getBoundingClientRect().bottom - a.getBoundingClientRect().bottom) || (b.getBoundingClientRect().right - a.getBoundingClientRect().right));"
+        "if (!sendButtons.length) return {ok:false, provider, reason:'no-enabled-send-button', composerFocused: !!composers[0]};"
+        "sendButtons[0].click();"
+        "return {ok:true, provider, method:'button-click', label: norm(sendButtons[0].getAttribute('aria-label') || sendButtons[0].getAttribute('title') || sendButtons[0].innerText || sendButtons[0].textContent || '')};"
+        "})()"
+    )
+
+
+def parse_json_stdout(text: str) -> dict[str, Any]:
+    try:
+        value = json.loads(text or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def submit_agent_browser_prompt(
+    *,
+    invoke: Any,
+    provider: str,
+    prompt: str,
+    attachment_names: list[str] | None = None,
+    max_wait_seconds: float = 25.0,
+) -> dict[str, Any]:
+    attachment_names = attachment_names or []
+    deadline = time.monotonic() + max(0.5, max_wait_seconds)
+    readiness_polls: list[dict[str, Any]] = []
+    index = 0
+    while True:
+        state_result = invoke(f"submit-readiness-{index}", ["eval", composer_submission_state_script(prompt, attachment_names)])
+        state = parse_json_stdout(state_result.stdout)
+        readiness_polls.append(
+            {
+                "index": index,
+                "returncode": state_result.returncode,
+                "composerFound": bool(state.get("composerFound")),
+                "composerHasPrompt": bool(state.get("composerHasPrompt")),
+                "sendReady": bool(state.get("sendReady")),
+                "sendDisabled": bool(state.get("sendDisabled")),
+                "busy": bool(state.get("busy")),
+                "attachmentNamesFound": state.get("attachmentNamesFound", []),
+            }
+        )
+        if not attachment_names:
+            break
+        required_attachments_ready = len(state.get("attachmentNamesFound", [])) >= len(attachment_names)
+        if state.get("sendReady") and required_attachments_ready:
+            break
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        index += 1
+        invoke(f"wait-submit-readiness-{index}", ["wait", wait_milliseconds(min(1.0, remaining), maximum_ms=1000)])
+
+    click_result = invoke("submit-prompt-js-click", ["eval", submit_prompt_js_script(provider)])
+    click_payload = parse_json_stdout(click_result.stdout)
+    if click_result.returncode == 0 and click_payload.get("ok"):
+        return {
+            "event": "submit-prompt",
+            "submitted": True,
+            "method": str(click_payload.get("method") or "button-click"),
+            "readiness_polls": readiness_polls,
+            "click": click_payload,
+        }
+
+    enter_result = invoke("submit-prompt-enter", ["press", "Enter"])
+    return {
+        "event": "submit-prompt",
+        "submitted": enter_result.returncode == 0,
+        "method": "enter",
+        "readiness_polls": readiness_polls,
+        "click": click_payload or {"ok": False, "returncode": click_result.returncode},
+        "enter_returncode": enter_result.returncode,
+    }
 
 
 def find_snapshot_ref(
@@ -2268,6 +2455,86 @@ def default_sibling_user_data_dir(*, browser: str, profile: str) -> Path:
         / f"{slug(normalize_browser_name(browser))}-{slug(profile)}"
         / "user-data"
     )
+
+
+def build_real_session_healing_command(
+    *,
+    browser: str,
+    profile: str,
+    provider: str,
+    sibling_user_data: Path,
+) -> dict[str, Any]:
+    command = [
+        sys.executable or "python3",
+        str(Path(__file__).resolve()),
+        "sibling-profile-init",
+        "--browser",
+        normalize_browser_name(browser),
+        "--profile",
+        profile or "Default",
+        "--provider",
+        normalize_provider_name(provider),
+        "--sibling-user-data",
+        str(sibling_user_data.expanduser()),
+    ]
+    return {
+        "reason": "provider-login-or-consent-required-in-sibling-profile",
+        "command": command,
+        "instructions": [
+            "Open the dedicated sibling automation profile once and complete the provider login or consent wall there.",
+            "Do not close or restart the normal visible browser windows.",
+            "After the sibling profile is authenticated, rerun the same workflow command.",
+        ],
+    }
+
+
+def create_e2e_attachment_assets(root: Path) -> list[Path]:
+    asset_root = root.expanduser() / "e2e-attachments"
+    asset_root.mkdir(parents=True, exist_ok=True)
+    text_path = asset_root / "e2e-note.txt"
+    image_path = asset_root / "e2e-image.png"
+    video_path = asset_root / "e2e-video.mp4"
+    text_path.write_text("Hermes E2E attachment smoke file.\n", encoding="utf-8")
+    image_path.write_bytes(
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+        b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\rIDATx\x9cc\xf8\xff"
+        b"\xff?\x00\x05\xfe\x02\xfeA\xd8\x1d\x9d\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg:
+        try:
+            subprocess.run(
+                [
+                    ffmpeg,
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=c=black:s=16x16:d=0.2",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-vcodec",
+                    "libx264",
+                    "-movflags",
+                    "+faststart",
+                    str(video_path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=True,
+            )
+        except (subprocess.SubprocessError, OSError):
+            video_path.write_bytes(
+                b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom"
+                b"\x00\x00\x00\x08free"
+            )
+    else:
+        video_path.write_bytes(
+            b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom"
+            b"\x00\x00\x00\x08free"
+        )
+    return [text_path, image_path, video_path]
 
 
 def clean_sibling_profile_locks(sibling_user_data: Path, profile_directory: str) -> list[str]:
@@ -3626,8 +3893,17 @@ def agent_browser_profile_workflow_run(
                     menu_triggers=list(spec.get("attachment_triggers", [])),
                 )
             if submit and fill_result.returncode == 0:
-                invoke("submit-prompt", ["press", "Enter"])
-                status = "submitted"
+                submit_event = submit_agent_browser_prompt(
+                    invoke=invoke,
+                    provider=provider_id,
+                    prompt=prompt,
+                    attachment_names=[path.expanduser().name for path in attachments or []],
+                )
+                workflow_events.append(submit_event)
+                if not submit_event.get("submitted"):
+                    status = "blocked"
+                else:
+                    status = "submitted"
                 pre_confirm_wait_seconds = int(spec.get("pre_confirm_wait_seconds", 12))
                 invoke("wait-after-submit", ["wait", str(max(1000, min(wait_seconds, 8) * 1000))])
                 if confirm_start and spec.get("confirmation_triggers"):
@@ -3724,10 +4000,12 @@ def agent_browser_profile_workflow_run(
                     invoke=invoke,
                     provider=provider_id,
                     mode=spec["mode"],
-                    output_selectors=list(spec.get("output_selectors", [])),
-                    visible_text_parts=visible_text_parts,
-                    response_timeout=response_timeout,
-                )
+                output_selectors=list(spec.get("output_selectors", [])),
+                visible_text_parts=visible_text_parts,
+                response_timeout=response_timeout,
+                prompt=prompt,
+                attachment_names=[path.expanduser().name for path in attachments or []],
+            )
                 workflow_events.append(response_event)
                 if response_event.get("status") in {"complete", "stable"}:
                     status = "verified"
@@ -3785,7 +4063,7 @@ def agent_browser_profile_workflow_run(
     final_inventory = extract_provider_inventory(provider_id, visible_text)
     real_session_preflight = build_real_session_preflight(browser=browser, profile=profile, provider=provider_id)
     status, final_inventory = apply_real_session_requirement(status, final_inventory, real_session_preflight)
-    if copy_output and status in {"submitted", "started", "verified", "captured"} and output["text"]:
+    if copy_output and status in {"verified", "captured"} and output["text"]:
         clipboard_payload = copy_text_to_clipboard(output["text"])
     payload = {
         **plan,
@@ -4079,8 +4357,18 @@ def agent_browser_live_workflow_run(
                 menu_triggers=list(spec.get("attachment_triggers", [])),
             )
         if submit and fill_result.returncode == 0:
-            invoke("submit-prompt", ["press", "Enter"])
-            status = "submitted"
+            attachment_names = [path.expanduser().name for path in attachments or []]
+            submit_event = submit_agent_browser_prompt(
+                invoke=invoke,
+                provider=provider_id,
+                prompt=prompt,
+                attachment_names=attachment_names,
+            )
+            workflow_events.append(submit_event)
+            if not submit_event.get("submitted"):
+                status = "blocked"
+            else:
+                status = "submitted"
             pre_confirm_wait_seconds = int(spec.get("pre_confirm_wait_seconds", 12))
             invoke("wait-after-submit", ["wait", str(max(1000, min(wait_seconds, 8) * 1000))])
             if confirm_start and spec.get("confirmation_triggers"):
@@ -4139,6 +4427,8 @@ def agent_browser_live_workflow_run(
                 output_selectors=list(spec.get("output_selectors", [])),
                 visible_text_parts=visible_text_parts,
                 response_timeout=response_timeout,
+                prompt=prompt,
+                attachment_names=[path.expanduser().name for path in attachments or []],
             )
             workflow_events.append(response_event)
             if response_event.get("status") in {"complete", "stable"}:
@@ -4194,7 +4484,7 @@ def agent_browser_live_workflow_run(
     final_inventory = extract_provider_inventory(provider_id, visible_text)
     if allow_real_session_required:
         status, final_inventory = apply_real_session_requirement(status, final_inventory, real_session_preflight)
-    if copy_output and status in {"submitted", "started", "verified", "captured"} and output["text"]:
+    if copy_output and status in {"verified", "captured"} and output["text"]:
         clipboard_payload = copy_text_to_clipboard(output["text"])
     payload = {
         **plan,
@@ -6071,7 +6361,9 @@ def compact_workflow_run_payload(payload: dict[str, Any]) -> dict[str, Any]:
             "completion_markers_found": output.get("completion_markers_found", []),
             "running_markers_found": output.get("running_markers_found", []),
         },
+        "clipboard": payload.get("clipboard"),
         "cache": payload.get("cache"),
+        "healing": payload.get("healing"),
         "clone": {
             "source_profile": clone.get("source_profile", ""),
             "profile_directory": clone.get("profile_directory", ""),
@@ -6112,6 +6404,127 @@ def cleanup_workflow_clone(payload: dict[str, Any]) -> None:
     clone_root = Path(clone_user_data).expanduser().parent
     if clone_root.exists() and clone_root.is_dir() and "/tmp/" in str(clone_root):
         shutil.rmtree(clone_root, ignore_errors=True)
+
+
+def run_sibling_workflow_payload(
+    *,
+    browser: dict[str, Any],
+    source_profile: dict[str, str],
+    provider: str,
+    mode: str,
+    prompt: str,
+    artifact_root: Path,
+    submit: bool,
+    confirm_start: bool,
+    wait_seconds: int,
+    response_timeout: float,
+    copy_output: bool,
+    timeout: float,
+    cache_root: Path | None,
+    refresh_cache: bool,
+    include_extension_ids: list[str] | None,
+    attachments: list[Path] | None,
+    close_after: bool,
+    sibling_user_data: Path | None = None,
+    headless: bool = False,
+    refresh_sibling: bool = False,
+) -> dict[str, Any]:
+    provider_id = normalize_provider_name(provider)
+    sibling_user_data = sibling_user_data or default_sibling_user_data_dir(
+        browser=str(browser.get("id", "")),
+        profile=str(source_profile.get("directory", "Default")),
+    )
+    sibling_profile = prepare_sibling_profile(
+        browser=browser,
+        profile=source_profile,
+        sibling_user_data=sibling_user_data,
+        refresh=refresh_sibling,
+        include_extension_ids=include_extension_ids,
+    )
+    if not sibling_profile.get("ok"):
+        return {
+            "status": "blocked",
+            "execution_mode": "sibling-cdp-automation-profile",
+            "provider": provider_id,
+            "mode": mode,
+            "sibling_profile": sibling_profile,
+            "closed_after": False,
+        }
+    cdp_port = find_available_port()
+    extension_paths = [item["path"] for item in discover_profile_extensions(source_profile, extension_ids=include_extension_ids)] if include_extension_ids else None
+    launch_args = build_sibling_cdp_launch_args(
+        browser,
+        sibling_user_data=str(sibling_user_data),
+        profile_directory=str(sibling_profile["profile_directory"]),
+        port=cdp_port,
+        provider=provider_id,
+        headless=headless,
+        extension_paths=extension_paths,
+    )
+    log_path = artifact_root / f"sibling-{normalize_browser_name(str(browser.get('id', '')))}-{slug(str(sibling_profile['profile_directory']))}-{provider_id}-{slug(mode)}.log"
+    process, launch_status = start_sibling_cdp_browser(launch_args=launch_args, port=cdp_port, log_path=log_path)
+    closed_after = False
+    payload: dict[str, Any] = {
+        "status": "blocked",
+        "execution_mode": "sibling-cdp-automation-profile",
+        "browser": normalize_browser_name(str(browser.get("id", ""))),
+        "provider": provider_id,
+        "mode": mode,
+        "sibling_profile": sibling_profile,
+        "launch": launch_status,
+        "closed_after": False,
+    }
+    try:
+        if not launch_status.get("ok"):
+            return payload
+        sibling_browser = dict(browser)
+        sibling_browser["user_data_dir"] = str(sibling_user_data)
+        sibling_runtime_profile = {
+            **source_profile,
+            "path": str(Path(str(sibling_profile["sibling_profile"])).expanduser()),
+        }
+        workflow_payload = agent_browser_live_workflow_run(
+            browser=sibling_browser,
+            profile=sibling_runtime_profile,
+            provider=provider_id,
+            mode=mode,
+            prompt=prompt,
+            artifact_root=artifact_root,
+            cdp_port=cdp_port,
+            submit=submit,
+            confirm_start=confirm_start,
+            wait_seconds=wait_seconds,
+            response_timeout=response_timeout,
+            copy_output=copy_output,
+            timeout=timeout,
+            cache_root=cache_root,
+            refresh_cache=refresh_cache,
+            attachments=attachments or [],
+            ignore_existing_non_cdp=True,
+            allow_active_tab_navigation_fallback=True,
+            allow_real_session_required=True,
+        )
+        payload = {
+            **workflow_payload,
+            "execution_mode": "sibling-cdp-automation-profile",
+            "sibling_profile": sibling_profile,
+            "launch": launch_status,
+            "closed_after": False,
+        }
+        if payload.get("status") in {"real-session-required", "signed-out-or-wall"}:
+            payload["healing"] = build_real_session_healing_command(
+                browser=str(browser.get("id", "")),
+                profile=str(source_profile.get("directory", "Default")),
+                provider=provider_id,
+                sibling_user_data=sibling_user_data,
+            )
+    finally:
+        if close_after:
+            terminate_process(process)
+            clean_sibling_profile_locks(sibling_user_data, str(sibling_profile.get("profile_directory", source_profile.get("directory", "Default"))))
+            closed_after = True
+    payload["closed_after"] = closed_after
+    return payload
 
 
 def build_notion_export_plan(
@@ -6188,12 +6601,19 @@ def cmd_workflow_suite(args: argparse.Namespace) -> int:
     artifact_root = Path(args.artifact_root).expanduser()
     clone_root = Path(args.clone_root).expanduser()
     extension_ids = requested_extension_ids(getattr(args, "include_extension", None), include_ai_exporter=getattr(args, "include_ai_exporter", False))
+    suite_attachments = [Path(item).expanduser() for item in getattr(args, "attachment", []) or []]
+    if getattr(args, "with_test_assets", False):
+        suite_attachments.extend(create_e2e_attachment_assets(artifact_root))
     plan_payload = {
         "status": "planned",
         "artifact_root": str(artifact_root),
         "clone_root": str(clone_root),
+        "execution_mode": "sibling-cdp-automation-profile" if args.sibling else "temporary-profile-clone-cdp",
         "submit": args.submit,
         "confirm_start": args.confirm_start,
+        "response_timeout": args.response_timeout,
+        "copy_output": args.copy_output,
+        "attachments": [str(path) for path in suite_attachments],
         "all_profiles": args.all_profiles,
         "rows": rows,
     }
@@ -6225,22 +6645,48 @@ def cmd_workflow_suite(args: argparse.Namespace) -> int:
                 break
             continue
         try:
-            run_payload = agent_browser_profile_workflow_run(
-                browser=browser,
-                profile=profile,
-                provider=str(row["provider"]),
-                mode=str(row["mode"]),
-                prompt=str(row["prompt"]),
-                artifact_root=artifact_root,
-                clone_root=clone_root,
-                submit=args.submit,
-                confirm_start=args.confirm_start,
-                wait_seconds=args.wait_seconds,
-                timeout=args.timeout,
-                cache_root=Path(args.cache_root).expanduser() if args.cache else None,
-                refresh_cache=not args.no_refresh_cache,
-                include_extension_ids=extension_ids,
-            )
+            if args.sibling:
+                run_payload = run_sibling_workflow_payload(
+                    browser=browser,
+                    source_profile=profile,
+                    provider=str(row["provider"]),
+                    mode=str(row["mode"]),
+                    prompt=str(row["prompt"]),
+                    artifact_root=artifact_root,
+                    submit=args.submit,
+                    confirm_start=args.confirm_start,
+                    wait_seconds=args.wait_seconds,
+                    response_timeout=args.response_timeout,
+                    copy_output=args.copy_output,
+                    timeout=args.timeout,
+                    cache_root=Path(args.cache_root).expanduser() if args.cache else None,
+                    refresh_cache=not args.no_refresh_cache,
+                    include_extension_ids=extension_ids,
+                    attachments=suite_attachments,
+                    close_after=args.close_after,
+                    headless=args.headless,
+                    refresh_sibling=args.refresh_sibling,
+                )
+            else:
+                run_payload = agent_browser_profile_workflow_run(
+                    browser=browser,
+                    profile=profile,
+                    provider=str(row["provider"]),
+                    mode=str(row["mode"]),
+                    prompt=str(row["prompt"]),
+                    artifact_root=artifact_root,
+                    clone_root=clone_root,
+                    submit=args.submit,
+                    confirm_start=args.confirm_start,
+                    wait_seconds=args.wait_seconds,
+                    response_timeout=args.response_timeout,
+                    copy_output=args.copy_output,
+                    timeout=args.timeout,
+                    cache_root=Path(args.cache_root).expanduser() if args.cache else None,
+                    refresh_cache=not args.no_refresh_cache,
+                    include_extension_ids=extension_ids,
+                    attachments=suite_attachments,
+                )
             run_status = str(run_payload.get("status", "unknown"))
             compact_payload = compact_workflow_run_payload(run_payload)
             if not args.keep_clones:
@@ -6274,8 +6720,12 @@ def cmd_workflow_suite(args: argparse.Namespace) -> int:
         "status": "completed",
         "artifact_root": str(artifact_root),
         "clone_root": str(clone_root),
+        "execution_mode": "sibling-cdp-automation-profile" if args.sibling else "temporary-profile-clone-cdp",
         "submit": args.submit,
         "confirm_start": args.confirm_start,
+        "response_timeout": args.response_timeout,
+        "copy_output": args.copy_output,
+        "attachments": [str(path) for path in suite_attachments],
         "require_started": args.require_started,
         "summary": summary,
         "results": results,
@@ -6779,18 +7229,26 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_suite.add_argument("--features", default="", help="Comma-separated provider:mode entries, e.g. chatgpt:agent,gemini:deep-research.")
     workflow_suite.add_argument("--all-features", action="store_true", help="Run every provider mode supported by workflow-run.")
     workflow_suite.add_argument("--plan-only", action="store_true")
+    workflow_suite.add_argument("--sibling", action="store_true", help="Use dedicated sibling automation profiles instead of temporary profile clones.")
+    workflow_suite.add_argument("--refresh-sibling", action="store_true", help="Re-seed each sibling profile before its run.")
+    workflow_suite.add_argument("--headless", action="store_true", help="Use Chromium headless mode for sibling suite launches.")
+    workflow_suite.add_argument("--close-after", action="store_true", help="Terminate each launched sibling browser after the row finishes.")
     workflow_suite.add_argument("--submit", action="store_true")
     workflow_suite.add_argument("--confirm-start", action="store_true")
     workflow_suite.add_argument("--require-started", action="store_true", help="Fail submitted-only workflows unless they reach started/verified.")
     workflow_suite.add_argument("--continue-on-failure", action="store_true")
     workflow_suite.add_argument("--max-runs", type=int, default=0)
     workflow_suite.add_argument("--wait-seconds", type=int, default=30)
+    workflow_suite.add_argument("--response-timeout", type=float, default=180.0)
+    workflow_suite.add_argument("--copy-output", action="store_true")
     workflow_suite.add_argument("--timeout", type=float, default=90.0)
     workflow_suite.add_argument("--cache", action="store_true")
     workflow_suite.add_argument("--cache-root", default=str(default_chat_cache_root()))
     workflow_suite.add_argument("--no-refresh-cache", action="store_true")
     workflow_suite.add_argument("--include-extension", action="append", help="Copy/load an extension id or alias into each temporary clone.")
     workflow_suite.add_argument("--include-ai-exporter", action="store_true", help="Copy/load SaveAI / AI Exporter into each temporary clone.")
+    workflow_suite.add_argument("--attachment", action="append", default=[], help="Local file/image/video path to attach to every row when the provider exposes a file input.")
+    workflow_suite.add_argument("--with-test-assets", action="store_true", help="Generate tiny text, PNG, and MP4 attachment smoke files under the artifact root and attach them.")
     workflow_suite.add_argument("--keep-clones", action="store_true", help="Keep temporary profile clones after each suite row for debugging.")
     workflow_suite.add_argument("--output", default="")
     workflow_orchestrate = sub.add_parser("workflow-orchestrate")

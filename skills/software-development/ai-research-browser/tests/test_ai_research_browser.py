@@ -2019,6 +2019,99 @@ class AiResearchBrowserTest(unittest.TestCase):
 
         self.assertEqual(cleaned, "TOKEN_123")
 
+    def test_wait_for_response_ignores_stable_composer_with_attachment_names(self):
+        module = load_module()
+        prompt = "E2E smoke test: answer one short sentence confirming ChatGPT chat is usable."
+        composer_text = "\n".join(
+            [
+                "How can I help, Isagi?",
+                prompt,
+                "Extended Pro",
+                "e2e-note.txt",
+                "Document",
+                "e2e-video.mp4",
+                "File",
+            ]
+        )
+
+        def fake_invoke(label, args):
+            return module.subprocess.CompletedProcess(["agent-browser", *args], 0, composer_text, "")
+
+        event = module.wait_for_workflow_response(
+            invoke=fake_invoke,
+            provider="chatgpt",
+            mode="chat",
+            output_selectors=[],
+            visible_text_parts=[],
+            response_timeout=0.25,
+            poll_interval=0.05,
+            prompt=prompt,
+            attachment_names=["e2e-note.txt", "e2e-video.mp4"],
+        )
+
+        self.assertEqual(event["status"], "timeout")
+        self.assertTrue(all(poll.get("ignored_composer_output") for poll in event["polls"]))
+
+    def test_submit_prompt_waits_for_attachments_and_clicks_enabled_send_button(self):
+        module = load_module()
+        calls = []
+        states = iter(
+            [
+                {"ok": True, "sendReady": False, "sendDisabled": True, "composerHasPrompt": True, "attachmentNamesFound": ["e2e-note.txt"]},
+                {"ok": True, "sendReady": True, "sendDisabled": False, "composerHasPrompt": True, "attachmentNamesFound": ["e2e-note.txt"]},
+                {"ok": True, "sendReady": False, "sendDisabled": True, "composerHasPrompt": False, "attachmentNamesFound": []},
+            ]
+        )
+
+        def fake_invoke(label, args):
+            calls.append((label, args))
+            if args[:1] == ["eval"] and "__AI_RESEARCH_COMPOSER_STATE__" in args[1]:
+                return module.subprocess.CompletedProcess(["eval"], 0, json.dumps(next(states)), "")
+            if args[:1] == ["eval"] and "__AI_RESEARCH_SUBMIT_PROMPT__" in args[1]:
+                return module.subprocess.CompletedProcess(["eval"], 0, json.dumps({"ok": True, "method": "button-click"}), "")
+            if args[:1] == ["wait"]:
+                return module.subprocess.CompletedProcess(["wait"], 0, "", "")
+            return module.subprocess.CompletedProcess(["cmd"], 0, "", "")
+
+        event = module.submit_agent_browser_prompt(
+            invoke=fake_invoke,
+            provider="chatgpt",
+            prompt="hello",
+            attachment_names=["e2e-note.txt"],
+            max_wait_seconds=3,
+        )
+
+        self.assertTrue(event["submitted"])
+        self.assertEqual(event["method"], "button-click")
+        self.assertGreaterEqual(len(event["readiness_polls"]), 2)
+        self.assertTrue(any(label == "submit-prompt-js-click" for label, _ in calls))
+
+    def test_submit_prompt_without_attachments_does_not_wait_for_readiness(self):
+        module = load_module()
+        calls = []
+
+        def fake_invoke(label, args):
+            calls.append((label, args))
+            if args[:1] == ["eval"] and "__AI_RESEARCH_COMPOSER_STATE__" in args[1]:
+                return module.subprocess.CompletedProcess(["eval"], 0, "", "")
+            if args[:1] == ["eval"] and "__AI_RESEARCH_SUBMIT_PROMPT__" in args[1]:
+                return module.subprocess.CompletedProcess(["eval"], 0, json.dumps({"ok": False}), "")
+            if args[:1] == ["press"]:
+                return module.subprocess.CompletedProcess(["press"], 0, "", "")
+            raise AssertionError(f"unexpected wait or command: {label} {args}")
+
+        event = module.submit_agent_browser_prompt(
+            invoke=fake_invoke,
+            provider="chatgpt",
+            prompt="hello",
+            attachment_names=[],
+            max_wait_seconds=30,
+        )
+
+        self.assertTrue(event["submitted"])
+        self.assertEqual(event["method"], "enter")
+        self.assertEqual([label for label, _ in calls], ["submit-readiness-0", "submit-prompt-js-click", "submit-prompt-enter"])
+
     def test_cmd_workflow_plan_outputs_safe_json(self):
         module = load_module()
         original_discover = module.discover_browsers
@@ -2116,6 +2209,202 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertTrue(payload["submit"])
         self.assertEqual([row["mode"] for row in payload["rows"]], ["agent", "deep-research"])
         self.assertEqual(payload["rows"][0]["profile_directory"], "Profile 2")
+
+    def test_workflow_suite_sibling_run_passes_response_clipboard_and_attachments(self):
+        module = load_module()
+        root = Path(tempfile.mkdtemp())
+        source_root = root / "source"
+        source_profile = source_root / "Default"
+        source_profile.mkdir(parents=True)
+        (source_root / "Local State").write_text("{}", encoding="utf-8")
+        (source_profile / "Preferences").write_text("{}", encoding="utf-8")
+        attachment = root / "note.txt"
+        attachment.write_text("hello", encoding="utf-8")
+
+        class FakeProcess:
+            pid = 8181
+
+            def poll(self):
+                return None
+
+            def terminate(self):
+                self.terminated = True
+
+            def wait(self, timeout=None):
+                return 0
+
+        fake_process = FakeProcess()
+        calls = []
+        original_discover = module.discover_browsers
+        original_start = module.start_sibling_cdp_browser
+        original_live = module.agent_browser_live_workflow_run
+        original_port = module.find_available_port
+        module.discover_browsers = lambda: [
+            {
+                "id": "brave",
+                "display_name": "Brave Browser",
+                "binary_path": "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+                "user_data_dir": str(source_root),
+                "default_port": 9222,
+                "profiles": [{"directory": "Default", "name": "Work", "path": str(source_profile)}],
+            }
+        ]
+        module.start_sibling_cdp_browser = lambda **kwargs: (
+            fake_process,
+            {"ok": True, "pid": fake_process.pid, "port": kwargs["port"], "launch_args": kwargs["launch_args"]},
+        )
+        module.find_available_port = lambda: 9449
+
+        def fake_live(**kwargs):
+            calls.append(kwargs)
+            return {
+                "status": "verified",
+                "provider": kwargs["provider"],
+                "mode": kwargs["mode"],
+                "browser": "brave",
+                "profile": "Default",
+                "status_json": str(root / "status.json"),
+                "output_text_path": str(root / "output.txt"),
+                "clipboard": {"requested": kwargs["copy_output"], "copied": True, "text_length": 4},
+            }
+
+        module.agent_browser_live_workflow_run = fake_live
+        try:
+            out = StringIO()
+            with redirect_stdout(out):
+                exit_code = module.main(
+                    [
+                        "workflow-suite",
+                        "--sibling",
+                        "--browsers",
+                        "brave",
+                        "--profile",
+                        "work",
+                        "--providers",
+                        "chatgpt",
+                        "--features",
+                        "chatgpt:chat",
+                        "--submit",
+                        "--copy-output",
+                        "--response-timeout",
+                        "7",
+                        "--attachment",
+                        str(attachment),
+                        "--close-after",
+                        "--continue-on-failure",
+                    ]
+                )
+        finally:
+            module.discover_browsers = original_discover
+            module.start_sibling_cdp_browser = original_start
+            module.agent_browser_live_workflow_run = original_live
+            module.find_available_port = original_port
+
+        payload = json.loads(out.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["summary"]["ok"], 1)
+        self.assertEqual(calls[0]["response_timeout"], 7.0)
+        self.assertTrue(calls[0]["copy_output"])
+        self.assertEqual(calls[0]["attachments"], [attachment])
+        self.assertEqual(calls[0]["browser"]["user_data_dir"], str(module.default_sibling_user_data_dir(browser="brave", profile="Default")))
+        self.assertTrue(getattr(fake_process, "terminated", False))
+
+    def test_sibling_workflow_real_session_required_includes_healing_command(self):
+        module = load_module()
+        root = Path(tempfile.mkdtemp())
+        source_root = root / "source"
+        source_profile = source_root / "Default"
+        source_profile.mkdir(parents=True)
+        (source_root / "Local State").write_text("{}", encoding="utf-8")
+        (source_profile / "Preferences").write_text("{}", encoding="utf-8")
+
+        class FakeProcess:
+            pid = 9292
+
+            def poll(self):
+                return None
+
+        original_start = module.start_sibling_cdp_browser
+        original_live = module.agent_browser_live_workflow_run
+        original_port = module.find_available_port
+        module.start_sibling_cdp_browser = lambda **kwargs: (FakeProcess(), {"ok": True, "pid": 9292, "port": kwargs["port"]})
+        module.find_available_port = lambda: 9550
+        module.agent_browser_live_workflow_run = lambda **kwargs: {
+            "status": "real-session-required",
+            "provider": kwargs["provider"],
+            "mode": kwargs["mode"],
+            "browser": "comet",
+            "profile": "Default",
+            "status_json": str(root / "status.json"),
+        }
+        try:
+            payload = module.run_sibling_workflow_payload(
+                browser={
+                    "id": "comet",
+                    "display_name": "Comet",
+                    "binary_path": "/Applications/Comet.app/Contents/MacOS/Comet",
+                    "user_data_dir": str(source_root),
+                },
+                source_profile={"directory": "Default", "name": "Neptune", "path": str(source_profile)},
+                provider="gemini",
+                mode="deep-research",
+                prompt="Research",
+                artifact_root=root / "artifacts",
+                submit=True,
+                confirm_start=True,
+                wait_seconds=1,
+                response_timeout=1,
+                copy_output=True,
+                timeout=10,
+                cache_root=None,
+                refresh_cache=True,
+                include_extension_ids=None,
+                attachments=[],
+                close_after=False,
+                sibling_user_data=root / "sibling",
+            )
+        finally:
+            module.start_sibling_cdp_browser = original_start
+            module.agent_browser_live_workflow_run = original_live
+            module.find_available_port = original_port
+
+        self.assertEqual(payload["status"], "real-session-required")
+        self.assertEqual(payload["healing"]["reason"], "provider-login-or-consent-required-in-sibling-profile")
+        self.assertIn("sibling-profile-init", payload["healing"]["command"])
+        self.assertIn("--provider", payload["healing"]["command"])
+        self.assertIn("gemini", payload["healing"]["command"])
+
+    def test_create_e2e_attachment_assets_writes_text_image_and_video(self):
+        module = load_module()
+        root = Path(tempfile.mkdtemp())
+
+        assets = module.create_e2e_attachment_assets(root)
+
+        self.assertEqual([path.suffix for path in assets], [".txt", ".png", ".mp4"])
+        self.assertTrue(all(path.exists() and path.stat().st_size > 0 for path in assets))
+
+    def test_create_e2e_attachment_assets_uses_ffmpeg_for_valid_video_when_available(self):
+        module = load_module()
+        root = Path(tempfile.mkdtemp())
+        original_which = module.shutil.which
+        original_run = module.subprocess.run
+        calls = []
+        module.shutil.which = lambda name: "/opt/homebrew/bin/ffmpeg" if name == "ffmpeg" else None
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            Path(cmd[-1]).write_bytes(b"valid-mp4")
+            return module.subprocess.CompletedProcess(cmd, 0, "", "")
+
+        module.subprocess.run = fake_run
+        try:
+            assets = module.create_e2e_attachment_assets(root)
+        finally:
+            module.shutil.which = original_which
+            module.subprocess.run = original_run
+
+        self.assertEqual(assets[-1].read_bytes(), b"valid-mp4")
+        self.assertTrue(any("ffmpeg" in cmd[0] for cmd in calls))
 
     def test_compact_workflow_run_payload_omits_large_command_logs(self):
         module = load_module()

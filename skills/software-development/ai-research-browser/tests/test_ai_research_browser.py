@@ -387,6 +387,17 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertEqual(inventory["login_state"], "signed-in-or-ready")
         self.assertEqual(inventory["visible_status"]["account"], "am5150")
 
+    def test_gemini_conversation_markers_override_side_login_text(self):
+        module = load_module()
+
+        inventory = module.extract_provider_inventory(
+            "gemini",
+            "Gemini\nAnmelden\nNew chat\nUnterhaltung mit Gemini\nDu hast gesagt\nGemini hat gesagt\n"
+            "Safe Browser Automation Practices in 2026\nTools\nFlash\nDeep Research",
+        )
+
+        self.assertEqual(inventory["login_state"], "signed-in-or-ready")
+
     def test_provider_login_urls_are_hard_login_walls(self):
         module = load_module()
 
@@ -2639,6 +2650,68 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         self.assertEqual(payload["summary"]["blocked"], 1)
         self.assertEqual(payload["summary"]["real_session_required"], 1)
+
+    def test_workflow_suite_quality_gate_fails_short_or_unknown_success(self):
+        module = load_module()
+        root = Path(tempfile.mkdtemp())
+        original_discover = module.discover_browsers
+        original_run = module.run_sibling_workflow_payload
+        module.discover_browsers = lambda: [
+            {
+                "id": "comet",
+                "display_name": "Comet",
+                "binary_path": "/Applications/Comet.app/Contents/MacOS/Comet",
+                "user_data_dir": str(root / "comet"),
+                "profiles": [{"directory": "Default", "name": "Default", "path": str(root / "comet" / "Default")}],
+            }
+        ]
+
+        def fake_run(**kwargs):
+            return {
+                "status": "verified",
+                "provider": kwargs["provider"],
+                "mode": kwargs["mode"],
+                "browser": kwargs["browser"]["id"],
+                "profile": kwargs["source_profile"]["directory"],
+                "chat_url": "https://chatgpt.com/",
+                "inventory": {"login_state": "unknown"},
+                "output": {"status": "captured", "text_length": 7},
+            }
+
+        module.run_sibling_workflow_payload = fake_run
+        try:
+            out = StringIO()
+            with redirect_stdout(out):
+                exit_code = module.main(
+                    [
+                        "workflow-suite",
+                        "--sibling",
+                        "--browsers",
+                        "comet",
+                        "--profile",
+                        "Default",
+                        "--features",
+                        "chatgpt:deep-research",
+                        "--submit",
+                        "--continue-on-failure",
+                        "--require-login-state",
+                        "--min-output-chars",
+                        "40",
+                        "--min-research-output-chars",
+                        "500",
+                    ]
+                )
+        finally:
+            module.discover_browsers = original_discover
+            module.run_sibling_workflow_payload = original_run
+
+        payload = json.loads(out.getvalue())
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(payload["results"][0]["run_status"], "quality-failed")
+        self.assertEqual(payload["results"][0]["raw_run_status"], "verified")
+        self.assertIn("output-too-short:7<500", payload["results"][0]["quality_errors"])
+        self.assertIn("login-state-not-ready:unknown", payload["results"][0]["quality_errors"])
+        self.assertEqual(payload["summary"]["quality_failed"], 1)
 
     def test_sibling_workflow_real_session_required_includes_healing_command(self):
         module = load_module()

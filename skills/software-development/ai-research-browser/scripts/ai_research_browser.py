@@ -1053,6 +1053,7 @@ def extract_usage_lines(text: str) -> list[str]:
 def infer_login_state(text: str, provider: str) -> str:
     expanded = expand_agent_browser_eval_text(text or "")
     lowered = expanded.casefold()
+    provider_id = normalize_provider_name(provider)
     wall_markers = [
         "just a moment",
         "checking if the site connection is secure",
@@ -1065,6 +1066,15 @@ def infer_login_state(text: str, provider: str) -> str:
     visible_status = parse_visible_status(expanded, provider=provider)
     if visible_status.get("account") or visible_status.get("plan"):
         return "signed-in-or-ready"
+    if provider_id == "gemini":
+        conversation_markers = [
+            "du hast gesagt",
+            "gemini hat gesagt",
+            "conversation with gemini",
+            "unterhaltung mit gemini",
+        ]
+        if any(marker in lowered for marker in conversation_markers):
+            return "signed-in-or-ready"
     signed_out_lines = {"sign in", "log in", "login", "sign up", "anmelden", "registrieren", "create account"}
     for raw in expanded.splitlines():
         line = raw.strip().strip('"')
@@ -6891,6 +6901,33 @@ def compact_workflow_run_payload(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def workflow_result_quality_errors(
+    *,
+    row: dict[str, Any],
+    compact_payload: dict[str, Any],
+    min_output_chars: int = 0,
+    min_research_output_chars: int = 0,
+    require_login_state: bool = False,
+) -> list[str]:
+    errors: list[str] = []
+    output = compact_payload.get("output") or {}
+    inventory = compact_payload.get("inventory") or {}
+    output_length = int(output.get("text_length") or 0)
+    provider = normalize_provider_name(str(row.get("provider", "")))
+    mode = str(row.get("mode", ""))
+    required_output = int(min_output_chars or 0)
+    if mode in {"deep-research", "research", "agent"}:
+        required_output = max(required_output, int(min_research_output_chars or 0))
+    if required_output > 0 and output_length < required_output:
+        errors.append(f"output-too-short:{output_length}<{required_output}")
+    login_state = str(inventory.get("login_state") or "")
+    if require_login_state and login_state != "signed-in-or-ready":
+        errors.append(f"login-state-not-ready:{login_state or 'missing'}")
+    if provider and url_indicates_login_wall(str(compact_payload.get("chat_url") or ""), provider):
+        errors.append("provider-login-url")
+    return errors
+
+
 def compact_unbrowser_payload(payload: dict[str, Any] | None) -> dict[str, Any] | None:
     if not payload:
         return None
@@ -7304,15 +7341,27 @@ def cmd_workflow_suite(args: argparse.Namespace) -> int:
                 ok_statuses = {"opened", "submitted", "started", "verified", "captured"}
                 if args.require_started:
                     ok_statuses = {"started", "verified"}
+                quality_errors = []
+                if run_status in ok_statuses:
+                    quality_errors = workflow_result_quality_errors(
+                        row=row,
+                        compact_payload=compact_payload,
+                        min_output_chars=args.min_output_chars,
+                        min_research_output_chars=args.min_research_output_chars,
+                        require_login_state=args.require_login_state,
+                    )
+                final_run_status = "quality-failed" if quality_errors else run_status
                 results.append(
                     {
                         **row,
-                        "run_status": run_status,
-                        "ok": run_status in ok_statuses,
+                        "run_status": final_run_status,
+                        "raw_run_status": run_status,
+                        "ok": final_run_status in ok_statuses,
+                        **({"quality_errors": quality_errors} if quality_errors else {}),
                         **compact_payload,
                     }
                 )
-                if run_status not in ok_statuses and not args.continue_on_failure:
+                if final_run_status not in ok_statuses and not args.continue_on_failure:
                     break
                 break
             except WorkflowRowTimeoutError as exc:
@@ -7326,7 +7375,7 @@ def cmd_workflow_suite(args: argparse.Namespace) -> int:
                     break
                 break
 
-    blocked_statuses = {"blocked", "error", "timeout", "real-session-required", "signed-out-or-wall"}
+    blocked_statuses = {"blocked", "error", "timeout", "real-session-required", "signed-out-or-wall", "quality-failed"}
     summary = {
         "total": len(results),
         "ok": sum(1 for item in results if item.get("ok")),
@@ -7334,6 +7383,7 @@ def cmd_workflow_suite(args: argparse.Namespace) -> int:
         "submitted": sum(1 for item in results if item.get("run_status") == "submitted"),
         "blocked": sum(1 for item in results if item.get("run_status") in blocked_statuses),
         "real_session_required": sum(1 for item in results if item.get("run_status") == "real-session-required"),
+        "quality_failed": sum(1 for item in results if item.get("run_status") == "quality-failed"),
         "rate_limited": sum(1 for item in results if item.get("run_status") == "rate-limited"),
     }
     payload = {
@@ -7887,6 +7937,9 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_suite.add_argument("--submit", action="store_true")
     workflow_suite.add_argument("--confirm-start", action="store_true")
     workflow_suite.add_argument("--require-started", action="store_true", help="Fail submitted-only workflows unless they reach started/verified.")
+    workflow_suite.add_argument("--require-login-state", action="store_true", help="Fail otherwise successful rows unless the provider UI inventory proves a signed-in ready state.")
+    workflow_suite.add_argument("--min-output-chars", type=int, default=0, help="Fail otherwise successful rows whose extracted answer is shorter than this many characters.")
+    workflow_suite.add_argument("--min-research-output-chars", type=int, default=0, help="Fail otherwise successful research/deep-research/agent rows whose extracted answer is shorter than this many characters.")
     workflow_suite.add_argument("--continue-on-failure", action="store_true")
     workflow_suite.add_argument("--max-runs", type=int, default=0)
     workflow_suite.add_argument("--wait-seconds", type=int, default=30)

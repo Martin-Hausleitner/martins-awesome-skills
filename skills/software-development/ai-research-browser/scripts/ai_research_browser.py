@@ -1797,18 +1797,32 @@ def clean_workflow_response_text(text: str, *, provider: str, prompt: str = "") 
     lines = [line.strip() for line in (text or "").splitlines()]
     prompt_clean = " ".join((prompt or "").split())
     cleaned: list[str] = []
-    removed_prompt = False
     for line in lines:
         if not line:
             continue
         normalized_line = " ".join(line.split())
-        if prompt_clean and not removed_prompt and normalized_line == prompt_clean:
-            removed_prompt = True
+        if prompt_clean and normalized_line == prompt_clean:
+            continue
+        if re.fullmatch(r"E2E smoke test: .+", normalized_line, flags=re.I):
+            continue
+        if re.fullmatch(r"Use (?:ChatGPT|Gemini) Deep Research to research safe browser automation practices in 2026\. Create a concise report with sources\. If a plan appears, start the research\.", normalized_line, flags=re.I):
             continue
         if provider_id == "chatgpt":
             if re.fullmatch(r"Thought for \d+\s*(?:s|sec|seconds)", line, flags=re.I):
                 continue
-            if line in {"Thinking", "ChatGPT can make mistakes. Check important info.", "Is this conversation helpful so far?"}:
+            if line in {
+                "Thinking",
+                "ChatGPT can make mistakes. Check important info.",
+                "Is this conversation helpful so far?",
+                "Instant",
+                "Model",
+                "Voice",
+                "Ready when you are.",
+                "Where should we begin?",
+                "What’s on the agenda today?",
+            }:
+                continue
+            if re.fullmatch(r"/(?:deepresearch|deep research|agent|image|create image)", line, flags=re.I):
                 continue
         if provider_id == "gemini" and line in {"Gemini can make mistakes", "Gemini kann Fehler machen"}:
             continue
@@ -2239,13 +2253,16 @@ def wait_for_workflow_response(
             visible_text_parts.append(output_eval.stdout)
         combined = "\n".join(part for part in [snapshot.stdout, output_eval.stdout] if part)
         latest_output = extract_workflow_output_from_text(combined, provider=provider, mode=mode)
+        effective_text = clean_workflow_response_text(latest_output.get("text", ""), provider=provider, prompt=prompt)
         ignored_composer_output = looks_like_composer_only_output(
             latest_output.get("text", ""),
             provider=provider,
             prompt=prompt,
             attachment_names=attachment_names or [],
         )
-        current_text = latest_output.get("text", "")
+        if latest_output.get("text") and not effective_text:
+            ignored_composer_output = True
+        current_text = effective_text or latest_output.get("text", "")
         if ignored_composer_output:
             current_text = ""
         if current_text and current_text == last_text and latest_output.get("status") != "running":
@@ -2257,6 +2274,7 @@ def wait_for_workflow_response(
             "index": index,
             "status": latest_output.get("status"),
             "text_length": latest_output.get("text_length", 0),
+            "effective_text_length": len(effective_text),
             "completion_markers_found": latest_output.get("completion_markers_found", []),
             "running_markers_found": latest_output.get("running_markers_found", []),
         }
@@ -2265,7 +2283,7 @@ def wait_for_workflow_response(
         polls.append(poll_record)
         if latest_output.get("status") == "complete" and not ignored_composer_output:
             return {"event": "wait-for-response", "status": "complete", "polls": polls, "output": latest_output}
-        if stable_polls >= 1 and int(latest_output.get("text_length", 0)) > 0 and not ignored_composer_output:
+        if stable_polls >= 1 and len(effective_text) > 0 and not ignored_composer_output:
             return {"event": "wait-for-response", "status": "stable", "polls": polls, "output": latest_output}
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -3180,9 +3198,9 @@ def default_workflow_prompt(provider: str, mode: str) -> str:
         ("gemini", "deep-research"): "Use Gemini Deep Research to research safe browser automation practices in 2026. Create a concise report with sources. If a plan appears, start the research.",
         ("gemini", "agent"): "E2E smoke test: confirm whether Gemini Agent mode is available and respond with one short sentence.",
         ("gemini", "chat"): "E2E smoke test: answer one short sentence confirming Gemini chat is usable.",
-        ("perplexity", "research"): "E2E smoke test: use research mode for one concise note on safe browser automation with sources.",
+        ("perplexity", "research"): "E2E smoke test: use research mode to write a 5-bullet mini report on safe browser automation practices, including at least two sources and at least 600 characters.",
         ("perplexity", "chat"): "E2E smoke test: answer one short sentence confirming Perplexity chat is usable.",
-        ("grok", "research"): "E2E smoke test: use the strongest available search or research mode and write one short sentence on safe browser automation.",
+        ("grok", "research"): "E2E smoke test: use the strongest available search or research mode and write a 5-bullet mini report on safe browser automation practices with at least 600 characters.",
         ("grok", "chat"): "E2E smoke test: answer one short sentence confirming Grok chat is usable.",
         ("claude", "research"): "E2E smoke test: use Claude research or search mode and answer one sentence about safe browser automation.",
         ("claude", "artifacts"): "E2E smoke test: create a tiny artifact or explain in one sentence whether artifacts are available.",
@@ -4213,6 +4231,9 @@ def agent_browser_profile_workflow_run(
         inventory = extract_provider_inventory(provider_id, "\n".join(visible_text_parts))
         if inventory.get("login_state") == "signed-out-or-wall":
             status = "signed-out-or-wall"
+        elif should_block_typing_before_login_inventory(inventory):
+            status = "real-session-required"
+            workflow_events.append(pre_submit_login_gate_event(inventory))
         else:
             status = "opened"
             feature_result = {"clicked": False, "label": "", "attempts": []}
@@ -4420,8 +4441,13 @@ def agent_browser_profile_workflow_run(
     visible_text = "\n".join(part for part in visible_text_parts if part)
     output = extract_workflow_output_from_text(latest_response_text or visible_text, provider=provider_id, mode=spec["mode"])
     cleaned_output_text = clean_workflow_response_text(output["text"], provider=provider_id, prompt=prompt)
-    if cleaned_output_text:
-        output = {**output, "text": cleaned_output_text, "text_length": len(cleaned_output_text)}
+    if output.get("text"):
+        output = {
+            **output,
+            "text": cleaned_output_text,
+            "text_length": len(cleaned_output_text),
+            "status": "empty" if not cleaned_output_text and output.get("status") in {"captured", "complete"} else output.get("status"),
+        }
     verification = verify_visible_text(visible_text, provider=provider_id, mode=spec["mode"]) if visible_text else None
     if output["status"] == "complete" and status in {"submitted", "started"}:
         status = "verified"
@@ -4686,6 +4712,9 @@ def agent_browser_live_workflow_run(
     inventory = extract_provider_inventory(provider_id, "\n".join(visible_text_parts))
     if inventory.get("login_state") == "signed-out-or-wall":
         status = "signed-out-or-wall"
+    elif should_block_typing_before_login_inventory(inventory):
+        status = "real-session-required"
+        workflow_events.append(pre_submit_login_gate_event(inventory))
     else:
         status = "opened"
         feature_result = {"clicked": False, "label": "", "attempts": []}
@@ -4856,8 +4885,13 @@ def agent_browser_live_workflow_run(
     visible_text = "\n".join(part for part in visible_text_parts if part)
     output = extract_workflow_output_from_text(latest_response_text or visible_text, provider=provider_id, mode=spec["mode"])
     cleaned_output_text = clean_workflow_response_text(output["text"], provider=provider_id, prompt=prompt)
-    if cleaned_output_text:
-        output = {**output, "text": cleaned_output_text, "text_length": len(cleaned_output_text)}
+    if output.get("text"):
+        output = {
+            **output,
+            "text": cleaned_output_text,
+            "text_length": len(cleaned_output_text),
+            "status": "empty" if not cleaned_output_text and output.get("status") in {"captured", "complete"} else output.get("status"),
+        }
     verification = verify_visible_text(visible_text, provider=provider_id, mode=spec["mode"]) if visible_text else None
     if output["status"] == "complete" and status in {"submitted", "started"}:
         status = "verified"
@@ -5406,6 +5440,29 @@ def extract_provider_inventory_with_url_guard(provider: str, visible_text: str, 
     if url_indicates_login_wall(current_url, provider):
         return {**inventory, "login_state": "signed-out-or-wall"}
     return inventory
+
+
+def should_block_submit_before_login_inventory(inventory: dict[str, Any], *, submit: bool) -> bool:
+    if not submit:
+        return False
+    return str(inventory.get("login_state") or "") != "signed-in-or-ready"
+
+
+def should_block_typing_before_login_inventory(inventory: dict[str, Any]) -> bool:
+    return str(inventory.get("login_state") or "") != "signed-in-or-ready"
+
+
+def pre_submit_login_gate_event(inventory: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "event": "pre-typing-login-gate",
+        "blocked": True,
+        "reason": "login-not-confirmed-before-typing",
+        "login_state": str(inventory.get("login_state") or "missing"),
+        "visible_status": inventory.get("visible_status", {}),
+        "available_models": inventory.get("available_models", []),
+        "available_tools": inventory.get("available_tools", []),
+        "available_modes": inventory.get("available_modes", {}),
+    }
 
 
 def provider_session_cookie_names(provider: str) -> list[str]:

@@ -2072,6 +2072,70 @@ class AiResearchBrowserTest(unittest.TestCase):
 
         self.assertEqual(cleaned, "TOKEN_123")
 
+    def test_clean_workflow_response_removes_chatgpt_composer_only_status(self):
+        module = load_module()
+        prompt = "E2E smoke test: answer one short sentence confirming ChatGPT chat is usable."
+
+        cleaned = module.clean_workflow_response_text(
+            f"{prompt}\nInstant\nChatGPT can make mistakes. Check important info.\n{prompt}\nInstant",
+            provider="chatgpt",
+            prompt=prompt,
+        )
+
+        self.assertEqual(cleaned, "")
+
+    def test_clean_workflow_response_removes_foreign_suite_prompt_echo(self):
+        module = load_module()
+        prompt = "E2E smoke test: answer one short sentence confirming ChatGPT chat is usable."
+        echoed_research_prompt = (
+            "Use ChatGPT Deep Research to research safe browser automation practices in 2026. "
+            "Create a concise report with sources. If a plan appears, start the research."
+        )
+
+        cleaned = module.clean_workflow_response_text(
+            f"{echoed_research_prompt}\n{echoed_research_prompt}",
+            provider="chatgpt",
+            prompt=prompt,
+        )
+
+        self.assertEqual(cleaned, "")
+
+    def test_pre_submit_login_gate_blocks_unknown_or_signed_out_inventory(self):
+        module = load_module()
+
+        self.assertTrue(module.should_block_submit_before_login_inventory({"login_state": "unknown"}, submit=True))
+        self.assertTrue(module.should_block_submit_before_login_inventory({"login_state": "signed-out-or-wall"}, submit=True))
+        self.assertFalse(module.should_block_submit_before_login_inventory({"login_state": "signed-in-or-ready"}, submit=True))
+        self.assertFalse(module.should_block_submit_before_login_inventory({"login_state": "unknown"}, submit=False))
+        self.assertTrue(module.should_block_typing_before_login_inventory({"login_state": "unknown"}))
+        self.assertFalse(module.should_block_typing_before_login_inventory({"login_state": "signed-in-or-ready"}))
+
+        event = module.pre_submit_login_gate_event({"login_state": "unknown", "visible_status": {"plan": "Plus"}})
+        self.assertEqual(event["event"], "pre-typing-login-gate")
+        self.assertEqual(event["visible_status"]["plan"], "Plus")
+
+    def test_wait_for_response_does_not_verify_cleaned_empty_chatgpt_output(self):
+        module = load_module()
+        prompt = "E2E smoke test: answer one short sentence confirming ChatGPT chat is usable."
+        composer_text = f"{prompt}\nInstant\nChatGPT can make mistakes. Check important info.\n{prompt}\nInstant"
+
+        def fake_invoke(label, args):
+            return module.subprocess.CompletedProcess(["agent-browser", *args], 0, composer_text, "")
+
+        event = module.wait_for_workflow_response(
+            invoke=fake_invoke,
+            provider="chatgpt",
+            mode="chat",
+            output_selectors=[],
+            visible_text_parts=[],
+            response_timeout=0.25,
+            poll_interval=0.05,
+            prompt=prompt,
+        )
+
+        self.assertEqual(event["status"], "timeout")
+        self.assertTrue(all(poll.get("ignored_composer_output") for poll in event["polls"]))
+
     def test_wait_for_response_ignores_stable_composer_with_attachment_names(self):
         module = load_module()
         prompt = "E2E smoke test: answer one short sentence confirming ChatGPT chat is usable."
@@ -2343,6 +2407,8 @@ class AiResearchBrowserTest(unittest.TestCase):
                         "7",
                         "--attachment",
                         str(attachment),
+                        "--session-state",
+                        str(root / "session-state.json"),
                         "--close-after",
                         "--continue-on-failure",
                     ]
@@ -2468,6 +2534,8 @@ class AiResearchBrowserTest(unittest.TestCase):
                         "--no-rate-limit-wait",
                         "--rate-limit-state",
                         str(state_path),
+                        "--session-state",
+                        str(root / "session-state.json"),
                     ]
                 )
         finally:
@@ -2527,6 +2595,8 @@ class AiResearchBrowserTest(unittest.TestCase):
                         "--no-rate-limit-wait",
                         "--rate-limit-state",
                         str(state_path),
+                        "--session-state",
+                        str(root / "session-state.json"),
                     ]
                 )
         finally:
@@ -2597,6 +2667,8 @@ class AiResearchBrowserTest(unittest.TestCase):
                         "--continue-on-failure",
                         "--row-timeout-seconds",
                         "1",
+                        "--session-state",
+                        str(root / "session-state.json"),
                     ]
                 )
         finally:
@@ -2651,6 +2723,8 @@ class AiResearchBrowserTest(unittest.TestCase):
                         "claude:chat",
                         "--submit",
                         "--continue-on-failure",
+                        "--session-state",
+                        str(root / "session-state.json"),
                     ]
                 )
         finally:
@@ -2710,6 +2784,8 @@ class AiResearchBrowserTest(unittest.TestCase):
                         "40",
                         "--min-research-output-chars",
                         "500",
+                        "--session-state",
+                        str(root / "session-state.json"),
                     ]
                 )
         finally:
@@ -2991,7 +3067,7 @@ class AiResearchBrowserTest(unittest.TestCase):
         def fake_js(port, script, timeout=15.0):
             if "location.href" in script:
                 return module.subprocess.CompletedProcess(["js"], 0, "https://chatgpt.com/c/abc", "")
-            if "const text =" in script:
+            if "__AI_RESEARCH_COMPOSER_STATE__" in script:
                 return module.subprocess.CompletedProcess(["js"], 0, '{"ok":true}', "")
             return module.subprocess.CompletedProcess(["js"], 0, "ChatGPT\nIsagi yoichi\nPro\nFinal answer\nKurzfassung", "")
 
@@ -3086,7 +3162,7 @@ class AiResearchBrowserTest(unittest.TestCase):
                 return module.subprocess.CompletedProcess(["js"], 0, '{"ok":true}', "")
             if "el.click()" in script:
                 return module.subprocess.CompletedProcess(["js"], 0, '{"ok":false,"reason":"not-found"}', "")
-            return module.subprocess.CompletedProcess(["js"], 0, "ChatGPT\nIsagi yoichi\nPro\nFinal answer\nReady", "")
+            return module.subprocess.CompletedProcess(["js"], 0, "ChatGPT\nIsagi yoichi\nPro\nMessage ChatGPT\nFinal answer\nReady", "")
 
         module.run_agent_browser = fake_run
         module.run_cdp_navigate = lambda port, url, timeout=20.0: module.subprocess.CompletedProcess(["nav"], 0, url, "")
@@ -3112,12 +3188,12 @@ class AiResearchBrowserTest(unittest.TestCase):
             module.run_cdp_keypress = original_key
             module.capture_cdp_screenshot = original_capture
 
-        self.assertEqual(payload["status"], "opened")
+        self.assertEqual(payload["status"], "real-session-required")
         self.assertEqual(payload["isolation"], "live-cdp-background-tab")
-        self.assertEqual(payload["chat_url"], "https://chatgpt.com/c/live")
         self.assertFalse(any(args[:3] == ["--cdp", "9222", "tab"] for args in commands_seen))
         self.assertFalse(any("close" in args for args in commands_seen))
         self.assertTrue(Path(payload["screenshot"]).exists())
+        self.assertTrue(any(event.get("event") == "pre-typing-login-gate" for event in payload["workflow_events"]))
 
     def test_live_workflow_blocks_when_real_cdp_session_is_not_attachable(self):
         module = load_module()

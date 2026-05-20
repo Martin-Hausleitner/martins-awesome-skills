@@ -9,6 +9,7 @@ import os
 import re
 import select
 import shutil
+import signal
 import socket
 import sqlite3
 import subprocess
@@ -1805,8 +1806,15 @@ def clean_workflow_response_text(text: str, *, provider: str, prompt: str = "") 
 
 
 RATE_LIMIT_PATTERNS: list[tuple[re.Pattern[str], int]] = [
-    (re.compile(r"\b(?:rate[-\s]?limit(?:ed)?|too many requests|temporarily limited|usage limit|message limit|weekly limit|daily limit|limit reached|no .*left|nicht mehr übrig|limit erreicht|zu viele anfragen)\b", re.I), 5 * 60),
-    (re.compile(r"\b(?:try again|retry|please wait|warte|versuch(?:e)? es erneut)\b", re.I), 5 * 60),
+    (re.compile(r"\btoo many requests\b", re.I), 5 * 60),
+    (re.compile(r"\b(?:rate[-\s]?limit|usage limit|message limit|weekly limit|daily limit)\s+(?:reached|exceeded|hit|active)\b", re.I), 5 * 60),
+    (re.compile(r"\b(?:reached|exceeded|hit)\s+(?:your\s+)?(?:rate[-\s]?limit|usage limit|message limit|weekly limit|daily limit)\b", re.I), 5 * 60),
+    (re.compile(r"\b(?:you(?:'ve| have)?\s+)?(?:reached|exceeded)\s+(?:your\s+)?(?:limit|quota)\b", re.I), 5 * 60),
+    (re.compile(r"\b(?:no|zero)\s+(?:messages?|requests?|research(?: reports?)?|deep research reports?)\s+left\b", re.I), 5 * 60),
+    (re.compile(r"\b(?:temporarily limited|temporarily unavailable due to usage|quota exhausted|out of quota)\b", re.I), 5 * 60),
+    (re.compile(r"\b(?:try again|retry|please wait)\s+(?:in|after|for)\s+\d+\s*(?:seconds?|minutes?|hours?|secs?|mins?|hrs?)\b", re.I), 5 * 60),
+    (re.compile(r"\b(?:warte|versuch(?:e)? es erneut)\s+(?:in|nach|für)?\s*\d+\s*(?:sekunden?|minuten?|stunden?)\b", re.I), 5 * 60),
+    (re.compile(r"\b(?:nicht mehr übrig|limit erreicht|zu viele anfragen|kontingent ausgeschöpft|limit wird .*zurückgesetzt)\b", re.I), 5 * 60),
 ]
 
 
@@ -1982,6 +1990,30 @@ def detect_rate_limit_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
                     pass
     detected = detect_rate_limit_from_text("\n".join(fragments))
     return detected
+
+
+class WorkflowRowTimeoutError(TimeoutError):
+    pass
+
+
+def run_workflow_row_with_timeout(timeout_seconds: int | float, runner):
+    timeout_seconds = float(timeout_seconds or 0)
+    if timeout_seconds <= 0:
+        return runner()
+    if not hasattr(signal, "SIGALRM") or not hasattr(signal, "setitimer"):
+        return runner()
+    previous_handler = signal.getsignal(signal.SIGALRM)
+
+    def timeout_handler(signum, frame):
+        raise WorkflowRowTimeoutError(f"workflow row exceeded {int(timeout_seconds)}s hard timeout")
+
+    signal.signal(signal.SIGALRM, timeout_handler)
+    signal.setitimer(signal.ITIMER_REAL, timeout_seconds)
+    try:
+        return runner()
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
 
 
 def browser_eval_body_and_report_script(selectors: list[str]) -> str:
@@ -4323,7 +4355,7 @@ def agent_browser_profile_workflow_run(
 
     (paths["run_dir"] / "visible-text.txt").write_text(visible_text, encoding="utf-8")
     (paths["run_dir"] / "output.txt").write_text(output["text"], encoding="utf-8")
-    final_inventory = extract_provider_inventory(provider_id, visible_text)
+    final_inventory = extract_provider_inventory_with_url_guard(provider_id, visible_text, current_url)
     real_session_preflight = build_real_session_preflight(browser=browser, profile=profile, provider=provider_id)
     status, final_inventory = apply_real_session_requirement(status, final_inventory, real_session_preflight)
     if copy_output and status in {"verified", "captured"} and output["text"]:
@@ -4759,7 +4791,7 @@ def agent_browser_live_workflow_run(
 
     (paths["run_dir"] / "visible-text.txt").write_text(visible_text, encoding="utf-8")
     (paths["run_dir"] / "output.txt").write_text(output["text"], encoding="utf-8")
-    final_inventory = extract_provider_inventory(provider_id, visible_text)
+    final_inventory = extract_provider_inventory_with_url_guard(provider_id, visible_text, current_url)
     if allow_real_session_required:
         status, final_inventory = apply_real_session_requirement(status, final_inventory, real_session_preflight)
     healing_payload = None
@@ -5138,7 +5170,7 @@ def agent_browser_profile_followup_run(
     output = extract_workflow_output_from_text(visible_text, provider=provider_id, mode="chat")
     if output["status"] in {"running", "complete"} and status == "submitted":
         status = "verified" if output["status"] == "complete" else "started"
-    final_inventory = extract_provider_inventory(provider_id, visible_text)
+    final_inventory = extract_provider_inventory_with_url_guard(provider_id, visible_text, current_url)
     real_session_preflight = build_real_session_preflight(browser=browser, profile=profile, provider=provider_id)
     status, final_inventory = apply_real_session_requirement(status, final_inventory, real_session_preflight)
     cache_payload = None
@@ -5247,6 +5279,36 @@ def url_matches_provider(url: str, provider: str) -> bool:
         return False
     hostname = hostname.lower()
     return any(hostname == domain or hostname.endswith(f".{domain}") for domain in provider_session_domains(provider_id))
+
+
+def url_indicates_login_wall(url: str, provider: str) -> bool:
+    provider_id = normalize_provider_name(provider)
+    try:
+        parsed = urllib.parse.urlparse(url or "")
+    except Exception:
+        return False
+    hostname = (parsed.hostname or "").lower()
+    path = (parsed.path or "").casefold()
+    query = (parsed.query or "").casefold()
+    login_path = any(token in path for token in ["/login", "/signin", "/sign-in", "/logout", "/auth/login"])
+    if provider_id == "chatgpt":
+        return hostname in {"auth.openai.com", "accounts.google.com"} or login_path
+    if provider_id == "gemini":
+        return hostname in {"accounts.google.com"} or (hostname == "consent.google.com" and "signin" in query)
+    if provider_id == "claude":
+        return hostname == "claude.ai" and login_path
+    if provider_id == "grok":
+        return hostname in {"accounts.x.ai"} or login_path
+    if provider_id == "perplexity":
+        return hostname.endswith("perplexity.ai") and login_path
+    return login_path
+
+
+def extract_provider_inventory_with_url_guard(provider: str, visible_text: str, current_url: str) -> dict[str, Any]:
+    inventory = extract_provider_inventory(provider, visible_text)
+    if url_indicates_login_wall(current_url, provider):
+        return {**inventory, "login_state": "signed-out-or-wall"}
+    return inventory
 
 
 def provider_session_cookie_names(provider: str) -> list[str]:
@@ -5480,10 +5542,8 @@ def apply_real_session_requirement(
     clone_shows_login_wall = inventory.get("login_state") == "signed-out-or-wall"
     if clone_shows_login_wall and session_confidence in {"likely-logged-in", "site-data-present"}:
         return "real-session-required", inventory
-    if status in {"submitted", "started", "verified"} and clone_shows_login_wall:
-        updated_inventory = dict(inventory)
-        updated_inventory["login_state"] = "signed-in-or-ready"
-        return status, updated_inventory
+    if clone_shows_login_wall:
+        return "signed-out-or-wall", inventory
     return status, inventory
 
 
@@ -7146,30 +7206,30 @@ def cmd_workflow_suite(args: argparse.Namespace) -> int:
         retry_index = 0
         while True:
             try:
-                if args.sibling:
-                    run_payload = run_sibling_workflow_payload(
-                        browser=browser,
-                        source_profile=profile,
-                        provider=str(row["provider"]),
-                        mode=str(row["mode"]),
-                        prompt=str(row["prompt"]),
-                        artifact_root=artifact_root,
-                        submit=args.submit,
-                        confirm_start=args.confirm_start,
-                        wait_seconds=args.wait_seconds,
-                        response_timeout=args.response_timeout,
-                        copy_output=args.copy_output,
-                        timeout=args.timeout,
-                        cache_root=Path(args.cache_root).expanduser() if args.cache else None,
-                        refresh_cache=not args.no_refresh_cache,
-                        include_extension_ids=extension_ids,
-                        attachments=suite_attachments,
-                        close_after=args.close_after,
-                        headless=args.headless,
-                        refresh_sibling=args.refresh_sibling,
-                    )
-                else:
-                    run_payload = agent_browser_profile_workflow_run(
+                def execute_row_payload():
+                    if args.sibling:
+                        return run_sibling_workflow_payload(
+                            browser=browser,
+                            source_profile=profile,
+                            provider=str(row["provider"]),
+                            mode=str(row["mode"]),
+                            prompt=str(row["prompt"]),
+                            artifact_root=artifact_root,
+                            submit=args.submit,
+                            confirm_start=args.confirm_start,
+                            wait_seconds=args.wait_seconds,
+                            response_timeout=args.response_timeout,
+                            copy_output=args.copy_output,
+                            timeout=args.timeout,
+                            cache_root=Path(args.cache_root).expanduser() if args.cache else None,
+                            refresh_cache=not args.no_refresh_cache,
+                            include_extension_ids=extension_ids,
+                            attachments=suite_attachments,
+                            close_after=args.close_after,
+                            headless=args.headless,
+                            refresh_sibling=args.refresh_sibling,
+                        )
+                    return agent_browser_profile_workflow_run(
                         browser=browser,
                         profile=profile,
                         provider=str(row["provider"]),
@@ -7188,6 +7248,8 @@ def cmd_workflow_suite(args: argparse.Namespace) -> int:
                         include_extension_ids=extension_ids,
                         attachments=suite_attachments,
                     )
+
+                run_payload = run_workflow_row_with_timeout(args.row_timeout_seconds, execute_row_payload)
                 run_status = str(run_payload.get("status", "unknown"))
                 detected_rate_limit = detect_rate_limit_from_payload(run_payload) if args.rate_limit else {"limited": False}
                 if detected_rate_limit.get("limited"):
@@ -7253,18 +7315,25 @@ def cmd_workflow_suite(args: argparse.Namespace) -> int:
                 if run_status not in ok_statuses and not args.continue_on_failure:
                     break
                 break
+            except WorkflowRowTimeoutError as exc:
+                results.append({**row, "run_status": "timeout", "ok": False, "error": str(exc)})
+                if not args.continue_on_failure:
+                    break
+                break
             except Exception as exc:
                 results.append({**row, "run_status": "error", "ok": False, "error": str(exc)})
                 if not args.continue_on_failure:
                     break
                 break
 
+    blocked_statuses = {"blocked", "error", "timeout", "real-session-required", "signed-out-or-wall"}
     summary = {
         "total": len(results),
         "ok": sum(1 for item in results if item.get("ok")),
         "started_or_verified": sum(1 for item in results if item.get("run_status") in {"started", "verified"}),
         "submitted": sum(1 for item in results if item.get("run_status") == "submitted"),
-        "blocked": sum(1 for item in results if item.get("run_status") in {"blocked", "error"}),
+        "blocked": sum(1 for item in results if item.get("run_status") in blocked_statuses),
+        "real_session_required": sum(1 for item in results if item.get("run_status") == "real-session-required"),
         "rate_limited": sum(1 for item in results if item.get("run_status") == "rate-limited"),
     }
     payload = {
@@ -7822,6 +7891,7 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_suite.add_argument("--max-runs", type=int, default=0)
     workflow_suite.add_argument("--wait-seconds", type=int, default=30)
     workflow_suite.add_argument("--response-timeout", type=float, default=180.0)
+    workflow_suite.add_argument("--row-timeout-seconds", type=int, default=0, help="Hard timeout for each suite row. On timeout, the row is marked failed and the launched sibling/clone is cleaned up.")
     workflow_suite.add_argument("--copy-output", action="store_true")
     workflow_suite.add_argument("--timeout", type=float, default=90.0)
     workflow_suite.add_argument("--cache", action="store_true")

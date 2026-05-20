@@ -4,6 +4,7 @@ import importlib.util
 import json
 import sqlite3
 import tempfile
+import time
 import unittest
 from unittest import mock
 from contextlib import redirect_stdout
@@ -385,6 +386,24 @@ class AiResearchBrowserTest(unittest.TestCase):
 
         self.assertEqual(inventory["login_state"], "signed-in-or-ready")
         self.assertEqual(inventory["visible_status"]["account"], "am5150")
+
+    def test_provider_login_urls_are_hard_login_walls(self):
+        module = load_module()
+
+        self.assertTrue(module.url_indicates_login_wall("https://claude.ai/login?from=logout", "claude"))
+        self.assertTrue(module.url_indicates_login_wall("https://accounts.google.com/v3/signin/identifier", "chatgpt"))
+        self.assertFalse(module.url_indicates_login_wall("https://claude.ai/chat/abc123", "claude"))
+
+    def test_inventory_url_guard_marks_login_page_signed_out(self):
+        module = load_module()
+
+        inventory = module.extract_provider_inventory_with_url_guard(
+            "claude",
+            "Claude\nWhat can I help you with today?",
+            "https://claude.ai/login?from=logout&returnTo=%2Fnew",
+        )
+
+        self.assertEqual(inventory["login_state"], "signed-out-or-wall")
 
     def test_launch_args_include_selected_profile_headless_and_provider_url(self):
         module = load_module()
@@ -1767,6 +1786,18 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertEqual(status, "real-session-required")
         self.assertEqual(inventory["login_state"], "signed-out-or-wall")
 
+    def test_real_session_requirement_never_upgrades_login_wall_to_verified(self):
+        module = load_module()
+
+        status, inventory = module.apply_real_session_requirement(
+            "verified",
+            {"login_state": "signed-out-or-wall"},
+            {"session_evidence": {"confidence": "unknown"}},
+        )
+
+        self.assertEqual(status, "signed-out-or-wall")
+        self.assertEqual(inventory["login_state"], "signed-out-or-wall")
+
     def test_notion_export_plan_requires_explicit_external_write(self):
         module = load_module()
 
@@ -2314,11 +2345,13 @@ class AiResearchBrowserTest(unittest.TestCase):
 
         detected = module.detect_rate_limit_from_text("Rate limit reached. Please wait 5 minutes before trying again.")
         detected_de = module.detect_rate_limit_from_text("Bitte warte 7 Minuten, bevor du es erneut versuchst.")
+        safe_report = module.detect_rate_limit_from_text("Respect robots.txt, rate limits, terms of service, and applicable law.")
 
         self.assertTrue(detected["limited"])
         self.assertEqual(detected["wait_seconds"], 300)
         self.assertTrue(detected_de["limited"])
         self.assertEqual(detected_de["wait_seconds"], 420)
+        self.assertFalse(safe_report["limited"])
 
     def test_rate_limit_state_records_and_blocks_active_key(self):
         module = load_module()
@@ -2486,6 +2519,126 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertEqual(payload["results"][0]["run_status"], "rate-limited")
         self.assertIn(key, stored_state["entries"])
         self.assertEqual(stored_state["entries"][key]["learned_wait_seconds"], 120)
+
+    def test_workflow_suite_row_timeout_marks_timeout_and_continues(self):
+        module = load_module()
+        root = Path(tempfile.mkdtemp())
+        calls = []
+        original_discover = module.discover_browsers
+        original_run = module.run_sibling_workflow_payload
+        module.discover_browsers = lambda: [
+            {
+                "id": "brave",
+                "display_name": "Brave Browser",
+                "binary_path": "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+                "user_data_dir": str(root / "brave"),
+                "profiles": [{"directory": "Default", "name": "Default", "path": str(root / "brave" / "Default")}],
+            },
+            {
+                "id": "comet",
+                "display_name": "Comet",
+                "binary_path": "/Applications/Comet.app/Contents/MacOS/Comet",
+                "user_data_dir": str(root / "comet"),
+                "profiles": [{"directory": "Default", "name": "Default", "path": str(root / "comet" / "Default")}],
+            },
+        ]
+
+        def fake_run(**kwargs):
+            calls.append(kwargs["browser"]["id"])
+            if kwargs["browser"]["id"] == "brave":
+                time.sleep(3)
+            return {
+                "status": "verified",
+                "provider": kwargs["provider"],
+                "mode": kwargs["mode"],
+                "browser": kwargs["browser"]["id"],
+                "profile": kwargs["source_profile"]["directory"],
+            }
+
+        module.run_sibling_workflow_payload = fake_run
+        try:
+            out = StringIO()
+            with redirect_stdout(out):
+                exit_code = module.main(
+                    [
+                        "workflow-suite",
+                        "--sibling",
+                        "--browsers",
+                        "brave,comet",
+                        "--profile",
+                        "Default",
+                        "--providers",
+                        "chatgpt",
+                        "--features",
+                        "chatgpt:agent",
+                        "--submit",
+                        "--continue-on-failure",
+                        "--row-timeout-seconds",
+                        "1",
+                    ]
+                )
+        finally:
+            module.discover_browsers = original_discover
+            module.run_sibling_workflow_payload = original_run
+
+        payload = json.loads(out.getvalue())
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(calls, ["brave", "comet"])
+        self.assertEqual(payload["results"][0]["run_status"], "timeout")
+        self.assertEqual(payload["results"][1]["run_status"], "verified")
+        self.assertEqual(payload["summary"]["blocked"], 1)
+
+    def test_workflow_suite_summary_counts_real_session_required_as_blocked(self):
+        module = load_module()
+        root = Path(tempfile.mkdtemp())
+        original_discover = module.discover_browsers
+        original_run = module.run_sibling_workflow_payload
+        module.discover_browsers = lambda: [
+            {
+                "id": "brave",
+                "display_name": "Brave Browser",
+                "binary_path": "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+                "user_data_dir": str(root / "brave"),
+                "profiles": [{"directory": "Default", "name": "Default", "path": str(root / "brave" / "Default")}],
+            }
+        ]
+
+        def fake_run(**kwargs):
+            return {
+                "status": "real-session-required",
+                "provider": kwargs["provider"],
+                "mode": kwargs["mode"],
+                "browser": kwargs["browser"]["id"],
+                "profile": kwargs["source_profile"]["directory"],
+                "inventory": {"login_state": "signed-out-or-wall"},
+            }
+
+        module.run_sibling_workflow_payload = fake_run
+        try:
+            out = StringIO()
+            with redirect_stdout(out):
+                exit_code = module.main(
+                    [
+                        "workflow-suite",
+                        "--sibling",
+                        "--browsers",
+                        "brave",
+                        "--profile",
+                        "Default",
+                        "--features",
+                        "claude:chat",
+                        "--submit",
+                        "--continue-on-failure",
+                    ]
+                )
+        finally:
+            module.discover_browsers = original_discover
+            module.run_sibling_workflow_payload = original_run
+
+        payload = json.loads(out.getvalue())
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(payload["summary"]["blocked"], 1)
+        self.assertEqual(payload["summary"]["real_session_required"], 1)
 
     def test_sibling_workflow_real_session_required_includes_healing_command(self):
         module = load_module()

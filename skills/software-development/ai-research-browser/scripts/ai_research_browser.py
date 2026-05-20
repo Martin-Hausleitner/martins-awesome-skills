@@ -2190,6 +2190,80 @@ def submit_agent_browser_prompt(
     }
 
 
+def provider_login_heal_labels(provider: str) -> list[str]:
+    provider_id = normalize_provider_name(provider)
+    common = [
+        "Continue with Google",
+        "Sign in with Google",
+        "Mit Google fortfahren",
+        "Weiter mit Google",
+        "Log in",
+        "Login",
+        "Sign in",
+        "Anmelden",
+        "Einloggen",
+        "Continue",
+        "Weiter",
+        "Alle akzeptieren",
+        "Alle annehmen",
+        "Accept all",
+        "I agree",
+        "Agree",
+        "Zustimmen",
+    ]
+    provider_specific = {
+        "gemini": ["Mit Google anmelden", "Bei Google anmelden"],
+        "chatgpt": ["Continue with OpenAI", "Continue with SSO"],
+        "perplexity": ["Continue with email"],
+        "claude": ["Continue with Google"],
+        "grok": ["Sign in with X"],
+    }.get(provider_id, [])
+    labels: list[str] = []
+    for label in [*provider_specific, *common]:
+        if label not in labels:
+            labels.append(label)
+    return labels
+
+
+def login_heal_js_script(provider: str) -> str:
+    labels_json = json.dumps(provider_login_heal_labels(provider))
+    provider_id = normalize_provider_name(provider)
+    return (
+        "(() => {"
+        "/* __AI_RESEARCH_LOGIN_HEAL__ */"
+        f"const provider = {json.dumps(provider_id)};"
+        f"const labels = {labels_json};"
+        "const norm = (text) => String(text || '').replace(/\\s+/g, ' ').trim();"
+        "const canon = (text) => norm(text).toLowerCase();"
+        "const blocked = ['sign up', 'create account', 'start voice', 'dictation'];"
+        "const visible = (el) => {"
+        "  const rect = el.getBoundingClientRect();"
+        "  const style = window.getComputedStyle(el);"
+        "  return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';"
+        "};"
+        "const candidates = Array.from(document.querySelectorAll('button, a, [role=\"button\"], [role=\"link\"], [aria-label]'));"
+        "for (const label of labels) {"
+        "  const wanted = canon(label);"
+        "  for (const el of candidates) {"
+        "    if (!visible(el) || el.disabled || el.getAttribute('aria-disabled') === 'true') continue;"
+        "    const text = norm(el.innerText || el.textContent || el.getAttribute('aria-label') || el.getAttribute('title') || '');"
+        "    const lower = canon(text);"
+        "    if (!lower || blocked.some(item => lower.includes(item))) continue;"
+        "    if (lower !== wanted) continue;"
+        "    const rect = el.getBoundingClientRect();"
+        "    el.scrollIntoView({block:'center', inline:'center'});"
+        "    for (const type of ['pointerdown','mousedown','pointerup','mouseup','click']) {"
+        "      el.dispatchEvent(new MouseEvent(type, {bubbles:true, cancelable:true, view:window, clientX:rect.left + rect.width / 2, clientY:rect.top + rect.height / 2}));"
+        "    }"
+        "    if (typeof el.click === 'function') el.click();"
+        "    return {ok:true, provider, label:text, wanted:label, href:location.href};"
+        "  }"
+        "}"
+        "return {ok:false, provider, reason:'no-safe-login-control', href:location.href, bodyPreview:(document.body && document.body.innerText || '').slice(0, 1000)};"
+        "})()"
+    )
+
+
 def find_snapshot_ref(
     snapshot: str,
     label: str,
@@ -4519,6 +4593,159 @@ def agent_browser_live_workflow_run(
     }
 
 
+def agent_browser_live_login_heal(
+    *,
+    browser: dict[str, Any],
+    profile: dict[str, str],
+    provider: str,
+    artifact_root: Path,
+    cdp_port: int,
+    wait_seconds: int = 8,
+    timeout: float = 45.0,
+    max_steps: int = 3,
+) -> dict[str, Any]:
+    provider_id = normalize_provider_name(provider)
+    browser_id = normalize_browser_name(str(browser.get("id", "")))
+    profile_directory = str(profile.get("directory", "Default"))
+    paths = build_artifact_paths(artifact_root.expanduser(), provider=provider_id, mode="login-heal", browser=browser_id, profile=profile_directory)
+    paths["run_dir"].mkdir(parents=True, exist_ok=True)
+    commands: list[dict[str, Any]] = []
+    events: list[dict[str, Any]] = []
+    real_session_preflight = build_real_session_preflight(
+        browser=browser,
+        profile=profile,
+        provider=provider_id,
+        port=cdp_port,
+        ignore_existing_non_cdp=True,
+    )
+    if not real_session_preflight.get("can_attach"):
+        payload = {
+            "status": "blocked",
+            "browser": browser_id,
+            "profile": profile_directory,
+            "provider": provider_id,
+            "blocker": "CDP session is not attachable",
+            "real_session_preflight": real_session_preflight,
+            "commands": commands,
+            "events": events,
+            "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        }
+        write_json(paths["status_json"], payload)
+        return {**payload, "status_json": str(paths["status_json"])}
+
+    session = f"ai-login-heal-{browser_id}-{slug(profile_directory)}-{provider_id}-p{int(cdp_port)}"
+
+    def record(label: str, result: subprocess.CompletedProcess[str], args: list[str]) -> subprocess.CompletedProcess[str]:
+        commands.append(
+            {
+                "label": label,
+                "args": args,
+                "returncode": result.returncode,
+                "stdout": result.stdout[-4000:],
+                "stderr": result.stderr[-4000:],
+            }
+        )
+        return result
+
+    tab_result = record(
+        "open-login-tab",
+        run_agent_browser(["--cdp", str(cdp_port), "tab", "new", provider_url(provider_id)], session=session, timeout=min(timeout, 20.0)),
+        ["agent-browser", "--session", session, "--cdp", str(cdp_port), "tab", "new", provider_url(provider_id)],
+    )
+    if tab_result.returncode != 0:
+        nav_result = record(
+            "open-login-tab-fallback-navigate",
+            run_cdp_navigate(cdp_port, provider_url(provider_id), timeout=min(timeout, 20.0)),
+            ["cdp-navigate", str(cdp_port), provider_url(provider_id)],
+        )
+        events.append({"event": "open-login-tab-fallback-navigate", "returncode": nav_result.returncode})
+
+    time.sleep(max(0.5, min(5, wait_seconds)))
+    before_result = record(
+        "before-visible-text",
+        run_cdp_javascript(cdp_port, browser_eval_visible_text_script(), timeout=min(timeout, 15.0)),
+        ["cdp-eval", str(cdp_port), "before-visible-text"],
+    )
+    before_text = before_result.stdout
+    before_inventory = extract_provider_inventory(provider_id, before_text)
+    click_steps: list[dict[str, Any]] = []
+    after_text = before_text
+    after_inventory = before_inventory
+    click_payload: dict[str, Any] = {}
+    max_steps = max(1, min(6, int(max_steps)))
+    for step_index in range(max_steps):
+        click_result = record(
+            f"click-login-or-consent-{step_index}",
+            run_cdp_javascript(cdp_port, login_heal_js_script(provider_id), timeout=min(timeout, 15.0)),
+            ["cdp-eval", str(cdp_port), "login-heal"],
+        )
+        click_payload = parse_json_stdout(click_result.stdout)
+        click_step = {"index": step_index, "returncode": click_result.returncode, "result": click_payload}
+        click_steps.append(click_step)
+        events.append({"event": "click-login-or-consent", **click_step})
+        if not click_payload.get("ok"):
+            break
+        time.sleep(max(0.5, wait_seconds))
+        after_result = record(
+            f"after-visible-text-{step_index}",
+            run_cdp_javascript(cdp_port, browser_eval_visible_text_script(), timeout=min(timeout, 15.0)),
+            ["cdp-eval", str(cdp_port), f"after-visible-text-{step_index}"],
+        )
+        after_text = after_result.stdout
+        after_inventory = extract_provider_inventory(provider_id, after_text)
+        if after_inventory.get("login_state") == "signed-in-or-ready":
+            break
+    url_result = record(
+        "get-url",
+        run_cdp_javascript(cdp_port, "location.href", timeout=min(timeout, 8.0)),
+        ["cdp-eval", str(cdp_port), "location.href"],
+    )
+    screenshot = paths["screenshot_png"]
+    screenshot_ok = capture_cdp_screenshot(cdp_port, screenshot, timeout=min(timeout, 20.0))
+    commands.append(
+        {
+            "label": "screenshot",
+            "args": ["cdp-screenshot", str(cdp_port), str(screenshot)],
+            "returncode": 0 if screenshot_ok else 1,
+            "stdout": str(screenshot) if screenshot_ok else "",
+            "stderr": "",
+        }
+    )
+    status = "manual-action-required"
+    if after_inventory.get("login_state") == "signed-in-or-ready":
+        status = "healed"
+    elif before_inventory.get("login_state") != "signed-out-or-wall" and after_inventory.get("login_state") == before_inventory.get("login_state"):
+        status = "unchanged"
+    payload = {
+        "status": status,
+        "browser": browser_id,
+        "profile": profile_directory,
+        "profile_name": profile.get("name", ""),
+        "provider": provider_id,
+        "cdp_port": int(cdp_port),
+        "chat_url": url_result.stdout.strip(),
+        "before_inventory": before_inventory,
+        "after_inventory": after_inventory,
+        "click": click_payload,
+        "click_steps": click_steps,
+        "screenshot": str(screenshot) if screenshot.exists() else "",
+        "visible_text_path": str(paths["run_dir"] / "visible-text.txt"),
+        "real_session_preflight": real_session_preflight,
+        "healing": None if status == "healed" else build_real_session_healing_command(
+            browser=browser_id,
+            profile=profile_directory,
+            provider=provider_id,
+            sibling_user_data=default_sibling_user_data_dir(browser=browser_id, profile=profile_directory),
+        ),
+        "commands": commands,
+        "events": events,
+        "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    }
+    (paths["run_dir"] / "visible-text.txt").write_text("\n\n--- AFTER ---\n\n".join([before_text, after_text]), encoding="utf-8")
+    write_json(paths["status_json"], payload)
+    return {**payload, "status_json": str(paths["status_json"])}
+
+
 def agent_browser_profile_followup_run(
     *,
     browser: dict[str, Any],
@@ -5835,6 +6062,24 @@ def cmd_workflow_live_run(args: argparse.Namespace) -> int:
         write_json(Path(args.output).expanduser(), payload)
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0 if payload.get("status") in {"opened", "submitted", "started", "verified", "captured"} else 1
+
+
+def cmd_workflow_login_heal(args: argparse.Namespace) -> int:
+    browser, profile = resolve_workflow_browser_profile(args)
+    payload = agent_browser_live_login_heal(
+        browser=browser,
+        profile=profile,
+        provider=args.provider,
+        artifact_root=Path(args.artifact_root).expanduser(),
+        cdp_port=args.cdp_port,
+        wait_seconds=args.wait_seconds,
+        max_steps=args.max_steps,
+        timeout=args.timeout,
+    )
+    if args.output:
+        write_json(Path(args.output).expanduser(), payload)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0 if payload.get("status") == "healed" else 1
 
 
 def cmd_workflow_sibling_run(args: argparse.Namespace) -> int:
@@ -7169,6 +7414,16 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_live_run.add_argument("--no-refresh-cache", action="store_true")
     workflow_live_run.add_argument("--attachment", action="append", default=[], help="Local file/image path to attach through the provider file input when visible.")
     workflow_live_run.add_argument("--output", default="")
+    workflow_login_heal = sub.add_parser("workflow-login-heal")
+    workflow_login_heal.add_argument("--artifact-root", default="/tmp/hermes-ai-research-login-heal")
+    workflow_login_heal.add_argument("--browser", default="brave")
+    workflow_login_heal.add_argument("--profile", default="work")
+    workflow_login_heal.add_argument("--provider", choices=provider_cli_choices(), required=True)
+    workflow_login_heal.add_argument("--cdp-port", type=int, required=True, help="Attach to an already-started sibling/background browser with this CDP port.")
+    workflow_login_heal.add_argument("--wait-seconds", type=int, default=8)
+    workflow_login_heal.add_argument("--max-steps", type=int, default=3, help="Maximum safe login/consent clicks. Never fills credentials.")
+    workflow_login_heal.add_argument("--timeout", type=float, default=45.0)
+    workflow_login_heal.add_argument("--output", default="")
     workflow_sibling_run = sub.add_parser("workflow-sibling-run")
     workflow_sibling_run.add_argument("--artifact-root", default="/tmp/hermes-ai-research-sibling-workflows")
     workflow_sibling_run.add_argument("--browser", default="brave")
@@ -7423,6 +7678,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_workflow_run(args)
     if args.command == "workflow-live-run":
         return cmd_workflow_live_run(args)
+    if args.command == "workflow-login-heal":
+        return cmd_workflow_login_heal(args)
     if args.command == "workflow-sibling-run":
         return cmd_workflow_sibling_run(args)
     if args.command == "sibling-profile-init":

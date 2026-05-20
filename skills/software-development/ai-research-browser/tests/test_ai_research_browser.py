@@ -2964,6 +2964,119 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertEqual(copied, [])
         self.assertFalse(payload["clipboard"]["copied"])
 
+    def test_live_login_heal_clicks_login_and_reports_healed(self):
+        module = load_module()
+        root = Path(tempfile.mkdtemp())
+        original_preflight = module.build_real_session_preflight
+        original_run = module.run_agent_browser
+        original_js = module.run_cdp_javascript
+        original_capture = module.capture_cdp_screenshot
+        evals = []
+        module.build_real_session_preflight = lambda **kwargs: {
+            "can_attach": True,
+            "session_evidence": {"confidence": "likely-logged-in"},
+            "blockers": [],
+        }
+
+        def fake_run(args, *, session="", timeout=45.0):
+            command = ["agent-browser", *args]
+            if args[:3] == ["--cdp", "9442", "tab"]:
+                return module.subprocess.CompletedProcess(command, 0, stdout="https://chatgpt.com/\n", stderr="")
+            if "snapshot" in args:
+                return module.subprocess.CompletedProcess(command, 0, stdout='- button "Log in" [ref=e1]\n', stderr="")
+            return module.subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        def fake_js(port, script, timeout=15.0):
+            evals.append(script)
+            if "__AI_RESEARCH_LOGIN_HEAL__" in script:
+                return module.subprocess.CompletedProcess(["js"], 0, json.dumps({"ok": True, "label": "Log in"}), "")
+            if "location.href" in script:
+                return module.subprocess.CompletedProcess(["js"], 0, "https://chatgpt.com/", "")
+            if len([item for item in evals if "__AI_RESEARCH_LOGIN_HEAL__" not in item and "location.href" not in item]) < 2:
+                return module.subprocess.CompletedProcess(["js"], 0, "Log in\nSign up for free\nChatGPT", "")
+            return module.subprocess.CompletedProcess(["js"], 0, "Isagi\nPro\nMessage ChatGPT\nGPT-5", "")
+
+        module.run_agent_browser = fake_run
+        module.run_cdp_javascript = fake_js
+        module.capture_cdp_screenshot = lambda port, screenshot, timeout=20.0: (screenshot.write_bytes(b"png") or True)
+        try:
+            payload = module.agent_browser_live_login_heal(
+                browser={"id": "brave", "display_name": "Brave Browser"},
+                profile={"directory": "Default", "name": "Work"},
+                provider="chatgpt",
+                artifact_root=root / "artifacts",
+                cdp_port=9442,
+                wait_seconds=1,
+                timeout=10,
+            )
+        finally:
+            module.build_real_session_preflight = original_preflight
+            module.run_agent_browser = original_run
+            module.run_cdp_javascript = original_js
+            module.capture_cdp_screenshot = original_capture
+
+        self.assertEqual(payload["status"], "healed")
+        self.assertEqual(payload["before_inventory"]["login_state"], "signed-out-or-wall")
+        self.assertEqual(payload["after_inventory"]["login_state"], "signed-in-or-ready")
+        self.assertEqual(payload["click"]["label"], "Log in")
+        self.assertTrue(payload["screenshot"].endswith("screenshot.png"))
+
+    def test_live_login_heal_can_chain_safe_provider_sso_clicks(self):
+        module = load_module()
+        root = Path(tempfile.mkdtemp())
+        original_preflight = module.build_real_session_preflight
+        original_run = module.run_agent_browser
+        original_js = module.run_cdp_javascript
+        original_capture = module.capture_cdp_screenshot
+        texts = iter(
+            [
+                "Log in\nChatGPT",
+                json.dumps({"ok": True, "label": "Log in"}),
+                "Log in or sign up\nContinue with Google\nContinue with Apple",
+                json.dumps({"ok": True, "label": "Continue with Google"}),
+                "Isagi\nPro\nMessage ChatGPT\nGPT-5",
+            ]
+        )
+        module.build_real_session_preflight = lambda **kwargs: {"can_attach": True, "session_evidence": {"confidence": "likely-logged-in"}, "blockers": []}
+        module.run_agent_browser = lambda args, session="", timeout=45.0: module.subprocess.CompletedProcess(["agent-browser", *args], 0, "https://chatgpt.com/\n" if "tab" in args else "", "")
+
+        def fake_js(port, script, timeout=15.0):
+            if "__AI_RESEARCH_LOGIN_HEAL__" not in script and "location.href" in script:
+                return module.subprocess.CompletedProcess(["js"], 0, "https://chatgpt.com/", "")
+            return module.subprocess.CompletedProcess(["js"], 0, next(texts), "")
+
+        module.run_cdp_javascript = fake_js
+        module.capture_cdp_screenshot = lambda port, screenshot, timeout=20.0: (screenshot.write_bytes(b"png") or True)
+        try:
+            payload = module.agent_browser_live_login_heal(
+                browser={"id": "brave", "display_name": "Brave Browser"},
+                profile={"directory": "Default", "name": "Work"},
+                provider="chatgpt",
+                artifact_root=root / "artifacts",
+                cdp_port=9443,
+                wait_seconds=1,
+                timeout=10,
+                max_steps=3,
+            )
+        finally:
+            module.build_real_session_preflight = original_preflight
+            module.run_agent_browser = original_run
+            module.run_cdp_javascript = original_js
+            module.capture_cdp_screenshot = original_capture
+
+        self.assertEqual(payload["status"], "healed")
+        self.assertEqual([step["result"]["label"] for step in payload["click_steps"]], ["Log in", "Continue with Google"])
+
+    def test_login_heal_script_contains_safe_login_labels_but_no_password_fill(self):
+        module = load_module()
+
+        script = module.login_heal_js_script("chatgpt")
+
+        self.assertIn("__AI_RESEARCH_LOGIN_HEAL__", script)
+        self.assertIn("Log in", script)
+        self.assertNotIn("password", script.lower())
+        self.assertNotIn(".value =", script)
+
     def test_copy_text_to_clipboard_uses_pbcopy_without_echoing_text(self):
         module = load_module()
         calls = []

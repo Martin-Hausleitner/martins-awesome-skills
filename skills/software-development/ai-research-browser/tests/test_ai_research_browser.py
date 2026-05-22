@@ -1096,6 +1096,28 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertTrue(all("automation-target-1" in command for command in commands))
         self.assertTrue(all("targetId" in command[3] for command in commands))
         self.assertTrue(all("Requested CDP target not found" in command[3] for command in commands))
+        self.assertEqual(commands[0][-1], "0")
+
+    def test_cdp_javascript_can_request_all_contexts(self):
+        module = load_module()
+        original_detect = module.detect_cdp_endpoint
+        original_run = module.subprocess.run
+        commands = []
+        module.detect_cdp_endpoint = lambda port: {"ok": True, "base": "http://127.0.0.1:9444"}
+
+        def fake_run(command, **kwargs):
+            commands.append(command)
+            return module.subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+        module.subprocess.run = fake_run
+        try:
+            module.run_cdp_javascript(9444, "document.body.innerText", target_id="automation-target-1", all_contexts=True)
+        finally:
+            module.detect_cdp_endpoint = original_detect
+            module.subprocess.run = original_run
+
+        self.assertEqual(commands[0][-2], "automation-target-1")
+        self.assertEqual(commands[0][-1], "1")
 
     def test_chatgpt_pro_thinking_counts_as_running_and_is_cleaned(self):
         module = load_module()
@@ -3194,6 +3216,18 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertEqual(extracted["status"], "captured")
         self.assertEqual(extracted["completion_markers_found"], [])
 
+    def test_find_snapshot_ref_supports_chatgpt_tool_menuitemradio(self):
+        module = load_module()
+        snapshot = '- menuitemradio "Deep research" [checked=false, ref=e9]'
+
+        ref = module.find_snapshot_ref(
+            snapshot,
+            "Deep research",
+            roles=("button", "menuitem", "menuitemradio", "menuitemcheckbox", "option", "link"),
+        )
+
+        self.assertEqual(ref, "e9")
+
     def test_chatgpt_deep_research_prompt_instruction_final_answer_is_not_complete(self):
         module = load_module()
 
@@ -3206,6 +3240,18 @@ class AiResearchBrowserTest(unittest.TestCase):
 
         self.assertEqual(extracted["status"], "captured")
         self.assertEqual(extracted["completion_markers_found"], [])
+
+    def test_chatgpt_deep_research_stop_research_counts_as_running(self):
+        module = load_module()
+
+        extracted = module.extract_workflow_output_from_text(
+            "Live CLI OOPIF eval debugging\nExploring alternatives for GitHub code search...\nStop research",
+            provider="chatgpt",
+            mode="deep-research",
+        )
+
+        self.assertEqual(extracted["status"], "running")
+        self.assertIn("Stop research", extracted["running_markers_found"])
 
     def test_chatgpt_chat_treats_thinking_as_running(self):
         module = load_module()
@@ -3508,8 +3554,38 @@ class AiResearchBrowserTest(unittest.TestCase):
             prompt=prompt,
         )
 
-        self.assertEqual(event["status"], "timeout")
+        self.assertEqual(event["status"], "running-timeout")
+        self.assertEqual(event["reason"], "provider-still-running")
         self.assertTrue(all("requested_markers_found" not in poll for poll in event["polls"]))
+
+    def test_chatgpt_deep_research_does_not_complete_on_multiline_prompt_marker_echo_while_running(self):
+        module = load_module()
+        prompt = "Use ChatGPT Deep Research for the current OOPIF bug.\nBRAVE_CHATGPT_DEEP_RESEARCH_E2E_OK"
+        running_echo_text = "\n".join(
+            [
+                prompt,
+                "Live CLI OOPIF eval debugging",
+                "Searching for all_contexts handling...",
+                "Stop research",
+            ]
+        )
+
+        def fake_invoke(label, args):
+            return module.subprocess.CompletedProcess(["agent-browser", *args], 0, running_echo_text, "")
+
+        event = module.wait_for_workflow_response(
+            invoke=fake_invoke,
+            provider="chatgpt",
+            mode="deep-research",
+            output_selectors=[],
+            visible_text_parts=[],
+            response_timeout=0.25,
+            poll_interval=0.05,
+            prompt=prompt,
+        )
+
+        self.assertEqual(event["status"], "running-timeout")
+        self.assertTrue(all(poll.get("status") != "complete" for poll in event["polls"]))
 
     def test_wait_for_response_prefers_completed_focused_report_over_stale_page_running_text(self):
         module = load_module()
@@ -3573,8 +3649,45 @@ class AiResearchBrowserTest(unittest.TestCase):
 
     def test_wait_for_paid_response_stops_on_no_progress(self):
         module = load_module()
-        prompt = "Deep research and end with CHATGPT_DEEP_NO_PROGRESS_E2E_OK"
+        prompt = "Agent diagnostic and end with CHATGPT_AGENT_NO_PROGRESS_E2E_OK"
         static_text = "User prompt submitted, but no assistant response yet."
+        ticks = {"value": 0.0}
+        original_monotonic = module.time.monotonic
+        original_sleep = module.time.sleep
+
+        def fake_monotonic():
+            ticks["value"] += 6.0
+            return ticks["value"]
+
+        def fake_sleep(_seconds):
+            return None
+
+        def fake_invoke(label, args):
+            return module.subprocess.CompletedProcess(["agent-browser", *args], 0, static_text, "")
+
+        module.time.monotonic = fake_monotonic
+        module.time.sleep = fake_sleep
+        try:
+            event = module.wait_for_workflow_response(
+                invoke=fake_invoke,
+                provider="chatgpt",
+                mode="agent",
+                output_selectors=[],
+                visible_text_parts=[],
+                response_timeout=180,
+                poll_interval=2,
+                prompt=prompt,
+            )
+        finally:
+            module.time.monotonic = original_monotonic
+            module.time.sleep = original_sleep
+
+        self.assertEqual(event["status"], "no-progress")
+
+    def test_chatgpt_deep_research_top_level_echo_waits_for_timeout(self):
+        module = load_module()
+        prompt = "Use ChatGPT Deep Research for iframe diagnostics."
+        static_text = f"{prompt}\nDeep research\nApps\nSites\nInstant"
         ticks = {"value": 0.0}
         original_monotonic = module.time.monotonic
         original_sleep = module.time.sleep
@@ -3598,7 +3711,7 @@ class AiResearchBrowserTest(unittest.TestCase):
                 mode="deep-research",
                 output_selectors=[],
                 visible_text_parts=[],
-                response_timeout=180,
+                response_timeout=60,
                 poll_interval=2,
                 prompt=prompt,
             )
@@ -3606,7 +3719,45 @@ class AiResearchBrowserTest(unittest.TestCase):
             module.time.monotonic = original_monotonic
             module.time.sleep = original_sleep
 
-        self.assertEqual(event["status"], "no-progress")
+        self.assertEqual(event["status"], "timeout")
+
+    def test_chatgpt_deep_research_running_timeout_is_explicit(self):
+        module = load_module()
+        prompt = "Use ChatGPT Deep Research for iframe diagnostics."
+        running_text = "Live CLI OOPIF eval debugging\nSearching for menuitemradio info in ARIA/MDN...\nStop research"
+        ticks = {"value": 0.0}
+        original_monotonic = module.time.monotonic
+        original_sleep = module.time.sleep
+
+        def fake_monotonic():
+            ticks["value"] += 30.0
+            return ticks["value"]
+
+        def fake_sleep(_seconds):
+            return None
+
+        def fake_invoke(label, args):
+            return module.subprocess.CompletedProcess(["agent-browser", *args], 0, running_text, "")
+
+        module.time.monotonic = fake_monotonic
+        module.time.sleep = fake_sleep
+        try:
+            event = module.wait_for_workflow_response(
+                invoke=fake_invoke,
+                provider="chatgpt",
+                mode="deep-research",
+                output_selectors=[],
+                visible_text_parts=[],
+                response_timeout=60,
+                poll_interval=2,
+                prompt=prompt,
+            )
+        finally:
+            module.time.monotonic = original_monotonic
+            module.time.sleep = original_sleep
+
+        self.assertEqual(event["status"], "running-timeout")
+        self.assertEqual(event["reason"], "provider-still-running")
 
     def test_wait_for_paid_running_response_stops_when_progress_stalls(self):
         module = load_module()

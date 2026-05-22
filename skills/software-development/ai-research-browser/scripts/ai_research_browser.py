@@ -1391,9 +1391,17 @@ def cdp_http_base_for_port(port: int) -> str:
     return f"http://127.0.0.1:{int(port)}"
 
 
-def run_cdp_javascript(port: int, javascript: str, *, timeout: float = 15.0, target_id: str = "") -> subprocess.CompletedProcess[str]:
+def run_cdp_javascript(
+    port: int,
+    javascript: str,
+    *,
+    timeout: float = 15.0,
+    target_id: str = "",
+    all_contexts: bool = False,
+) -> subprocess.CompletedProcess[str]:
     bridge = r"""
-const [base, expression, targetId = ''] = process.argv.slice(1);
+const [base, expression, targetId = '', allContextsFlag = '0'] = process.argv.slice(1);
+const allContexts = allContextsFlag === '1';
 const targets = await (await fetch(`${base}/json/list`)).json();
 const usablePage = (item) => item.type === 'page' && !/^(about:|chrome:|chrome-extension:|devtools:)/.test(String(item.url || ''));
 const target = targetId
@@ -1404,12 +1412,16 @@ if (!target || !target.webSocketDebuggerUrl) throw new Error('No page target for
 const ws = new WebSocket(target.webSocketDebuggerUrl);
 let nextId = 0;
 const pending = new Map();
+const contexts = new Map();
 const timer = setTimeout(() => {
   console.error('Timed out waiting for CDP eval');
   process.exit(2);
 }, Math.max(1000, Math.floor(Number(process.env.HERMES_CDP_TIMEOUT_MS || '15000'))));
 ws.addEventListener('message', (event) => {
   const payload = JSON.parse(event.data);
+  if (payload.method === 'Runtime.executionContextCreated' && payload.params?.context) {
+    contexts.set(payload.params.context.id, payload.params.context);
+  }
   if (!payload.id || !pending.has(payload.id)) return;
   const {resolve, reject} = pending.get(payload.id);
   pending.delete(payload.id);
@@ -1426,24 +1438,140 @@ await new Promise((resolve, reject) => {
   ws.addEventListener('error', reject, {once: true});
 });
 await send('Runtime.enable');
-const result = await send('Runtime.evaluate', {
-  expression,
-  awaitPromise: true,
-  returnByValue: true,
-  userGesture: true,
-});
-clearTimeout(timer);
-ws.close();
-const remote = result.result || {};
-if (remote.subtype === 'error') {
-  console.error(remote.description || remote.value || 'CDP evaluation error');
-  process.exit(1);
+if (allContexts) {
+  try { await send('Page.enable'); } catch (_) {}
+  try { await send('Page.getFrameTree'); } catch (_) {}
+  await new Promise(resolve => setTimeout(resolve, 250));
 }
-const value = Object.prototype.hasOwnProperty.call(remote, 'value') ? remote.value : remote.description;
-process.stdout.write(typeof value === 'string' ? value : JSON.stringify(value ?? null));
+async function evaluate(contextId = null) {
+  const params = {
+    expression,
+    awaitPromise: true,
+    returnByValue: true,
+    userGesture: true,
+  };
+  if (contextId) params.contextId = contextId;
+  const result = await send('Runtime.evaluate', params);
+  const remote = result.result || {};
+  if (remote.subtype === 'error') {
+    throw new Error(remote.description || remote.value || 'CDP evaluation error');
+  }
+  const value = Object.prototype.hasOwnProperty.call(remote, 'value') ? remote.value : remote.description;
+  return typeof value === 'string' ? value : JSON.stringify(value ?? null);
+}
+if (!allContexts) {
+  try {
+    const value = await evaluate();
+    clearTimeout(timer);
+    ws.close();
+    process.stdout.write(value);
+  } catch (error) {
+    clearTimeout(timer);
+    ws.close();
+    console.error(error.message || String(error));
+    process.exit(1);
+  }
+} else {
+  const outputs = [];
+  const seen = new Set();
+  const pushOutput = (label, value) => {
+    const text = String(value || '').trim();
+    if (!text || seen.has(text)) return;
+    seen.add(text);
+    outputs.push(`${label}\n${text}`);
+  };
+  const contextList = [...contexts.values()]
+    .filter(ctx => ctx && ctx.id && ctx.auxData && ctx.auxData.type !== 'isolated')
+    .sort((a, b) => Number(a.id) - Number(b.id));
+  for (const ctx of contextList) {
+    try {
+      const value = String(await evaluate(ctx.id) || '').trim();
+      if (!value) continue;
+      const frameId = ctx.auxData?.frameId || '';
+      const origin = ctx.origin || ctx.name || '';
+      pushOutput(`--- FRAME ${frameId} ${origin} ---`, value);
+    } catch (_) {}
+  }
+  async function evaluateRelatedTarget(child) {
+    const childWs = new WebSocket(child.webSocketDebuggerUrl);
+    let childNextId = 0;
+    const childPending = new Map();
+    const childContexts = new Map();
+    childWs.addEventListener('message', (event) => {
+      const payload = JSON.parse(event.data);
+      if (payload.method === 'Runtime.executionContextCreated' && payload.params?.context) {
+        childContexts.set(payload.params.context.id, payload.params.context);
+      }
+      if (!payload.id || !childPending.has(payload.id)) return;
+      const {resolve, reject} = childPending.get(payload.id);
+      childPending.delete(payload.id);
+      if (payload.error) reject(new Error(JSON.stringify(payload.error)));
+      else resolve(payload.result || {});
+    });
+    function childSend(method, params = {}) {
+      const id = ++childNextId;
+      childWs.send(JSON.stringify({id, method, params}));
+      return new Promise((resolve, reject) => childPending.set(id, {resolve, reject}));
+    }
+    await new Promise((resolve, reject) => {
+      childWs.addEventListener('open', resolve, {once: true});
+      childWs.addEventListener('error', reject, {once: true});
+    });
+    await childSend('Runtime.enable');
+    await new Promise(resolve => setTimeout(resolve, 150));
+    const childOutputs = [];
+    async function childEvaluate(contextId = null) {
+      const params = {expression, awaitPromise: true, returnByValue: true, userGesture: true};
+      if (contextId) params.contextId = contextId;
+      const result = await childSend('Runtime.evaluate', params);
+      const remote = result.result || {};
+      if (remote.subtype === 'error') throw new Error(remote.description || remote.value || 'CDP child evaluation error');
+      const value = Object.prototype.hasOwnProperty.call(remote, 'value') ? remote.value : remote.description;
+      return typeof value === 'string' ? value : JSON.stringify(value ?? null);
+    }
+    for (const ctx of [...childContexts.values()].filter(ctx => ctx?.auxData?.type !== 'isolated')) {
+      try {
+        const value = String(await childEvaluate(ctx.id) || '').trim();
+        if (value) childOutputs.push({context: ctx, value});
+      } catch (_) {}
+    }
+    if (!childOutputs.length) {
+      try {
+        const value = String(await childEvaluate() || '').trim();
+        if (value) childOutputs.push({context: {}, value});
+      } catch (_) {}
+    }
+    childWs.close();
+    return childOutputs;
+  }
+  const relatedTargets = targets.filter(item =>
+    item.webSocketDebuggerUrl
+    && item.parentId === target.id
+    && ['iframe', 'page'].includes(String(item.type || ''))
+  );
+  for (const child of relatedTargets) {
+    try {
+      const childOutputs = await evaluateRelatedTarget(child);
+      for (const item of childOutputs) {
+        const frameId = item.context?.auxData?.frameId || child.id || '';
+        const origin = item.context?.origin || child.url || child.title || '';
+        pushOutput(`--- RELATED TARGET ${child.type} ${frameId} ${origin} ---`, item.value);
+      }
+    } catch (_) {}
+  }
+  if (!outputs.length) {
+    try {
+      const value = await evaluate();
+      if (value) outputs.push(String(value));
+    } catch (_) {}
+  }
+  clearTimeout(timer);
+  ws.close();
+  process.stdout.write(outputs.join('\n\n'));
+}
 """
     env = {**os.environ, "HERMES_CDP_TIMEOUT_MS": str(max(1000, int(timeout * 1000)))}
-    command = ["node", "--input-type=module", "-e", bridge, cdp_http_base_for_port(port), javascript, target_id]
+    command = ["node", "--input-type=module", "-e", bridge, cdp_http_base_for_port(port), javascript, target_id, "1" if all_contexts else "0"]
     try:
         return subprocess.run(command, capture_output=True, text=True, timeout=timeout + 2, env=env, check=False)
     except subprocess.TimeoutExpired as exc:
@@ -1726,7 +1854,7 @@ def provider_workflow_specs() -> dict[str, dict[str, dict[str, Any]]]:
                 "slash_triggers": ["/Deepresearch", "/deep research"],
                 "confirmation_triggers": ["Start research", "Create report", "Start", "Begin"],
                 "pre_confirm_wait_seconds": 45,
-                "running_markers": ["Researching", "Searching", "Creating report"],
+                "running_markers": ["Researching", "Searching", "Creating report", "Stop research"],
                 "completion_markers": ["Research complete", "Final answer", "Done"],
                 "output_selectors": ["main", "[data-testid='conversation-turn']", "article"],
             },
@@ -2719,6 +2847,7 @@ def gemini_open_completed_report_js_script() -> str:
 def browser_eval_visible_text_script(max_chars: int = 60000) -> str:
     return (
         "(() => {"
+        "/* __AI_RESEARCH_VISIBLE_TEXT__ */"
         "const parts = [];"
         "const body = document.body && (document.body.innerText || document.body.textContent) || '';"
         "const main = document.querySelector('main');"
@@ -2764,6 +2893,13 @@ def wait_for_workflow_response(
         "text_length": 0,
     }
     requested_markers = extract_requested_completion_markers(prompt)
+    def marker_completion_blocked_by_running_prompt_echo(output: dict[str, Any]) -> bool:
+        if not (output.get("status") == "running" or output.get("running_markers_found")):
+            return False
+        prompt_norm = " ".join((prompt or "").split()).lower()
+        text_norm = " ".join(str(output.get("text") or "").split()).lower()
+        return bool(prompt_norm and prompt_norm in text_norm)
+
     for index in range(max_polls):
         if normalize_provider_name(provider) == "gemini" and slug(mode or "chat") == "deep-research":
             invoke(
@@ -2787,7 +2923,7 @@ def wait_for_workflow_response(
             provider=provider,
             prompt=prompt,
         )
-        if focused_markers_found:
+        if focused_markers_found and not marker_completion_blocked_by_running_prompt_echo(focused_output):
             focused_output["status"] = "complete"
             focused_output["requested_markers_found"] = focused_markers_found
             polls.append(
@@ -2874,7 +3010,7 @@ def wait_for_workflow_response(
                 )
             except Exception:
                 pass
-        if requested_markers_found and not ignored_composer_output:
+        if requested_markers_found and not ignored_composer_output and not marker_completion_blocked_by_running_prompt_echo(latest_output):
             latest_output["status"] = "complete"
             latest_output["requested_markers_found"] = requested_markers_found
             return {"event": "wait-for-response", "status": "complete", "polls": polls, "output": latest_output}
@@ -2891,6 +3027,7 @@ def wait_for_workflow_response(
             and not latest_output.get("completion_markers_found")
             and not latest_output.get("running_markers_found")
             and not ignored_composer_output
+            and not (normalize_provider_name(provider) == "chatgpt" and slug(mode or "chat") == "deep-research")
         ):
             return {"event": "wait-for-response", "status": "no-progress", "polls": polls, "output": latest_output}
         if (
@@ -2912,6 +3049,14 @@ def wait_for_workflow_response(
         if remaining <= 0:
             break
         time.sleep(min(max(0.2, poll_interval), remaining))
+    if latest_output.get("status") == "running" or latest_output.get("running_markers_found"):
+        return {
+            "event": "wait-for-response",
+            "status": "running-timeout",
+            "reason": "provider-still-running",
+            "polls": polls,
+            "output": latest_output,
+        }
     return {"event": "wait-for-response", "status": "timeout", "polls": polls, "output": latest_output}
 
 
@@ -3270,14 +3415,14 @@ def find_snapshot_ref(
 ) -> str:
     escaped = re.escape(label)
     for role in roles:
-        pattern = rf"- {re.escape(role)} \"{escaped}\"(?:\s|\[).*?\[ref=([^\]]+)\]"
+        pattern = rf"- {re.escape(role)} \"{escaped}\"(?:\s|\[).*?\[[^\]]*ref=([^\],\s]+)[^\]]*\]"
         match = re.search(pattern, snapshot)
         if match:
             return match.group(1)
     if exact_only or label.lower() in {"start", "confirm", "allow", "begin"}:
         return ""
     for role in roles:
-        pattern = rf"- {re.escape(role)} \"[^\"]*{escaped}[^\"]*\"(?:\s|\[).*?\[ref=([^\]]+)\]"
+        pattern = rf"- {re.escape(role)} \"[^\"]*{escaped}[^\"]*\"(?:\s|\[).*?\[[^\]]*ref=([^\],\s]+)[^\]]*\]"
         match = re.search(pattern, snapshot, flags=re.I)
         if match:
             full_label_match = re.search(rf"- {re.escape(role)} \"([^\"]*{escaped}[^\"]*)\"", match.group(0), flags=re.I)
@@ -4750,7 +4895,7 @@ def click_first_agent_browser_text(
             attempts.append({"label": label, "returncode": result.returncode, "method": "js"})
             if cdp_js_click_succeeded(result):
                 return {"clicked": True, "label": label, "attempts": attempts}
-        ref = find_snapshot_ref(snapshot, str(label), roles=("button", "menuitem", "option", "link")) if snapshot else ""
+        ref = find_snapshot_ref(snapshot, str(label), roles=("button", "menuitem", "menuitemradio", "menuitemcheckbox", "option", "link")) if snapshot else ""
         if ref:
             result = invoke(f"{command_log_label}:{label}", ["click", f"@{ref}"])
             attempts.append({"label": label, "ref": ref, "returncode": result.returncode})
@@ -4992,10 +5137,21 @@ def agent_browser_profile_workflow_run(
 
     def cdp_eval_scoped(expression: str, *, label: str, extra_args: list[str]) -> subprocess.CompletedProcess[str]:
         target_id = current_target_id()
+        all_contexts = (
+            provider_id == "chatgpt"
+            and spec["mode"] == "deep-research"
+            and ("__AI_RESEARCH_VISIBLE_TEXT__" in expression or "__AI_RESEARCH_LATEST_RESPONSE__" in expression)
+        )
         try:
             if target_id:
-                return run_cdp_javascript(cdp_port, expression, timeout=command_timeout(label, extra_args), target_id=target_id)
-            return run_cdp_javascript(cdp_port, expression, timeout=command_timeout(label, extra_args))
+                return run_cdp_javascript(
+                    cdp_port,
+                    expression,
+                    timeout=command_timeout(label, extra_args),
+                    target_id=target_id,
+                    all_contexts=all_contexts,
+                )
+            return run_cdp_javascript(cdp_port, expression, timeout=command_timeout(label, extra_args), all_contexts=all_contexts)
         except TypeError:
             return run_cdp_javascript(cdp_port, expression, timeout=command_timeout(label, extra_args))
 
@@ -5028,15 +5184,15 @@ def agent_browser_profile_workflow_run(
             time.sleep(max(0, milliseconds) / 1000.0)
             result = subprocess.CompletedProcess(["sleep", str(milliseconds)], 0, f"waited {milliseconds}ms", "")
         elif extra_args[:1] == ["eval"] and len(extra_args) > 1:
-            result = run_cdp_javascript(cdp_port, extra_args[1], timeout=command_timeout(label, extra_args))
+            result = cdp_eval_scoped(extra_args[1], label=label, extra_args=extra_args)
         elif extra_args[:1] == ["snapshot"]:
-            result = run_cdp_javascript(cdp_port, browser_eval_visible_text_script(), timeout=command_timeout(label, extra_args))
+            result = cdp_eval_scoped(browser_eval_visible_text_script(), label=label, extra_args=extra_args)
         elif extra_args[:1] == ["press"] and len(extra_args) > 1 and str(extra_args[1]).lower() in {"enter", "return"}:
-            result = run_cdp_keypress(cdp_port, str(extra_args[1]), timeout=command_timeout(label, extra_args))
+            result = cdp_keypress_scoped(str(extra_args[1]), label=label, extra_args=extra_args)
         elif extra_args == ["get", "url"]:
-            result = run_cdp_javascript(cdp_port, "location.href", timeout=command_timeout(label, extra_args))
+            result = cdp_eval_scoped("location.href", label=label, extra_args=extra_args)
         elif extra_args[:1] == ["screenshot"] and len(extra_args) > 1:
-            ok = capture_cdp_screenshot(cdp_port, Path(extra_args[1]), timeout=min(timeout, 20.0))
+            ok = cdp_screenshot_scoped(Path(extra_args[1]))
             result = subprocess.CompletedProcess(["cdp-screenshot", str(cdp_port), extra_args[1]], 0 if ok else 1, str(extra_args[1]) if ok else "", "")
         elif extra_args[:1] == ["close"]:
             result = subprocess.CompletedProcess(["skip-close-temp-page"], 0, "skipped: browser process terminates in finally", "")
@@ -5359,6 +5515,8 @@ def agent_browser_profile_workflow_run(
                 workflow_events.append(response_event)
                 if response_event.get("status") in {"complete", "stable"}:
                     status = "verified"
+                elif response_event.get("status") == "running-timeout" and status in {"submitted", "started"}:
+                    status = "running-timeout"
                 elif response_event.get("output", {}).get("status") == "running" and status == "submitted":
                     status = "started"
                 elif response_event.get("status") == "timeout" and status in {"submitted", "started"}:
@@ -5553,10 +5711,21 @@ def agent_browser_live_workflow_run(
 
     def cdp_eval_scoped(expression: str, *, label: str, extra_args: list[str]) -> subprocess.CompletedProcess[str]:
         target_id = current_target_id()
+        all_contexts = (
+            provider_id == "chatgpt"
+            and spec["mode"] == "deep-research"
+            and ("__AI_RESEARCH_VISIBLE_TEXT__" in expression or "__AI_RESEARCH_LATEST_RESPONSE__" in expression)
+        )
         try:
             if target_id:
-                return run_cdp_javascript(cdp_port, expression, timeout=command_timeout(label, extra_args), target_id=target_id)
-            return run_cdp_javascript(cdp_port, expression, timeout=command_timeout(label, extra_args))
+                return run_cdp_javascript(
+                    cdp_port,
+                    expression,
+                    timeout=command_timeout(label, extra_args),
+                    target_id=target_id,
+                    all_contexts=all_contexts,
+                )
+            return run_cdp_javascript(cdp_port, expression, timeout=command_timeout(label, extra_args), all_contexts=all_contexts)
         except TypeError:
             return run_cdp_javascript(cdp_port, expression, timeout=command_timeout(label, extra_args))
 
@@ -6033,6 +6202,8 @@ def agent_browser_live_workflow_run(
             workflow_events.append(response_event)
             if response_event.get("status") in {"complete", "stable"}:
                 status = "verified"
+            elif response_event.get("status") == "running-timeout" and status in {"submitted", "started"}:
+                status = "running-timeout"
             elif response_event.get("output", {}).get("status") == "running" and status == "submitted":
                 status = "started"
             elif response_event.get("status") == "no-progress" and status in {"submitted", "started"}:

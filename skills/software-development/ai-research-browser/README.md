@@ -2,11 +2,72 @@
 
 Inventory and test AI providers across your installed browser profiles.
 
+<p align="center">
+  <img src="../../../assets/ai-research-browser-oracle-stack.svg" alt="AI Research Browser plus Oracle 0.13 architecture" width="920">
+</p>
+
+<p align="center">
+  <img src="../../../assets/ai-research-browser-proof-cards.svg" alt="Sanitized proof cards for AI Research Browser Oracle integration" width="920">
+</p>
+
 This skill gives Hermes a local CLI for discovering installed Chromium-family browsers, finding their profiles, selecting a provider such as ChatGPT, Gemini, Claude, Perplexity, or Grok, and recording evidence for each tested AI feature.
 
 It is designed for the real-world macOS setup where Brave, Comet/Komet, Chrome, and Edge may already be open with different accounts. The CLI does not blindly quit or relaunch those browsers; it reports blockers and lets you choose whether to run headful, headless, or via Computer Use.
 
 Background runs are the default automation shape: the CLI can start launchable browsers through macOS `open -g -j` so the app is opened hidden and does not steal focus from the user. For zero-window runs, add `--headless`; for provider UIs that reject headless mode, keep the hidden background launch and verify via CDP, Computer Use, or Peekaboo.
+
+## Oracle Integration
+
+Oracle is integrated as a shared assist/runner layer inside the existing CLI, not as a separate sidecar that skips safety checks.
+
+```mermaid
+flowchart LR
+  A["workflow-run"] --> B["Strategy router"]
+  B --> C["Real CDP target"]
+  B --> D["Restart plan"]
+  C --> E["Local guards"]
+  E --> F["Provider UI"]
+  E --> G["Oracle 0.13 payload"]
+  G --> H["status / reattach / show_session"]
+  F --> I["status.json + screenshot evidence"]
+  H --> I
+```
+
+The local CLI owns:
+
+- browser/profile/CDP ownership verification
+- login, account, plan, model, and feature evidence
+- screenshot capture before typing
+- paid-quota opt-in, pacing, rate-limit, CAPTCHA/challenge stop states
+- ChatGPT model safety, including Pro/Extended Pro/GPT-5.5 Pro blocking
+
+Oracle contributes:
+
+- `@steipete/oracle@0.13.0` command construction
+- browser attach via `--browser-attach-running --remote-chrome`
+- long-run browser research flags such as `--browser-research deep`
+- `status`, `reattach`, and `session --render` commands for long ChatGPT/Gemini jobs
+- attachment wait support through `--browser-attachment-timeout`
+
+The combined `workflow-run` payload includes both normal workflow state and Oracle evidence:
+
+```json
+{
+  "selected_strategy": "live-cdp",
+  "target_id": "automation-target",
+  "pre_submit_guard": {"allowed": true},
+  "oracle": {
+    "mode": "assist",
+    "reattach_available": true,
+    "commands": {
+      "status": ["npx", "-y", "@steipete/oracle@0.13.0", "status", "--hours", "72", "--browser-tabs"],
+      "show_session": ["npx", "-y", "@steipete/oracle@0.13.0", "session", "<session-id>", "--render"]
+    }
+  }
+}
+```
+
+If the local guards fail, `--oracle-mode runner` is marked `blocked-by-local-guards`; Oracle never becomes a bypass path.
 
 ## Quick Start
 
@@ -78,12 +139,12 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
   --providers chatgpt,claude,grok,perplexity \
   --browsers brave \
   --profile Work \
-  --cdp-port 9222 \
+  --cdp-port 9223 \
   --assert-login \
   --artifact-root /tmp/hermes-ai-research-agent-browser-live
 ```
 
-This is the "truth" path for Agent Browser. The target browser must already be running with `--remote-debugging-port=<port>` against the intended profile. If Agent Browser auto-connects to a signed-out clone or a different Chromium instance, the live suite records `signed-out-or-wall` and exits non-zero instead of treating the capture as usable.
+This is the "truth" path for Agent Browser. The target browser must already be running with `--remote-debugging-port=<port>` against the intended profile. Brave Work defaults to port `9223`; do not assume `9222` is Brave unless `real-session-preflight` verifies the port owner. If Agent Browser auto-connects to a signed-out clone or a different Chromium instance, the live suite records `signed-out-or-wall` and exits non-zero instead of treating the capture as usable.
 
 Before starting Gemini Deep Research or any paid workflow that must reuse the real account, run the real-session preflight:
 
@@ -96,6 +157,40 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 ```
 
 `real-session-preflight` checks whether the intended browser/profile has a reachable CDP endpoint, whether the default port is occupied by another process, whether the browser is already running without `--remote-debugging-port`, and whether local site data shows provider session evidence. If a clone run lands on a sign-in page while session evidence exists, workflow results are marked `real-session-required`; final Gemini Deep Research E2E needs a real CDP-enabled session or a dedicated minimized sibling automation profile, not a disposable clone.
+
+Recover a real browser into a CDP-enabled session only after an explicit approval step:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py browser-cdp-recover \
+  --browser brave \
+  --profile work \
+  --provider chatgpt \
+  --dry-run \
+  --output /tmp/hermes-brave-cdp-recover-plan.json
+```
+
+`browser-cdp-recover` is dry-run unless `--execute` is passed. The execute path snapshots current browser windows/tabs to `~/.cache/ai-research-browser/recovery/`, shows a macOS confirmation dialog when `--confirm-restart` is used, gracefully quits the browser, restarts it with `--remote-debugging-address=127.0.0.1` and `--remote-debugging-port=<port>`, requests session restore, verifies CDP, and records restore/focus metadata. Snapshot artifacts are redacted by default and store domains, not full tab URLs; `--include-full-tab-urls` is an explicit diagnostic opt-in.
+
+Run the safer strategy-routed workflow entrypoint:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py workflow-run \
+  --browser brave \
+  --profile work \
+  --provider chatgpt \
+  --mode chat \
+  --strategy auto \
+  --cdp-port 9223 \
+  --artifact-privacy redacted \
+  --prompt "Say READY in one short sentence." \
+  --submit \
+  --copy-output \
+  --output /tmp/hermes-chatgpt-live.json
+```
+
+`workflow-run --strategy auto` now prefers a real attachable CDP session and can return a `restart-cdp` recovery plan when `--allow-browser-restart` is set. It does not silently fall back to sibling or clone profiles; use `--allow-sibling-fallback`, `--strategy sibling`, or `--strategy diagnostic-clone` only when that is intentionally the test target. Clone results are marked as not eligible for real account baselines even if copied cookies appear signed in. Each result includes `strategy`, `selected_strategy`, `target_id`, `target_verification`, `cdp_owner_verification`, `privacy`, `pre_submit_guard`, `pacing`, `rate_limit_budget`, `account_baseline`, and restart/restore fields when applicable.
+
+Hardening defaults are conservative: command logs are redacted unless `--artifact-privacy full` is used, paid/quota-spending modes require `--allow-paid-quota-use`, pacing defaults to `conservative`, and live workflows require a dedicated automation target instead of falling back to the active tab. `--allow-active-tab-navigation-dangerously` remains a diagnostic escape hatch only. “Humanize” means slower compliant pacing and lower request pressure; the CLI does not use stealth plugins, fingerprint spoofing, CAPTCHA solving, or provider-defense bypasses.
 
 Run a sibling automation session without touching already-open Brave/Comet windows:
 
@@ -135,7 +230,7 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
   --provider perplexity \
   --browser brave \
   --profile Work \
-  --cdp-port 9222 \
+  --cdp-port 9223 \
   --prompt "Say READY in one short sentence." \
   --submit \
   --cache \
@@ -348,7 +443,7 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
   --providers chatgpt,claude,grok,perplexity \
   --browsers brave \
   --profile Work \
-  --cdp-port 9222 \
+  --cdp-port 9223 \
   --assert-login \
   --max-runs 8
 ```
@@ -357,7 +452,7 @@ Use `agent-browser-ask` when the goal is not just inventory but controlling the 
 
 For non-CDP browsers, `agent-browser-suite` creates a disposable clone of the selected Chromium profile and launches Agent Browser with `--profile <clone-user-data>` plus the browser executable. This is useful as a repeatable E2E smoke test, but it is intentionally conservative: if provider cookies are present yet the cloned/headless browser lands on a sign-in or anti-automation page, the result is recorded as `signed-out-or-wall`. Use a real running browser plus Computer Use or a CDP-enabled hidden launch for final account, plan, model, and quota proof.
 
-Use `workflow-plan` and `workflow-run` for the fixed "select feature -> send custom prompt -> confirm start -> extract output" path. These commands always use a temporary profile clone and a dedicated headless CDP process, so existing browser windows and tabs are not closed or modified.
+Use `workflow-run` for the fixed "select feature -> send custom prompt -> confirm start -> extract output" path. In `auto` mode it uses only a verified real CDP session or an explicit restart-recovery plan; it blocks rather than launching sibling/clone profiles. Use `workflow-sibling-run` or `--strategy diagnostic-clone` only for intentional non-real-session diagnostics.
 
 Use `workflow-sibling-run` for the same fixed path when the provider needs a persistent, authenticated automation profile instead of a disposable clone. It launches the real browser binary offscreen/headful against a separate sibling `--user-data-dir`, cleans only stale locks inside that sibling directory, and terminates only the launched sibling process when `--close-after` is set:
 
@@ -475,7 +570,7 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
   --profile work \
   --provider google \
   --mode deep-research \
-  --cdp-port 9222 \
+  --cdp-port 9223 \
   --prompt "Use Gemini Deep Research for this custom prompt." \
   --submit \
   --confirm-start \

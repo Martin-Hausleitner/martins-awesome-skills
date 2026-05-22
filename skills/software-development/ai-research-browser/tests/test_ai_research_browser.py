@@ -548,6 +548,51 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertEqual(payload["strategy"]["strategy"], "blocked")
         self.assertFalse(payload["sibling_fallback_allowed"])
 
+    def test_workflow_run_oracle_runner_is_blocked_by_local_guards(self):
+        module = load_module()
+        original_discover = module.discover_browsers
+        original_preflight = module.build_real_session_preflight
+        module.discover_browsers = lambda: [
+            {
+                "id": "brave",
+                "display_name": "Brave Browser",
+                "default_port": 9223,
+                "profiles": [{"directory": "Default", "name": "Work", "path": "/tmp/brave/Default"}],
+            }
+        ]
+        module.build_real_session_preflight = lambda **kwargs: {"can_attach": False, "blockers": ["cdp-endpoint-not-reachable"], "session_evidence": {}}
+        try:
+            out = StringIO()
+            with redirect_stdout(out):
+                exit_code = module.main(
+                    [
+                        "workflow-run",
+                        "--browser",
+                        "brave",
+                        "--profile",
+                        "work",
+                        "--provider",
+                        "chatgpt",
+                        "--mode",
+                        "agent",
+                        "--prompt",
+                        "Debug Oracle runner",
+                        "--oracle-mode",
+                        "runner",
+                        "--allow-paid-quota-use",
+                    ]
+                )
+        finally:
+            module.discover_browsers = original_discover
+            module.build_real_session_preflight = original_preflight
+
+        payload = json.loads(out.getvalue())
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(payload["status"], "blocked")
+        self.assertEqual(payload["oracle"]["mode"], "runner")
+        self.assertEqual(payload["oracle"]["runner_status"], "blocked-by-local-guards")
+        self.assertTrue(payload["oracle"]["reattach_available"])
+
     def test_workflow_run_sibling_fallback_requires_explicit_allow_flag(self):
         module = load_module()
         original_discover = module.discover_browsers
@@ -649,7 +694,7 @@ class AiResearchBrowserTest(unittest.TestCase):
         original_main_args = module.browser_main_process_args
         original_session = module.provider_session_evidence
         original_pid_args = getattr(module, "process_args_for_pid", None)
-        user_data = "/Users/mh/Library/Application Support/BraveSoftware/Brave-Browser"
+        user_data = "/Users/example/Library/Application Support/BraveSoftware/Brave-Browser"
         module.detect_cdp_endpoint = lambda port: {"ok": True, "base": "http://127.0.0.1:9223", "version": {"Browser": "Chrome/148"}, "attempts": []}
         module.lsof_port_owner = lambda port: {"port": port, "listening": True, "command": "Brave\\x20", "pid": "27886", "raw": ""}
         module.browser_main_process_args = lambda browser: [
@@ -1428,6 +1473,92 @@ class AiResearchBrowserTest(unittest.TestCase):
             )
         )
 
+    def test_live_workflow_blocks_slash_fallback_before_pre_submit_guard(self):
+        module = load_module()
+        root = Path(tempfile.mkdtemp())
+        original_preflight = module.build_real_session_preflight
+        original_run = module.run_agent_browser
+        original_nav = module.run_cdp_navigate
+        original_js = module.run_cdp_javascript
+        original_keypress = module.run_cdp_keypress
+        original_capture = module.capture_cdp_screenshot
+        original_sleep = module.time.sleep
+        original_create_target = module.run_cdp_create_automation_target
+        original_fill = module.fill_agent_browser_composer
+        original_click_text = module.click_first_agent_browser_text
+        fill_calls = []
+
+        module.build_real_session_preflight = lambda **kwargs: {
+            "can_attach": True,
+            "session_evidence": {"confidence": "likely-logged-in"},
+            "blockers": [],
+        }
+        module.run_cdp_create_automation_target = lambda port, url, timeout=15.0: module.subprocess.CompletedProcess(
+            ["target"],
+            0,
+            '{"targetId":"automation-target-1"}',
+            "",
+        )
+        module.run_cdp_navigate = lambda port, url, timeout=20.0, target_id="": module.subprocess.CompletedProcess(["nav"], 0, url, "")
+        module.run_cdp_keypress = lambda port, key, timeout=10.0, target_id="": module.subprocess.CompletedProcess(["key"], 0, "", "")
+        module.capture_cdp_screenshot = lambda port, screenshot, timeout=20.0, target_id="": (screenshot.write_bytes(b"png") or True)
+        module.time.sleep = lambda seconds: None
+
+        def fake_run(args, *, session="", timeout=45.0):
+            return module.subprocess.CompletedProcess(["agent-browser", *args], 0, stdout="", stderr="")
+
+        def fake_js(port, script, timeout=15.0, target_id="", all_contexts=False):
+            if "location.href" in script:
+                return module.subprocess.CompletedProcess(["js"], 0, "https://chatgpt.com/c/live", "")
+            return module.subprocess.CompletedProcess(
+                ["js"],
+                0,
+                "ChatGPT\nSigned in as work@example.test\nPlus plan\nModel: GPT-5.5 Pro\nMessage ChatGPT",
+                "",
+            )
+
+        def fail_fill(*args, **kwargs):
+            fill_calls.append(kwargs.get("label", ""))
+            raise AssertionError("slash and prompt fills must wait for a passing pre-submit guard")
+
+        module.run_agent_browser = fake_run
+        module.run_cdp_javascript = fake_js
+        module.fill_agent_browser_composer = fail_fill
+        module.click_first_agent_browser_text = lambda *args, **kwargs: {"clicked": False, "label": "", "attempts": []}
+        try:
+            payload = module.agent_browser_live_workflow_run(
+                browser={"id": "brave", "display_name": "Brave Browser"},
+                profile={"directory": "Default", "name": "Automation"},
+                provider="chatgpt",
+                mode="deep-research",
+                prompt="Do not type this",
+                artifact_root=root / "artifacts",
+                cdp_port=9336,
+                submit=False,
+                allow_paid_quota_use=True,
+            )
+        finally:
+            module.build_real_session_preflight = original_preflight
+            module.run_agent_browser = original_run
+            module.run_cdp_navigate = original_nav
+            module.run_cdp_javascript = original_js
+            module.run_cdp_keypress = original_keypress
+            module.capture_cdp_screenshot = original_capture
+            module.time.sleep = original_sleep
+            module.run_cdp_create_automation_target = original_create_target
+            module.fill_agent_browser_composer = original_fill
+            module.click_first_agent_browser_text = original_click_text
+
+        self.assertEqual(payload["status"], "model-safety-blocked")
+        self.assertFalse(fill_calls)
+        self.assertIn("chatgpt-pro-model-blocked", payload["pre_submit_guard"]["errors"])
+        self.assertTrue(
+            any(
+                event.get("event") == "slash-feature" and event.get("skipped") == "pre-submit-guard-blocked"
+                for event in payload["workflow_events"]
+            )
+        )
+
     def test_pacing_budget_blocks_excess_paid_runs(self):
         module = load_module()
         state = {"version": 1, "entries": {}, "history": []}
@@ -1809,6 +1940,127 @@ class AiResearchBrowserTest(unittest.TestCase):
 
         self.assertEqual(inventory["login_state"], "signed-out-or-wall")
 
+    def test_extract_provider_inventory_records_active_chatgpt_model_and_mode(self):
+        module = load_module()
+
+        inventory = module.extract_provider_inventory(
+            "chatgpt",
+            "ChatGPT\nSigned in as work@example.test\nPlus plan\nModel: GPT-5.5 Thinking\nDeep research\nAgent\n",
+        )
+
+        self.assertEqual(inventory["active_model"], "GPT-5.5 Thinking")
+        self.assertEqual(inventory["active_mode"], "thinking")
+        self.assertEqual(inventory["visible_status"]["model"], "GPT-5.5 Thinking")
+
+    def test_extract_provider_inventory_does_not_treat_chatgpt_plus_as_model(self):
+        module = load_module()
+
+        inventory = module.extract_provider_inventory(
+            "chatgpt",
+            "ChatGPT\nChat GPT Plus\nPro plan\nDeep research\nAgent\n",
+        )
+
+        self.assertEqual(inventory["active_model"], "")
+        self.assertEqual(inventory["visible_status"]["model"], "")
+
+    def test_chatgpt_model_safety_blocks_visible_extended_pro_model(self):
+        module = load_module()
+        inventory = module.extract_provider_inventory(
+            "chatgpt",
+            "ChatGPT\nSigned in as work@example.test\nPlus plan\nExtended Pro\nMessage ChatGPT\n",
+        )
+
+        guard = module.provider_typing_guard(
+            inventory,
+            provider="chatgpt",
+            mode="chat",
+            requested_model=inventory["active_model"],
+            screenshot_path="/tmp/chatgpt.png",
+            allow_paid_quota_use=True,
+        )
+
+        self.assertEqual(inventory["active_model"], "Extended Pro")
+        self.assertFalse(guard["allowed"])
+        self.assertIn("chatgpt-pro-model-blocked", guard["errors"])
+
+    def test_chatgpt_model_safety_blocks_visible_pro_model_label_in_model_context(self):
+        module = load_module()
+        inventory = module.extract_provider_inventory(
+            "chatgpt",
+            "ChatGPT\nSigned in as work@example.test\nPlus plan\nSelected model\nPro\nMessage ChatGPT\n",
+        )
+
+        guard = module.provider_typing_guard(
+            inventory,
+            provider="chatgpt",
+            mode="chat",
+            requested_model=inventory["active_model"],
+            screenshot_path="/tmp/chatgpt.png",
+            allow_paid_quota_use=True,
+        )
+
+        self.assertEqual(inventory["active_model"], "Pro")
+        self.assertFalse(guard["allowed"])
+        self.assertIn("chatgpt-pro-model-blocked", guard["errors"])
+
+    def test_chatgpt_model_safety_does_not_treat_plan_labels_as_active_model(self):
+        module = load_module()
+        inventory = module.extract_provider_inventory(
+            "chatgpt",
+            "ChatGPT\nSigned in as work@example.test\nChatGPT Plus\nChatGPT Pro plan\nMessage ChatGPT\n",
+        )
+
+        guard = module.provider_typing_guard(
+            inventory,
+            provider="chatgpt",
+            mode="chat",
+            requested_model="",
+            screenshot_path="/tmp/chatgpt.png",
+            allow_paid_quota_use=True,
+        )
+
+        self.assertEqual(inventory["active_model"], "")
+        self.assertNotIn("chatgpt-pro-model-blocked", guard["errors"])
+
+    def test_chatgpt_model_safety_blocks_pro_model_before_typing(self):
+        module = load_module()
+        inventory = module.extract_provider_inventory(
+            "chatgpt",
+            "ChatGPT\nSigned in as work@example.test\nPro plan\nModel: GPT-5.5 Pro\nDeep research\nAgent\n",
+        )
+
+        guard = module.provider_typing_guard(
+            inventory,
+            provider="chatgpt",
+            mode="deep-research",
+            requested_model="GPT-5.5 Pro",
+            screenshot_path="/tmp/chatgpt.png",
+            allow_paid_quota_use=True,
+        )
+
+        self.assertFalse(guard["allowed"])
+        self.assertIn("chatgpt-pro-model-blocked", guard["errors"])
+        self.assertEqual(guard["model_safety"]["status"], "blocked")
+
+    def test_chatgpt_model_safety_allows_thinking_agent_and_deep_research(self):
+        module = load_module()
+        inventory = module.extract_provider_inventory(
+            "chatgpt",
+            "ChatGPT\nSigned in as work@example.test\nPlus plan\nModel: GPT-5.5 Thinking\nDeep research\nAgent\n",
+        )
+
+        for mode in ["thinking", "agent", "deep-research"]:
+            guard = module.provider_typing_guard(
+                inventory,
+                provider="chatgpt",
+                mode=mode,
+                requested_model="GPT-5.5 Thinking",
+                screenshot_path="/tmp/chatgpt.png",
+                allow_paid_quota_use=True,
+            )
+            self.assertNotIn("chatgpt-pro-model-blocked", guard["errors"])
+            self.assertEqual(guard["model_safety"]["status"], "allowed")
+
     def test_extract_provider_inventory_classifies_cloudflare_wall_as_not_ready(self):
         module = load_module()
 
@@ -1842,14 +2094,21 @@ class AiResearchBrowserTest(unittest.TestCase):
             prompt="Review this E2E probe",
             files=["skills/software-development/ai-research-browser/**"],
             cdp_port=9224,
-            deep_research=True,
+            research_depth="deep",
+            model="gpt-5.5-instant",
+            browser_attachment_timeout=240,
         )
 
+        self.assertEqual(plan["package"], "@steipete/oracle@0.13.0")
         self.assertIn("--browser-attach-running", plan["consult_dry_run"])
         self.assertIn("--remote-chrome", plan["consult_dry_run"])
         self.assertIn("127.0.0.1:9224", plan["consult_dry_run"])
         self.assertIn("--browser-research", plan["consult_dry_run"])
-        self.assertEqual(plan["status"][:3], ["npx", "-y", "@steipete/oracle"])
+        self.assertIn("gpt-5.5-instant", plan["consult_dry_run"])
+        self.assertIn("--browser-attachment-timeout", plan["consult_dry_run"])
+        self.assertIn("240", plan["consult_dry_run"])
+        self.assertEqual(plan["status"][:3], ["npx", "-y", "@steipete/oracle@0.13.0"])
+        self.assertIn("reattach", plan)
         self.assertIn("--render", plan["show_session"])
 
     def test_cmd_oracle_plan_outputs_json_commands(self):
@@ -1857,11 +2116,175 @@ class AiResearchBrowserTest(unittest.TestCase):
 
         out = StringIO()
         with redirect_stdout(out):
-            exit_code = module.main(["oracle-plan", "-p", "Check implementation", "--cdp-port", "9224"])
+            exit_code = module.main(
+                [
+                    "oracle-plan",
+                    "-p",
+                    "Check implementation",
+                    "--remote-chrome",
+                    "127.0.0.1:9224",
+                    "--research-depth",
+                    "max",
+                    "--model",
+                    "gpt-5.5-instant",
+                ]
+            )
 
         payload = json.loads(out.getvalue())
         self.assertEqual(exit_code, 0)
         self.assertIn("--browser-attach-running", payload["consult_dry_run"])
+        self.assertIn("max", payload["consult_dry_run"])
+        self.assertIn("gpt-5.5-instant", payload["consult_dry_run"])
+
+    def test_build_oracle_plan_uses_provider_mode_safe_defaults(self):
+        module = load_module()
+
+        thinking = module.build_oracle_plan(prompt="Debug", provider="chatgpt", mode="thinking", cdp_port=9223)
+        agent = module.build_oracle_plan(prompt="Debug", provider="chatgpt", mode="agent", cdp_port=9223)
+        gemini = module.build_oracle_plan(prompt="Debug", provider="gemini", mode="deep-research", cdp_port=9223)
+
+        self.assertIn("GPT-5.5 Thinking", thinking["consult_dry_run"])
+        self.assertNotIn("gpt-5.5 pro", " ".join(thinking["consult_dry_run"]).lower())
+        self.assertIn("--browser-research", agent["consult_dry_run"])
+        self.assertIn("deep", agent["consult_dry_run"])
+        self.assertEqual(gemini["execution_policy"], "assist-only")
+
+    def test_oracle_assist_payload_redacts_prompt_and_exposes_commands(self):
+        module = load_module()
+        plan = module.build_oracle_assist_payload(
+            prompt="secret prompt https://chatgpt.com/c/private",
+            provider="chatgpt",
+            mode="agent",
+            cdp_port=9223,
+            artifact_privacy="redacted",
+        )
+        serialized = json.dumps(plan)
+
+        self.assertEqual(plan["mode"], "assist")
+        self.assertTrue(plan["reattach_available"])
+        self.assertIn("commands", plan)
+        self.assertNotIn("secret prompt", serialized)
+        self.assertNotIn("chatgpt.com/c/private", serialized)
+
+    def test_cmd_oracle_e2e_smoke_requires_opt_in(self):
+        module = load_module()
+
+        out = StringIO()
+        with mock.patch.dict("os.environ", {}, clear=True), redirect_stdout(out):
+            exit_code = module.main(["oracle-e2e-smoke", "--browser", "brave", "--profile", "work", "--provider", "chatgpt", "--mode", "thinking"])
+
+        payload = json.loads(out.getvalue())
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(payload["status"], "blocked")
+        self.assertIn("AI_RESEARCH_BROWSER_E2E=1", payload["blocker"])
+        self.assertFalse(payload["safety"]["pro_model_allowed"])
+
+    def test_cloakbrowser_plan_redacts_proxy_file(self):
+        module = load_module()
+        root = Path(tempfile.mkdtemp())
+        proxy_file = root / "proxies.txt"
+        proxy_file.write_text("203.0.113.10:5432:secret-user:secret-pass\n", encoding="utf-8")
+        proxy_file.chmod(0o600)
+
+        plan = module.build_cloakbrowser_preflight_plan(
+            manager_url="http://127.0.0.1:18080",
+            proxy_file=str(proxy_file),
+        )
+
+        serialized = json.dumps(plan)
+        self.assertTrue(plan["proxy_file"]["ok"])
+        self.assertEqual(plan["proxy_file"]["count"], 1)
+        self.assertNotIn("203.0.113.10", serialized)
+        self.assertNotIn("secret-user", serialized)
+        self.assertNotIn("secret-pass", serialized)
+        self.assertIn("<redacted-proxy>", serialized)
+
+    def test_cloakbrowser_proxy_file_requires_private_permissions(self):
+        module = load_module()
+        root = Path(tempfile.mkdtemp())
+        proxy_file = root / "proxies.txt"
+        proxy_file.write_text("203.0.113.10:5432:secret-user:secret-pass\n", encoding="utf-8")
+        proxy_file.chmod(0o644)
+
+        result = module.inspect_cloakbrowser_proxy_file(str(proxy_file))
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "insecure-permissions")
+        self.assertNotIn("secret-user", json.dumps(result))
+
+    def test_cmd_cloakbrowser_manager_plan_outputs_docker_health_commands(self):
+        module = load_module()
+
+        out = StringIO()
+        with redirect_stdout(out):
+            exit_code = module.main(["cloakbrowser-manager-plan", "--port", "18080"])
+
+        payload = json.loads(out.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["backend"], "cloakbrowser")
+        self.assertIn("cloakhq/cloakbrowser-manager", payload["commands"]["docker_run"])
+        self.assertEqual(payload["health_url"], "http://127.0.0.1:18080/api/status")
+
+    def test_cmd_cloakbrowser_profile_plan_blocks_without_verified_baseline(self):
+        module = load_module()
+
+        out = StringIO()
+        with redirect_stdout(out):
+            exit_code = module.main(["cloakbrowser-profile-plan", "--profile-name", "chatgpt-work", "--provider", "chatgpt"])
+
+        payload = json.loads(out.getvalue())
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(payload["status"], "blocked")
+        self.assertIn("verified account baseline", payload["blocker"])
+
+    def test_workflow_run_cloakbrowser_blocks_without_account_baseline(self):
+        module = load_module()
+
+        out = StringIO()
+        with redirect_stdout(out):
+            exit_code = module.main(
+                [
+                    "workflow-run",
+                    "--backend",
+                    "cloakbrowser",
+                    "--provider",
+                    "chatgpt",
+                    "--prompt",
+                    "smoke",
+                ]
+            )
+
+        payload = json.loads(out.getvalue())
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(payload["status"], "blocked")
+        self.assertIn("--account-baseline", payload["blocker"])
+
+    def test_workflow_run_cloakbrowser_blocks_without_cdp_port_after_baseline(self):
+        module = load_module()
+        root = Path(tempfile.mkdtemp())
+        baseline = root / "baseline.json"
+        baseline.write_text(json.dumps({"verified": True, "login_state": "signed-in-or-ready"}), encoding="utf-8")
+
+        out = StringIO()
+        with redirect_stdout(out):
+            exit_code = module.main(
+                [
+                    "workflow-run",
+                    "--backend",
+                    "cloakbrowser",
+                    "--account-baseline",
+                    str(baseline),
+                    "--provider",
+                    "chatgpt",
+                    "--prompt",
+                    "smoke",
+                ]
+            )
+
+        payload = json.loads(out.getvalue())
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(payload["status"], "blocked")
+        self.assertIn("--cdp-port", payload["blocker"])
 
     def test_cmd_e2e_probe_parses_captured_text_file(self):
         module = load_module()
@@ -2608,11 +3031,13 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertIn("playwright-cdp", backends)
         self.assertIn("computer-use", backends)
         self.assertIn("oracle", backends)
+        self.assertIn("cloakbrowser", backends)
         self.assertIn("openai-cua", backends)
         self.assertIn("unbrowser-local", backends)
         self.assertIn("hyperbrowser", backends)
         self.assertEqual(backends["playwright-cdp"]["scope"], "local")
         self.assertIn("@steipete/oracle", backends["oracle"]["aliases"])
+        self.assertEqual(backends["cloakbrowser"]["scope"], "isolated-cdp-profile")
         self.assertIn("@unbrowser/local", backends["unbrowser-local"]["aliases"])
         self.assertIn("Operator", " ".join(backends["openai-cua"]["aliases"]))
 
@@ -4998,6 +5423,84 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertFalse(any("close" in args for args in commands_seen))
         self.assertTrue(Path(payload["screenshot"]).exists())
         self.assertTrue(any(event.get("event") == "pre-typing-login-gate" for event in payload["workflow_events"]))
+
+    def test_live_workflow_does_not_type_slash_feature_before_pre_submit_guard(self):
+        module = load_module()
+        root = Path(tempfile.mkdtemp())
+        scripts_seen: list[str] = []
+
+        original_preflight = module.build_real_session_preflight
+        original_run = module.run_agent_browser
+        original_nav = module.run_cdp_navigate
+        original_js = module.run_cdp_javascript
+        original_capture = module.capture_cdp_screenshot
+        original_create_target = module.run_cdp_create_automation_target
+        original_sleep = module.time.sleep
+        module.build_real_session_preflight = lambda **kwargs: {
+            "can_attach": True,
+            "session_evidence": {"confidence": "likely-logged-in"},
+            "blockers": [],
+        }
+
+        visible = "ChatGPT\nSigned in as work@example.test\nPlus plan\nExtended Pro\nDeep research\nAgent\nMessage ChatGPT\n"
+
+        def fake_run(args, *, session="", timeout=45.0):
+            command = ["agent-browser", *args]
+            if "snapshot" in args:
+                return module.subprocess.CompletedProcess(command, 0, stdout='- textbox "Message ChatGPT" [ref=e1]\n', stderr="")
+            return module.subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        def fake_js(port, script, timeout=15.0):
+            scripts_seen.append(script)
+            if "location.href" in script:
+                return module.subprocess.CompletedProcess(["js"], 0, "https://chatgpt.com/c/live", "")
+            if "const wanted =" in script:
+                return module.subprocess.CompletedProcess(["js"], 0, '{"ok":false,"reason":"not-found"}', "")
+            return module.subprocess.CompletedProcess(["js"], 0, visible, "")
+
+        module.run_agent_browser = fake_run
+        module.run_cdp_navigate = lambda port, url, timeout=20.0: module.subprocess.CompletedProcess(["nav"], 0, url, "")
+        module.run_cdp_javascript = fake_js
+        module.capture_cdp_screenshot = lambda port, screenshot, timeout=20.0: (screenshot.write_bytes(b"png") or True)
+        module.run_cdp_create_automation_target = lambda port, url, timeout=15.0: module.subprocess.CompletedProcess(
+            ["target"],
+            0,
+            '{"targetId":"automation-target-1"}',
+            "",
+        )
+        module.time.sleep = lambda seconds: None
+        try:
+            payload = module.agent_browser_live_workflow_run(
+                browser={"id": "brave", "display_name": "Brave Browser"},
+                profile={"directory": "Default", "name": "Work"},
+                provider="chatgpt",
+                mode="deep-research",
+                prompt="Research why slash fallback must be guard-gated.",
+                artifact_root=root / "artifacts",
+                cdp_port=9223,
+                submit=True,
+                wait_seconds=1,
+                response_timeout=1,
+                allow_paid_quota_use=True,
+            )
+        finally:
+            module.build_real_session_preflight = original_preflight
+            module.run_agent_browser = original_run
+            module.run_cdp_navigate = original_nav
+            module.run_cdp_javascript = original_js
+            module.capture_cdp_screenshot = original_capture
+            module.run_cdp_create_automation_target = original_create_target
+            module.time.sleep = original_sleep
+
+        self.assertEqual(payload["status"], "model-safety-blocked")
+        self.assertIn("chatgpt-pro-model-blocked", payload["pre_submit_guard"]["errors"])
+        self.assertFalse(any("/Deepresearch" in script or "/deep research" in script for script in scripts_seen))
+        self.assertTrue(
+            any(
+                event.get("event") == "slash-feature" and event.get("skipped") == "pre-submit-guard-blocked"
+                for event in payload["workflow_events"]
+            )
+        )
 
     def test_live_workflow_blocks_when_real_cdp_session_is_not_attachable(self):
         module = load_module()

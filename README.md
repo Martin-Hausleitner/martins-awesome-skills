@@ -30,6 +30,7 @@ This repo is intentionally **not** a dump of a private OpenClaw/Hermes setup. It
 - [What's Inside](#-whats-inside)
 - [Skill Cards](#-skill-cards)
 - [Quick Start](#-quick-start)
+- [Featured: AI Research Browser + Oracle](#-featured-ai-research-browser--oracle)
 - [Featured: Telegram Approval Gate](#-featured-telegram-approval-gate)
 - [New Public-Safe Additions](#-new-public-safe-additions)
 - [Skill Layout](#-skill-layout)
@@ -101,6 +102,54 @@ mkdir -p ~/.openclaw/workspace/skills
 cp -R skills/telegram-channel-poster ~/.openclaw/workspace/skills/
 ```
 
+## 🧠 Featured: AI Research Browser + Oracle
+
+`ai-research-browser` is the repo's most advanced browser-automation skill. It coordinates real Brave/Comet/Chrome CDP sessions, provider login/plan/model guards, ChatGPT/Gemini Deep Research workflows, rate-limit-safe pacing, and Oracle 0.13 long-run supervision.
+
+<p align="center">
+  <img src="assets/ai-research-browser-oracle-stack.svg" alt="AI Research Browser plus Oracle 0.13 architecture" width="920">
+</p>
+
+<p align="center">
+  <img src="assets/ai-research-browser-proof-cards.svg" alt="Sanitized proof cards for Oracle and AI Research Browser integration" width="920">
+</p>
+
+Why it matters:
+
+- **Real-session first:** `workflow-run --strategy auto` prefers verified live CDP and refuses silent clone/sibling fallback for real ChatGPT/Gemini E2E.
+- **Oracle as supervisor:** `--oracle-mode assist|runner` adds `@steipete/oracle@0.13.0` status, reattach, and session-render commands to the same workflow payload.
+- **Local guards stay in charge:** Oracle cannot bypass login, account, plan, feature, screenshot, paid-quota, challenge, rate-limit, or ChatGPT model-safety checks.
+- **Cost safety:** ChatGPT Pro/Extended Pro/GPT-5.5 Pro are blocked before typing in automated tests; non-Pro Thinking, Agent, and Deep Research paths are preferred.
+- **Evidence-first:** runs write `status.json`, screenshot paths, target ids, redacted command logs, and Oracle reattach instructions.
+
+Try a public-safe Oracle plan:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py oracle-plan \
+  --prompt "Review the current failed E2E browser workflow." \
+  --provider chatgpt \
+  --mode deep-research \
+  --remote-chrome 127.0.0.1:9223 \
+  --research-depth deep \
+  --browser-attachment-timeout 240
+```
+
+Run the guarded integration path:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py workflow-run \
+  --browser brave \
+  --profile work \
+  --provider chatgpt \
+  --mode agent \
+  --strategy auto \
+  --oracle-mode assist \
+  --allow-paid-quota-use \
+  --prompt "Debug why Oracle reattach should supervise long browser research."
+```
+
+Read the full skill docs: [AI Research Browser](skills/software-development/ai-research-browser/README.md).
+
 ## 💬 Featured: Telegram Approval Gate
 
 `telegram-approval-gate` makes external communication safer. Before an agent sends a message, post, reply, or email, it routes the final draft through Telegram buttons:
@@ -142,6 +191,15 @@ Then fill the copied private file with your own values. Do not commit it.
 - `notion`: use the Notion API with placeholder-only examples and narrow permissions.
 - `templates/SKILL_TEMPLATE.md`: a safe starting point for new skills.
 - `.github/workflows/public-safety.yml`: CI guardrail for audit and Telegram tests.
+- `docs/SKILL_SYNC_ORCHESTRATION.md`: public-safe plan for syncing skills, MCP servers, prompts, and agent configs across tools.
+- `scripts/skill-sync-doctor.mjs`: prototype inventory/doctor for public-safe skill sync manifests.
+
+Run the skill sync prototype:
+
+```bash
+node scripts/skill-sync-doctor.mjs --root skills --root docs --out /tmp/skill-sync-manifest.json
+node scripts/skill-sync-doctor.mjs --root skills --emit codex --emit gemini --emit-dir /tmp/skill-sync-generated
+```
 
 ## 🗂️ Skill Layout
 
@@ -180,6 +238,7 @@ skills/
   search/
     multi-search-engine/
   software-development/
+    ai-research-browser/
     plan/
     requesting-code-review/
     subagent-driven-development/
@@ -199,6 +258,7 @@ Run the currently bundled executable tests:
 ```bash
 python3 skills/telegram-approval-gate/tests/test_telegram_approval_gate.py
 (cd skills/telegram-channel-poster && python3 scripts/test_telegram_channel_post.py)
+python3 -m unittest discover -s skills/software-development/ai-research-browser/tests -p 'test_ai_research_browser.py'
 ```
 
 Run the public safety scan:

@@ -46,8 +46,8 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 - Builds a focused primary feature suite for ChatGPT chat/model selection, ChatGPT Deep Research, ChatGPT Agent, Gemini Deep Research, Claude Opus, Grok chat/research, and Perplexity chat/research.
 - Runs Agent Browser against disposable browser-profile clones and records `signed-out-or-wall` when the cloned session hits login or anti-automation pages.
 - Exposes provider-specific probe hints for account menus, model selectors, tool controls, and usage/limit text.
-- Lists automation backends such as Playwright/CDP, Codex Computer Use, Peekaboo, Unbrowser Local, OpenAI CUA/Operator, Claude Computer Use, Gemini Computer Use, Stagehand, Browser-Use, and Hyperbrowser.
-- Lists Peter Steinberger's Oracle as an optional consult backend for multi-model review, browser-session reattach, Deep Research, and session artifacts.
+- Lists automation backends such as Playwright/CDP, Codex Computer Use, Peekaboo, Unbrowser Local, CloakBrowser, OpenAI CUA/Operator, Claude Computer Use, Gemini Computer Use, Stagehand, Browser-Use, and Hyperbrowser.
+- Lists Peter Steinberger's Oracle 0.13 as an optional consult/backend layer for multi-model review, browser-session reattach, long-running Deep Research/Agent supervision, attachment readiness, and session artifacts.
 - Lists selectable model/tool catalogs for ChatGPT, Gemini/Google, Claude/Anthropic, Perplexity, and Grok/xAI.
 - Marks profiles as `signed-in-hidden` when browser metadata indicates account/session state but no email is exposed.
 - Reports `app_exists`, `binary_exists`, and `user_data_exists` so stale browser profile data is not confused with a launchable installed browser.
@@ -86,6 +86,55 @@ List automation backends:
 ```bash
 python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py backends
 ```
+
+Build an Oracle 0.13 dry-run/reattach plan for a real CDP browser session:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py oracle-plan \
+  --prompt "Review the current failed E2E browser workflow." \
+  --remote-chrome 127.0.0.1:9223 \
+  --research-depth deep \
+  --model gpt-5.5-instant \
+  --browser-attachment-timeout 240
+```
+
+For long ChatGPT/Gemini browser workflows, `workflow-run` can include Oracle evidence without bypassing local guards:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py workflow-run \
+  --browser brave \
+  --profile work \
+  --provider chatgpt \
+  --mode agent \
+  --prompt "Analysiere kurz, warum Oracle-Reattach im aktuellen CLI-Flow stabiler sein soll." \
+  --oracle-mode assist \
+  --submit \
+  --allow-paid-quota-use
+```
+
+Use `--oracle-mode runner` only after the normal local guards pass. Oracle runner mode is blocked by the CLI when login, visible account, plan, feature, screenshot, rate-limit, or ChatGPT model-safety checks fail. For ChatGPT tests, the guard blocks Pro/Extended Pro/GPT-5.5 Pro selections before typing; use non-Pro Thinking, Agent, or Deep Research instead.
+
+Focused Oracle E2E smoke is opt-in only:
+
+```bash
+AI_RESEARCH_BROWSER_E2E=1 \
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py oracle-e2e-smoke \
+  --browser brave \
+  --profile work \
+  --provider chatgpt \
+  --mode thinking \
+  --cdp-port 9223
+```
+
+Plan CloakBrowser Manager locally without storing proxy secrets in artifacts:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py cloakbrowser-manager-plan --port 18080
+AI_RESEARCH_BROWSER_PROXY_FILE=~/.config/ai-research-browser/proxies.txt \
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py cloakbrowser-preflight
+```
+
+CloakBrowser provider workflows require a manually logged-in profile plus a verified account baseline. `workflow-run --backend cloakbrowser` blocks before any UI typing unless `--account-baseline` points to that proof. Keep proxy files local, mode `0600`, and never commit them.
 
 List installed SaveAI / AI Exporter extension copies:
 

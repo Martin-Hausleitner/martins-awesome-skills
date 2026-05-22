@@ -1,0 +1,73 @@
+<svg width="1120" height="640" viewBox="0 0 1120 640" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">AI Research Browser plus Oracle 0.13 architecture</title>
+  <desc id="desc">A public-safe architecture diagram showing workflow-run guard checks, CDP browser targets, Oracle assist and reattach commands, and local evidence artifacts.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1120" y2="640" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#101827"/>
+      <stop offset="0.52" stop-color="#17324A"/>
+      <stop offset="1" stop-color="#18291E"/>
+    </linearGradient>
+    <linearGradient id="cardA" x1="80" y1="96" x2="1040" y2="552" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F8FAFC" stop-opacity="0.98"/>
+      <stop offset="1" stop-color="#EEF7F2" stop-opacity="0.96"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="18" stdDeviation="18" flood-color="#020617" flood-opacity="0.28"/>
+    </filter>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M2 2L10 6L2 10" stroke="#0F766E" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+  <rect width="1120" height="640" rx="32" fill="url(#bg)"/>
+  <circle cx="973" cy="94" r="54" fill="#22C55E" opacity="0.18"/>
+  <circle cx="140" cy="540" r="78" fill="#38BDF8" opacity="0.14"/>
+  <rect x="64" y="56" width="992" height="528" rx="28" fill="url(#cardA)" filter="url(#shadow)"/>
+  <text x="96" y="112" fill="#0F172A" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="36" font-weight="800">AI Research Browser + Oracle 0.13</text>
+  <text x="96" y="146" fill="#475569" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="16">Real browser sessions stay guarded locally; Oracle adds long-run assist, reattach, status, and session rendering.</text>
+
+  <g font-family="Inter, ui-sans-serif, system-ui, sans-serif">
+    <rect x="96" y="205" width="210" height="108" rx="18" fill="#DBEAFE" stroke="#2563EB" stroke-width="2"/>
+    <text x="120" y="242" fill="#1E3A8A" font-size="18" font-weight="800">workflow-run</text>
+    <text x="120" y="270" fill="#334155" font-size="14">strategy router</text>
+    <text x="120" y="292" fill="#334155" font-size="14">auto/live-cdp/restart</text>
+
+    <rect x="362" y="176" width="252" height="166" rx="18" fill="#DCFCE7" stroke="#16A34A" stroke-width="2"/>
+    <text x="390" y="214" fill="#14532D" font-size="18" font-weight="800">Local Guard Layer</text>
+    <text x="390" y="244" fill="#334155" font-size="14">login + account + plan</text>
+    <text x="390" y="266" fill="#334155" font-size="14">model + feature evidence</text>
+    <text x="390" y="288" fill="#334155" font-size="14">screenshot + paid quota</text>
+    <text x="390" y="310" fill="#334155" font-size="14">rate-limit/challenge stop</text>
+
+    <rect x="680" y="176" width="282" height="166" rx="18" fill="#FEE2E2" stroke="#DC2626" stroke-width="2"/>
+    <text x="708" y="214" fill="#7F1D1D" font-size="18" font-weight="800">ChatGPT Model Safety</text>
+    <text x="708" y="244" fill="#334155" font-size="14">blocks Pro / Extended Pro</text>
+    <text x="708" y="266" fill="#334155" font-size="14">blocks GPT-5.5 Pro tests</text>
+    <text x="708" y="288" fill="#334155" font-size="14">allows non-Pro Thinking</text>
+    <text x="708" y="310" fill="#334155" font-size="14">no composer typing before guard</text>
+
+    <rect x="120" y="402" width="248" height="104" rx="18" fill="#F8FAFC" stroke="#64748B" stroke-width="2"/>
+    <text x="148" y="440" fill="#0F172A" font-size="18" font-weight="800">CDP Browser Target</text>
+    <text x="148" y="470" fill="#334155" font-size="14">isolated automation target</text>
+    <text x="148" y="492" fill="#334155" font-size="14">Brave / Comet / Chrome</text>
+
+    <rect x="436" y="402" width="248" height="104" rx="18" fill="#FEF3C7" stroke="#D97706" stroke-width="2"/>
+    <text x="464" y="440" fill="#78350F" font-size="18" font-weight="800">Oracle Assist</text>
+    <text x="464" y="470" fill="#334155" font-size="14">status / reattach / render</text>
+    <text x="464" y="492" fill="#334155" font-size="14">@steipete/oracle@0.13.0</text>
+
+    <rect x="752" y="402" width="248" height="104" rx="18" fill="#E0F2FE" stroke="#0284C7" stroke-width="2"/>
+    <text x="780" y="440" fill="#075985" font-size="18" font-weight="800">Evidence Artifacts</text>
+    <text x="780" y="470" fill="#334155" font-size="14">status.json + screenshots</text>
+    <text x="780" y="492" fill="#334155" font-size="14">redacted command logs</text>
+  </g>
+
+  <path d="M306 259H362" stroke="#0F766E" stroke-width="3" marker-end="url(#arrow)"/>
+  <path d="M614 259H680" stroke="#0F766E" stroke-width="3" marker-end="url(#arrow)"/>
+  <path d="M488 342V394" stroke="#0F766E" stroke-width="3" marker-end="url(#arrow)"/>
+  <path d="M770 342L610 398" stroke="#0F766E" stroke-width="3" marker-end="url(#arrow)"/>
+  <path d="M368 454H436" stroke="#0F766E" stroke-width="3" marker-end="url(#arrow)"/>
+  <path d="M684 454H752" stroke="#0F766E" stroke-width="3" marker-end="url(#arrow)"/>
+
+  <rect x="96" y="534" width="928" height="24" rx="12" fill="#0F172A" opacity="0.08"/>
+  <text x="120" y="551" fill="#334155" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="13">Principle: Oracle can supervise and reattach, but local guards decide if any provider UI receives input.</text>
+</svg>

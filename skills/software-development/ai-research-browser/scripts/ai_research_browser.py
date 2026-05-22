@@ -1225,6 +1225,16 @@ def infer_login_state(text: str, provider: str) -> str:
     expanded = expand_agent_browser_eval_text(text or "")
     lowered = expanded.casefold()
     provider_id = normalize_provider_name(provider)
+    session_wall_markers = [
+        "your session has expired",
+        "please log in again",
+        "log in again to continue",
+        "session expired",
+        "session abgelaufen",
+        "erneut anmelden",
+    ]
+    if any(marker in lowered for marker in session_wall_markers):
+        return "signed-out-or-wall"
     wall_markers = [
         "just a moment",
         "checking if the site connection is secure",
@@ -1274,6 +1284,37 @@ def infer_login_state(text: str, provider: str) -> str:
     if any(str(marker).casefold() in lowered for marker in flattened):
         return "signed-in-or-ready"
     return "unknown"
+
+
+def detect_login_wall_from_text(text: str, provider: str) -> dict[str, Any]:
+    expanded = expand_agent_browser_eval_text(text or "")
+    lowered = expanded.casefold()
+    explicit_markers = [
+        "your session has expired",
+        "please log in again",
+        "log in again to continue",
+        "session expired",
+        "session abgelaufen",
+        "erneut anmelden",
+    ]
+    matched = [marker for marker in explicit_markers if marker in lowered]
+    if matched:
+        return {
+            "blocked": True,
+            "kind": "login-wall",
+            "matched_markers": matched,
+            "confidence": "high",
+            "text_preview": expanded[:500],
+        }
+    if infer_login_state(expanded, provider) == "signed-out-or-wall":
+        return {
+            "blocked": True,
+            "kind": "login-wall",
+            "matched_markers": ["signed-out-or-wall"],
+            "confidence": "medium",
+            "text_preview": expanded[:500],
+        }
+    return {"blocked": False, "kind": "", "matched_markers": [], "text_preview": expanded[:500]}
 
 
 def extract_provider_inventory(provider: str, text: str) -> dict[str, Any]:
@@ -2916,8 +2957,27 @@ def wait_for_workflow_response(
         if output_eval.stdout:
             visible_text_parts.append(output_eval.stdout)
         combined = "\n".join(part for part in [snapshot.stdout, output_eval.stdout] if part)
+        login_wall = detect_login_wall_from_text(combined, provider)
         latest_output = extract_workflow_output_from_text(combined, provider=provider, mode=mode)
         focused_output = extract_workflow_output_from_text(output_eval.stdout, provider=provider, mode=mode) if output_eval.stdout else latest_output
+        if login_wall.get("blocked"):
+            poll_record = {
+                "index": index,
+                "status": "signed-out-or-wall",
+                "reason": "login-wall-during-response",
+                "login_wall": login_wall,
+                "text_length": latest_output.get("text_length", 0),
+                "running_markers_found": latest_output.get("running_markers_found", []),
+            }
+            polls.append(poll_record)
+            return {
+                "event": "wait-for-response",
+                "status": "signed-out-or-wall",
+                "reason": "login-wall-during-response",
+                "login_wall": login_wall,
+                "polls": polls,
+                "output": latest_output,
+            }
         focused_markers_found = requested_completion_markers_in_response(
             focused_output.get("text", ""),
             provider=provider,
@@ -5515,6 +5575,8 @@ def agent_browser_profile_workflow_run(
                 workflow_events.append(response_event)
                 if response_event.get("status") in {"complete", "stable"}:
                     status = "verified"
+                elif response_event.get("status") == "signed-out-or-wall":
+                    status = "signed-out-or-wall"
                 elif response_event.get("status") == "running-timeout" and status in {"submitted", "started"}:
                     status = "running-timeout"
                 elif response_event.get("output", {}).get("status") == "running" and status == "submitted":
@@ -6202,6 +6264,8 @@ def agent_browser_live_workflow_run(
             workflow_events.append(response_event)
             if response_event.get("status") in {"complete", "stable"}:
                 status = "verified"
+            elif response_event.get("status") == "signed-out-or-wall":
+                status = "signed-out-or-wall"
             elif response_event.get("status") == "running-timeout" and status in {"submitted", "started"}:
                 status = "running-timeout"
             elif response_event.get("output", {}).get("status") == "running" and status == "submitted":

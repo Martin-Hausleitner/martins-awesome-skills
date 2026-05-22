@@ -1799,6 +1799,16 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertTrue(inventory["available_modes"]["deep-research"])
         self.assertTrue(any("remaining" in line for line in inventory["usage_lines"]))
 
+    def test_extract_provider_inventory_session_expired_overrides_visible_account(self):
+        module = load_module()
+
+        inventory = module.extract_provider_inventory(
+            "chatgpt",
+            "ChatGPT\nIsagi yoichi\nPro\nYour session has expired\nPlease log in again to continue using the app.\nLog in",
+        )
+
+        self.assertEqual(inventory["login_state"], "signed-out-or-wall")
+
     def test_extract_provider_inventory_classifies_cloudflare_wall_as_not_ready(self):
         module = load_module()
 
@@ -3586,6 +3596,37 @@ class AiResearchBrowserTest(unittest.TestCase):
 
         self.assertEqual(event["status"], "running-timeout")
         self.assertTrue(all(poll.get("status") != "complete" for poll in event["polls"]))
+
+    def test_wait_for_response_stops_on_session_expired_wall(self):
+        module = load_module()
+        text = "\n".join(
+            [
+                "Isagi yoichi",
+                "Pro",
+                "Your session has expired",
+                "Please log in again to continue using the app.",
+                "Log in",
+                "Stop answering",
+            ]
+        )
+
+        def fake_invoke(label, args):
+            return module.subprocess.CompletedProcess(["agent-browser", *args], 0, text, "")
+
+        event = module.wait_for_workflow_response(
+            invoke=fake_invoke,
+            provider="chatgpt",
+            mode="agent",
+            output_selectors=[],
+            visible_text_parts=[],
+            response_timeout=30,
+            poll_interval=0.05,
+            prompt="Agent diagnostic",
+        )
+
+        self.assertEqual(event["status"], "signed-out-or-wall")
+        self.assertEqual(event["reason"], "login-wall-during-response")
+        self.assertEqual(event["login_wall"]["kind"], "login-wall")
 
     def test_wait_for_response_prefers_completed_focused_report_over_stale_page_running_text(self):
         module = load_module()

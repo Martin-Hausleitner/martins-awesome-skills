@@ -3194,6 +3194,19 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertEqual(extracted["status"], "captured")
         self.assertEqual(extracted["completion_markers_found"], [])
 
+    def test_chatgpt_deep_research_prompt_instruction_final_answer_is_not_complete(self):
+        module = load_module()
+
+        extracted = module.extract_workflow_output_from_text(
+            "Use ChatGPT Deep Research for a narrow diagnostic. End the final answer with exactly this marker: "
+            "BRAVE_CHATGPT_DEEP_RESEARCH_SHORT_E2E_OK\nDeep research\nApps\nSites\nInstant",
+            provider="chatgpt",
+            mode="deep-research",
+        )
+
+        self.assertEqual(extracted["status"], "captured")
+        self.assertEqual(extracted["completion_markers_found"], [])
+
     def test_chatgpt_chat_treats_thinking_as_running(self):
         module = load_module()
 
@@ -3594,6 +3607,51 @@ class AiResearchBrowserTest(unittest.TestCase):
             module.time.sleep = original_sleep
 
         self.assertEqual(event["status"], "no-progress")
+
+    def test_wait_for_paid_running_response_stops_when_progress_stalls(self):
+        module = load_module()
+        ticks = {"value": 0.0}
+        progress_events = []
+        original_monotonic = module.time.monotonic
+        original_sleep = module.time.sleep
+
+        def fake_monotonic():
+            ticks["value"] += 30.0
+            return ticks["value"]
+
+        def fake_sleep(_seconds):
+            return None
+
+        def fake_invoke(label, args):
+            return module.subprocess.CompletedProcess(
+                ["agent-browser", *args],
+                0,
+                "Agent\nWorking\nExploring event listener evidence...",
+                "",
+            )
+
+        module.time.monotonic = fake_monotonic
+        module.time.sleep = fake_sleep
+        try:
+            event = module.wait_for_workflow_response(
+                invoke=fake_invoke,
+                provider="chatgpt",
+                mode="agent",
+                output_selectors=[],
+                visible_text_parts=[],
+                response_timeout=900,
+                poll_interval=2,
+                prompt="Agent diagnostic without a completion marker.",
+                progress_callback=progress_events.append,
+            )
+        finally:
+            module.time.monotonic = original_monotonic
+            module.time.sleep = original_sleep
+
+        self.assertEqual(event["status"], "no-progress")
+        self.assertEqual(event["reason"], "paid-workflow-progress-stalled")
+        self.assertGreaterEqual(len(progress_events), 10)
+        self.assertEqual(progress_events[-1]["status"], "polling")
 
     def test_latest_response_script_keeps_useful_tail_for_long_reports(self):
         module = load_module()

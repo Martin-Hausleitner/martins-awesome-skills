@@ -2065,12 +2065,13 @@ def extract_workflow_output_from_text(text: str, *, provider: str, mode: str) ->
     expanded = expand_agent_browser_eval_text(text or "")
     markers = [str(marker) for marker in spec.get("completion_markers", [])]
     running_markers = [str(marker) for marker in spec.get("running_markers", [])]
+    completion_markers_found = completion_markers_in_response_text(expanded, markers)
     status = "empty"
     if expanded.strip():
         status = "captured"
     if any(marker.lower() in expanded.lower() for marker in running_markers):
         status = "running"
-    if any(marker.lower() in expanded.lower() for marker in markers):
+    if completion_markers_found:
         status = "complete"
     lines = [line.rstrip() for line in expanded.splitlines()]
     collapsed = "\n".join(line for line in lines if line.strip())
@@ -2078,11 +2079,38 @@ def extract_workflow_output_from_text(text: str, *, provider: str, mode: str) ->
         "provider": provider_id,
         "mode": spec["mode"],
         "status": status,
-        "completion_markers_found": [marker for marker in markers if marker.lower() in expanded.lower()],
+        "completion_markers_found": completion_markers_found,
         "running_markers_found": [marker for marker in running_markers if marker.lower() in expanded.lower()],
         "text": collapsed,
         "text_length": len(collapsed),
     }
+
+
+def completion_markers_in_response_text(text: str, markers: list[str]) -> list[str]:
+    instruction_terms = (
+        "end with",
+        "ends with",
+        "final answer with",
+        "marker",
+        "requested marker",
+        "reply exactly",
+        "respond exactly",
+        "use chatgpt deep research",
+        "use gemini deep research",
+    )
+    lines = [" ".join(line.split()) for line in (text or "").splitlines() if line.strip()]
+    found: list[str] = []
+    for marker in markers:
+        marker_lower = marker.lower()
+        for line in lines:
+            line_lower = line.lower()
+            if marker_lower not in line_lower:
+                continue
+            if any(term in line_lower for term in instruction_terms):
+                continue
+            found.append(marker)
+            break
+    return found
 
 
 def clean_workflow_response_text(text: str, *, provider: str, prompt: str = "") -> str:
@@ -2716,11 +2744,14 @@ def wait_for_workflow_response(
     poll_interval: float = 2.0,
     prompt: str = "",
     attachment_names: list[str] | None = None,
+    progress_callback: Any | None = None,
 ) -> dict[str, Any]:
     deadline = time.monotonic() + max(0.1, response_timeout)
     started_at = time.monotonic()
     max_polls = max(1, int(math.ceil(max(0.1, response_timeout) / max(0.2, poll_interval))))
     last_text = ""
+    last_progress_text = ""
+    unchanged_progress_polls = 0
     stable_polls = 0
     polls: list[dict[str, Any]] = []
     latest_output: dict[str, Any] = {
@@ -2810,6 +2841,12 @@ def wait_for_workflow_response(
         else:
             stable_polls = 0
         last_text = current_text
+        progress_text = current_text or latest_output.get("text", "")
+        if progress_text == last_progress_text:
+            unchanged_progress_polls += 1
+        else:
+            unchanged_progress_polls = 0
+        last_progress_text = progress_text
         poll_record = {
             "index": index,
             "status": latest_output.get("status"),
@@ -2818,11 +2855,25 @@ def wait_for_workflow_response(
             "completion_markers_found": latest_output.get("completion_markers_found", []),
             "running_markers_found": latest_output.get("running_markers_found", []),
         }
+        if unchanged_progress_polls:
+            poll_record["unchanged_progress_polls"] = unchanged_progress_polls
         if requested_markers_found:
             poll_record["requested_markers_found"] = requested_markers_found
         if ignored_composer_output:
             poll_record["ignored_composer_output"] = True
         polls.append(poll_record)
+        if progress_callback:
+            try:
+                progress_callback(
+                    {
+                        "event": "wait-for-response",
+                        "status": "polling",
+                        "poll": poll_record,
+                        "output": latest_output,
+                    }
+                )
+            except Exception:
+                pass
         if requested_markers_found and not ignored_composer_output:
             latest_output["status"] = "complete"
             latest_output["requested_markers_found"] = requested_markers_found
@@ -2832,6 +2883,7 @@ def wait_for_workflow_response(
         if stable_polls >= 1 and len(effective_text) > 0 and not ignored_composer_output and not is_paid_workflow_mode(slug(mode or "chat")):
             return {"event": "wait-for-response", "status": "stable", "polls": polls, "output": latest_output}
         no_progress_elapsed = time.monotonic() - started_at
+        paid_stall_threshold = min(max(180.0, response_timeout / 3), 600.0)
         if (
             is_paid_workflow_mode(slug(mode or "chat"))
             and stable_polls >= 5
@@ -2841,6 +2893,21 @@ def wait_for_workflow_response(
             and not ignored_composer_output
         ):
             return {"event": "wait-for-response", "status": "no-progress", "polls": polls, "output": latest_output}
+        if (
+            is_paid_workflow_mode(slug(mode or "chat"))
+            and unchanged_progress_polls >= 10
+            and no_progress_elapsed >= paid_stall_threshold
+            and not requested_markers_found
+            and not ignored_composer_output
+            and not (normalize_provider_name(provider) == "chatgpt" and slug(mode or "chat") == "deep-research")
+        ):
+            return {
+                "event": "wait-for-response",
+                "status": "no-progress",
+                "reason": "paid-workflow-progress-stalled",
+                "polls": polls,
+                "output": latest_output,
+            }
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
@@ -5565,6 +5632,45 @@ def agent_browser_live_workflow_run(
     response_event: dict[str, Any] = {}
     pre_submit_screenshot = paths["run_dir"] / "pre-submit.png"
 
+    def write_live_progress_status(progress_event: dict[str, Any]) -> None:
+        target_id = current_target_id()
+        progress_screenshot = ""
+        poll = progress_event.get("poll") if isinstance(progress_event.get("poll"), dict) else {}
+        poll_index = int(poll.get("index") or 0) if isinstance(poll, dict) else 0
+        if poll_index == 0 or poll_index % 10 == 0:
+            progress_path = paths["run_dir"] / f"progress-{poll_index:04d}.png"
+            if cdp_screenshot_scoped(progress_path):
+                progress_screenshot = str(progress_path)
+        partial_payload = {
+            **plan,
+            "status": "running",
+            "chat_url": current_url or spec["url"],
+            "target_id": target_id,
+            "target_verification": {
+                "target_id": target_id,
+                "automation_target_created": bool(target_id),
+                "active_tab_navigation_fallback_allowed": bool(allow_active_tab_navigation_fallback),
+            },
+            "pre_submit_guard": pre_submit_guard_payload or {},
+            "pacing": {
+                "mode": pacing,
+                "min_action_delay_ms": int(min_action_delay_ms),
+                "human_safe": pacing != "off",
+                "stealth_or_fingerprint_bypass": False,
+                "guard": pacing_guard_payload,
+            },
+            "rate_limit_budget": {
+                "max_daily_paid_runs": int(max_daily_paid_runs),
+                "allow_paid_quota_use": bool(allow_paid_quota_use),
+            },
+            "workflow_events": [*workflow_events, progress_event],
+            "latest_progress": {**progress_event, "screenshot": progress_screenshot},
+            "real_session_preflight": real_session_preflight,
+            "screenshot": progress_screenshot or (str(screenshot) if screenshot.exists() else (str(pre_submit_screenshot) if pre_submit_screenshot.exists() else "")),
+            "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        }
+        write_json(paths["status_json"], partial_payload)
+
     tab_result = run_cdp_create_automation_target(cdp_port, spec["url"], timeout=min(timeout, 20.0))
     commands.append(
         {
@@ -5922,6 +6028,7 @@ def agent_browser_live_workflow_run(
                 response_timeout=response_timeout,
                 prompt=prompt,
                 attachment_names=[path.expanduser().name for path in attachments or []],
+                progress_callback=write_live_progress_status,
             )
             workflow_events.append(response_event)
             if response_event.get("status") in {"complete", "stable"}:

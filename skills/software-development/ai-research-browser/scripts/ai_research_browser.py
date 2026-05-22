@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import math
@@ -14,13 +15,12 @@ import socket
 import sqlite3
 import subprocess
 import sys
-import time
 import tempfile
+import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
-
 
 BROWSER_CANDIDATES = {
     "brave": {
@@ -28,7 +28,7 @@ BROWSER_CANDIDATES = {
         "app_path": "/Applications/Brave Browser.app",
         "binary_rel": "Contents/MacOS/Brave Browser",
         "user_data_dir": "~/Library/Application Support/BraveSoftware/Brave-Browser",
-        "default_port": 9222,
+        "default_port": 9223,
     },
     "comet": {
         "display_name": "Comet",
@@ -36,7 +36,7 @@ BROWSER_CANDIDATES = {
         "app_path": "/Applications/Comet.app",
         "binary_rel": "Contents/MacOS/Comet",
         "user_data_dir": "~/Library/Application Support/Comet",
-        "default_port": 9223,
+        "default_port": 9333,
     },
     "chrome": {
         "display_name": "Google Chrome",
@@ -823,6 +823,147 @@ def build_background_launch_plan(
     }
 
 
+WORKFLOW_STRATEGIES = ("auto", "live-cdp", "restart-cdp", "sibling", "gui-fallback", "diagnostic-clone")
+
+
+def choose_workflow_strategy(
+    *,
+    requested: str,
+    real_session_preflight: dict[str, Any],
+    allow_browser_restart: bool,
+    sibling_available: bool,
+    allow_sibling_fallback: bool = False,
+    gui_fallback_available: bool = True,
+) -> dict[str, Any]:
+    requested_id = (requested or "auto").strip().lower()
+    if requested_id == "clone":
+        requested_id = "diagnostic-clone"
+    if requested_id not in WORKFLOW_STRATEGIES:
+        raise ValueError(f"unknown workflow strategy: {requested}")
+    attempts: list[dict[str, Any]] = []
+
+    def reject(strategy: str, reason: str) -> None:
+        attempts.append({"strategy": strategy, "selected": False, "reason": reason})
+
+    def select(strategy: str, reason: str, *, counts_as_real_login: bool = True) -> dict[str, Any]:
+        return {
+            "requested": requested_id,
+            "strategy": strategy,
+            "selected": strategy,
+            "reason": reason,
+            "counts_as_real_login": counts_as_real_login,
+            "rejected": attempts,
+        }
+
+    can_attach = bool(real_session_preflight.get("can_attach"))
+    blockers = [str(item) for item in real_session_preflight.get("blockers", [])]
+
+    if requested_id == "live-cdp":
+        if can_attach:
+            return select("live-cdp", "real CDP session is attachable")
+        reject("live-cdp", "; ".join(blockers) or "cdp endpoint not attachable")
+        return select("blocked", "requested live-cdp is not available", counts_as_real_login=False)
+    if requested_id == "restart-cdp":
+        if can_attach:
+            return select("live-cdp", "real CDP session is already attachable")
+        if allow_browser_restart:
+            return select("restart-cdp", "browser restart with CDP was explicitly allowed")
+        reject("restart-cdp", "browser restart was not allowed")
+        return select("blocked", "requested restart-cdp requires --allow-browser-restart", counts_as_real_login=False)
+    if requested_id == "sibling":
+        if sibling_available:
+            return select("persistent-sibling", "requested persistent sibling automation profile")
+        reject("persistent-sibling", "sibling profile is not available")
+        return select("blocked", "requested sibling strategy is unavailable", counts_as_real_login=False)
+    if requested_id == "gui-fallback":
+        if gui_fallback_available:
+            return select("gui-fallback", "requested live GUI fallback")
+        reject("gui-fallback", "gui fallback is not available")
+        return select("blocked", "requested gui fallback is unavailable", counts_as_real_login=False)
+    if requested_id == "diagnostic-clone":
+        return select("diagnostic-clone", "diagnostic clone was explicitly requested", counts_as_real_login=False)
+
+    if can_attach:
+        return select("live-cdp", "real CDP session is attachable")
+    reject("live-cdp", "; ".join(blockers) or "cdp endpoint not attachable")
+    if allow_browser_restart:
+        return select("restart-cdp", "CDP unavailable and browser restart was allowed")
+    reject("restart-cdp", "browser restart was not allowed")
+    if sibling_available and allow_sibling_fallback:
+        return select("persistent-sibling", "falling back to persistent sibling automation profile")
+    reject("persistent-sibling", "sibling fallback was not explicitly allowed" if sibling_available else "sibling profile is not available")
+    reject("gui-fallback", "gui fallback is explicit-only")
+    reject("diagnostic-clone", "diagnostic clone is explicit-only")
+    return select("blocked", "auto requires live CDP or explicitly allowed restart/sibling fallback", counts_as_real_login=False)
+
+
+def build_account_baseline(inventory: dict[str, Any], *, screenshot: str = "", strategy: str = "") -> dict[str, Any]:
+    visible_status = inventory.get("visible_status") or {}
+    account = str(visible_status.get("account") or "").strip()
+    plan = str(visible_status.get("plan") or "").strip()
+    available_models = [str(item) for item in inventory.get("available_models", []) or []]
+    model = inventory_model_evidence(inventory)
+    available_tools = [str(item) for item in inventory.get("available_tools", []) or []]
+    available_modes = inventory.get("available_modes") or {}
+    missing: list[str] = []
+    if str(inventory.get("login_state") or "") != "signed-in-or-ready":
+        missing.append("login-not-ready")
+    if not account:
+        missing.append("account-missing")
+    if not plan:
+        missing.append("plan-missing")
+    if not (model or available_models):
+        missing.append("model-missing")
+    if not screenshot:
+        missing.append("screenshot-missing")
+    if strategy in {"diagnostic-clone", "temporary-profile-clone-cdp"}:
+        missing.append("real-login-strategy-missing")
+    return {
+        "provider": normalize_provider_name(str(inventory.get("provider", ""))),
+        "login_state": str(inventory.get("login_state") or ""),
+        "account": account,
+        "plan": plan,
+        "model": model,
+        "available_models": available_models,
+        "available_tools": available_tools,
+        "available_modes": available_modes,
+        "screenshot": screenshot,
+        "strategy": strategy,
+        "ready_for_prompt": not missing,
+        "missing": missing,
+    }
+
+
+def inventory_model_evidence(inventory: dict[str, Any]) -> str:
+    visible_status = inventory.get("visible_status") if isinstance(inventory.get("visible_status"), dict) else {}
+    model = str(visible_status.get("model") or "").strip()
+    if model:
+        return model
+    available_models = [str(item).strip() for item in inventory.get("available_models") or [] if str(item).strip()]
+    if available_models:
+        return available_models[0]
+    matched_hints = inventory.get("matched_hints") if isinstance(inventory.get("matched_hints"), dict) else {}
+    model_hints = [str(item).strip() for item in matched_hints.get("model_hints", []) or [] if str(item).strip()]
+    return model_hints[0] if model_hints else ""
+
+
+def workflow_account_baseline(payload: dict[str, Any], *, strategy: str) -> dict[str, Any]:
+    selected_strategy = strategy or str((payload.get("strategy") or {}).get("selected") or payload.get("execution_mode") or "")
+    if selected_strategy in {"diagnostic-clone", "temporary-profile-clone-cdp", "agent-browser-profile-clone"}:
+        return {
+            "eligible": False,
+            "status": "not-recorded",
+            "reason": "temporary-profile-clone-is-not-real-login",
+        }
+    baseline = build_account_baseline(payload.get("inventory") or {}, screenshot=str(payload.get("screenshot") or ""), strategy=selected_strategy)
+    return {
+        **baseline,
+        "eligible": bool(baseline.get("ready_for_prompt")),
+        "status": "ready" if baseline.get("ready_for_prompt") else "incomplete",
+        "reason": "" if baseline.get("ready_for_prompt") else ",".join(baseline.get("missing", [])),
+    }
+
+
 def launchable_browser(browser: dict[str, Any]) -> tuple[bool, str]:
     if browser.get("binary_exists") is False:
         return False, "browser binary is not installed"
@@ -881,7 +1022,7 @@ def execute_background_launch(plan: dict[str, Any], *, dry_run: bool = False) ->
     process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
     hide_command = plan.get("post_launch_hide_command") or []
     if hide_command:
-        subprocess.run([str(part) for part in hide_command], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run([str(part) for part in hide_command], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
     return {"started": True, "dry_run": False, "pid": process.pid}
 
 
@@ -925,8 +1066,24 @@ def parse_visible_status(text: str, *, provider: str = "") -> dict[str, Any]:
             line = text[line_start:line_end]
             if "[ref=" in line or re.search(r"\b(vs|versus)\b|vergleich|comparison", line, flags=re.I):
                 continue
+            if provider_id == "grok" and re.search(r"interact with apps|connectors?", line, flags=re.I):
+                continue
+            if provider_id == "grok" and re.search(r"\b(erkunden|explore)\b|modellentwicklung", line, flags=re.I):
+                continue
             model_match = candidate
             break
+    if provider_id == "grok" and not model_match:
+        for line in lines:
+            if line in {"Fast", "Auto"}:
+                model_match = re.match(r"(.+)", line)
+                break
+        if not model_match:
+            for line in lines:
+                if re.search(r"\b(erkunden|explore)\b|modellentwicklung", line, flags=re.I):
+                    continue
+                if re.fullmatch(r"Grok(?:\s+[\w.\-]+){0,4}", line):
+                    model_match = re.match(r"(.+)", line)
+                    break
     def is_entitlement_upsell_match(match: re.Match[str]) -> bool:
         line_start = text.rfind("\n", 0, match.start()) + 1
         line_end = text.find("\n", match.end())
@@ -971,11 +1128,25 @@ def parse_visible_status(text: str, *, provider: str = "") -> dict[str, Any]:
                     if previous.casefold() not in generic_previous and not re.search(r"^(new chat|search|home|skip to content)$", previous, flags=re.I):
                         account_name = previous
                 break
+    if provider_id == "grok" and not (plan_match or standalone_plan) and account_name:
+        grok_free_markers = ("unlock extended capabilities", "try for $0.00", "get supergrok", "supergrok")
+        if any(marker in text.casefold() for marker in grok_free_markers):
+            standalone_plan = "Free"
     for index, line in enumerate(lines):
         if line.casefold() == "create team" and index + 1 < len(lines):
             candidate = lines[index + 1].strip()
             if re.fullmatch(r"[A-Za-z0-9_.-]{3,40}", candidate):
                 account_name = candidate
+                break
+    if provider_id == "claude" and not account_name:
+        for line in lines:
+            settings_match = re.match(r"([^,\n]{2,80}),\s*Settings\b", line, flags=re.I)
+            if settings_match:
+                account_name = settings_match.group(1).strip()
+                break
+            sidebar_match = re.match(r"^[A-Z]\s+(.+?)\s+(?:Free|Pro|Max|Team|Enterprise)\s+plan\b", line, flags=re.I)
+            if sidebar_match:
+                account_name = sidebar_match.group(1).strip()
                 break
     used_percent_match = re.search(r"(?:used|verwendet|genutzt)\D{0,20}(\d{1,3})\s*%", text, flags=re.I)
     if not used_percent_match:
@@ -1058,6 +1229,8 @@ def infer_login_state(text: str, provider: str) -> str:
         "just a moment",
         "checking if the site connection is secure",
         "verify you are human",
+        "unusual traffic",
+        "automated traffic",
         "enable javascript and cookies",
         "cloudflare ray id",
         "cloudflare turnstile challenge",
@@ -1165,7 +1338,7 @@ def run_agent_browser(args: list[str], *, session: str = "", timeout: float = 45
         command.extend(["--session", session])
     command.extend(args)
     try:
-        return subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+        return subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=False)
     except FileNotFoundError as exc:
         return subprocess.CompletedProcess(command, 127, "", str(exc))
     except subprocess.TimeoutExpired as exc:
@@ -1177,6 +1350,40 @@ def run_agent_browser(args: list[str], *, session: str = "", timeout: float = 45
         )
 
 
+def redact_command_log_entry(entry: dict[str, Any], *, privacy: str = "redacted") -> dict[str, Any]:
+    if privacy == "full":
+        return dict(entry)
+    redacted = dict(entry)
+    if privacy == "metadata-only":
+        return {
+            "label": redacted.get("label", ""),
+            "returncode": redacted.get("returncode"),
+            "privacy": "metadata-only",
+        }
+    args = redacted.get("args")
+    if isinstance(args, list):
+        safe_args: list[Any] = []
+        for index, arg in enumerate(args):
+            text = str(arg)
+            sensitive = (
+                index >= 2
+                or "http://" in text
+                or "https://" in text
+                or "document." in text
+                or "innerText" in text
+                or "prompt" in text.lower()
+                or "token" in text.lower()
+                or "session" in text.lower()
+            )
+            safe_args.append(f"<redacted arg {index}, {len(text)} chars>" if sensitive else arg)
+        redacted["args"] = safe_args
+    for field in ("stdout", "stderr"):
+        value = redacted.get(field)
+        if value:
+            redacted[field] = f"<redacted {field}, {len(str(value))} chars>"
+    return redacted
+
+
 def cdp_http_base_for_port(port: int) -> str:
     endpoint = detect_cdp_endpoint(port)
     if endpoint.get("ok") and endpoint.get("base"):
@@ -1184,12 +1391,15 @@ def cdp_http_base_for_port(port: int) -> str:
     return f"http://127.0.0.1:{int(port)}"
 
 
-def run_cdp_javascript(port: int, javascript: str, *, timeout: float = 15.0) -> subprocess.CompletedProcess[str]:
+def run_cdp_javascript(port: int, javascript: str, *, timeout: float = 15.0, target_id: str = "") -> subprocess.CompletedProcess[str]:
     bridge = r"""
-const [base, expression] = process.argv.slice(1);
+const [base, expression, targetId = ''] = process.argv.slice(1);
 const targets = await (await fetch(`${base}/json/list`)).json();
 const usablePage = (item) => item.type === 'page' && !/^(about:|chrome:|chrome-extension:|devtools:)/.test(String(item.url || ''));
-const target = targets.find((item) => usablePage(item) && /^https?:/.test(String(item.url || ''))) || targets.find(usablePage) || targets.find((item) => item.type === 'page');
+const target = targetId
+  ? targets.find((item) => item.id === targetId)
+  : targets.find((item) => usablePage(item) && /^https?:/.test(String(item.url || ''))) || targets.find(usablePage) || targets.find((item) => item.type === 'page');
+if (targetId && !target) throw new Error(`Requested CDP target not found: ${targetId}`);
 if (!target || !target.webSocketDebuggerUrl) throw new Error('No page target for CDP eval');
 const ws = new WebSocket(target.webSocketDebuggerUrl);
 let nextId = 0;
@@ -1233,9 +1443,9 @@ const value = Object.prototype.hasOwnProperty.call(remote, 'value') ? remote.val
 process.stdout.write(typeof value === 'string' ? value : JSON.stringify(value ?? null));
 """
     env = {**os.environ, "HERMES_CDP_TIMEOUT_MS": str(max(1000, int(timeout * 1000)))}
-    command = ["node", "--input-type=module", "-e", bridge, cdp_http_base_for_port(port), javascript]
+    command = ["node", "--input-type=module", "-e", bridge, cdp_http_base_for_port(port), javascript, target_id]
     try:
-        return subprocess.run(command, capture_output=True, text=True, timeout=timeout + 2, env=env)
+        return subprocess.run(command, capture_output=True, text=True, timeout=timeout + 2, env=env, check=False)
     except subprocess.TimeoutExpired as exc:
         return subprocess.CompletedProcess(
             command,
@@ -1245,13 +1455,16 @@ process.stdout.write(typeof value === 'string' ? value : JSON.stringify(value ??
         )
 
 
-def run_cdp_keypress(port: int, key: str, *, timeout: float = 10.0) -> subprocess.CompletedProcess[str]:
+def run_cdp_keypress(port: int, key: str, *, timeout: float = 10.0, target_id: str = "") -> subprocess.CompletedProcess[str]:
     key_name = "Enter" if key.lower() in {"enter", "return"} else key
     bridge = r"""
-const [base, key] = process.argv.slice(1);
+const [base, key, targetId = ''] = process.argv.slice(1);
 const targets = await (await fetch(`${base}/json/list`)).json();
 const usablePage = (item) => item.type === 'page' && !/^(about:|chrome:|chrome-extension:|devtools:)/.test(String(item.url || ''));
-const target = targets.find((item) => usablePage(item) && /^https?:/.test(String(item.url || ''))) || targets.find(usablePage) || targets.find((item) => item.type === 'page');
+const target = targetId
+  ? targets.find((item) => item.id === targetId)
+  : targets.find((item) => usablePage(item) && /^https?:/.test(String(item.url || ''))) || targets.find(usablePage) || targets.find((item) => item.type === 'page');
+if (targetId && !target) throw new Error(`Requested CDP target not found: ${targetId}`);
 if (!target || !target.webSocketDebuggerUrl) throw new Error('No page target for CDP keypress');
 const ws = new WebSocket(target.webSocketDebuggerUrl);
 let nextId = 0;
@@ -1285,9 +1498,9 @@ ws.close();
 process.stdout.write(JSON.stringify({ok: true, key}));
 """
     env = {**os.environ, "HERMES_CDP_TIMEOUT_MS": str(max(1000, int(timeout * 1000)))}
-    command = ["node", "--input-type=module", "-e", bridge, cdp_http_base_for_port(port), key_name]
+    command = ["node", "--input-type=module", "-e", bridge, cdp_http_base_for_port(port), key_name, target_id]
     try:
-        return subprocess.run(command, capture_output=True, text=True, timeout=timeout + 2, env=env)
+        return subprocess.run(command, capture_output=True, text=True, timeout=timeout + 2, env=env, check=False)
     except subprocess.TimeoutExpired as exc:
         return subprocess.CompletedProcess(
             command,
@@ -1297,12 +1510,15 @@ process.stdout.write(JSON.stringify({ok: true, key}));
         )
 
 
-def run_cdp_navigate(port: int, url: str, *, timeout: float = 15.0) -> subprocess.CompletedProcess[str]:
+def run_cdp_navigate(port: int, url: str, *, timeout: float = 15.0, target_id: str = "") -> subprocess.CompletedProcess[str]:
     bridge = r"""
-const [base, url] = process.argv.slice(1);
+const [base, url, targetId = ''] = process.argv.slice(1);
 const targets = await (await fetch(`${base}/json/list`)).json();
 const usablePage = (item) => item.type === 'page' && !/^(chrome:|chrome-extension:|devtools:)/.test(String(item.url || ''));
-const target = targets.find((item) => usablePage(item) && /^https?:/.test(String(item.url || ''))) || targets.find(usablePage) || targets.find((item) => item.type === 'page') || targets[0];
+const target = targetId
+  ? targets.find((item) => item.id === targetId)
+  : targets.find((item) => usablePage(item) && /^https?:/.test(String(item.url || ''))) || targets.find(usablePage) || targets.find((item) => item.type === 'page') || targets[0];
+if (targetId && !target) throw new Error(`Requested CDP target not found: ${targetId}`);
 if (!target || !target.webSocketDebuggerUrl) throw new Error('No page target for CDP navigation');
 const ws = new WebSocket(target.webSocketDebuggerUrl);
 let nextId = 0;
@@ -1335,9 +1551,64 @@ ws.close();
 process.stdout.write(url);
 """
     env = {**os.environ, "HERMES_CDP_TIMEOUT_MS": str(max(1000, int(timeout * 1000)))}
+    command = ["node", "--input-type=module", "-e", bridge, cdp_http_base_for_port(port), url, target_id]
+    try:
+        return subprocess.run(command, capture_output=True, text=True, timeout=timeout + 2, env=env, check=False)
+    except subprocess.TimeoutExpired as exc:
+        return subprocess.CompletedProcess(
+            command,
+            124,
+            stdout=(exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")),
+            stderr=(exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")) + f"\nTimed out after {timeout:.0f}s",
+        )
+
+
+def run_cdp_create_automation_target(port: int, url: str, *, timeout: float = 15.0) -> subprocess.CompletedProcess[str]:
+    bridge = r"""
+const [base, url] = process.argv.slice(1);
+const version = await (await fetch(`${base}/json/version`)).json();
+if (!version.webSocketDebuggerUrl) throw new Error('No browser WebSocket URL in /json/version');
+const ws = new WebSocket(version.webSocketDebuggerUrl);
+let nextId = 0;
+const pending = new Map();
+const timer = setTimeout(() => {
+  console.error('Timed out waiting for CDP automation target');
+  process.exit(2);
+}, Math.max(1000, Math.floor(Number(process.env.HERMES_CDP_TIMEOUT_MS || '15000'))));
+ws.addEventListener('message', (event) => {
+  const payload = JSON.parse(event.data);
+  if (!payload.id || !pending.has(payload.id)) return;
+  const {resolve, reject} = pending.get(payload.id);
+  pending.delete(payload.id);
+  if (payload.error) reject(new Error(JSON.stringify(payload.error)));
+  else resolve(payload.result || {});
+});
+function send(method, params = {}) {
+  const id = ++nextId;
+  ws.send(JSON.stringify({id, method, params}));
+  return new Promise((resolve, reject) => pending.set(id, {resolve, reject}));
+}
+await new Promise((resolve, reject) => {
+  ws.addEventListener('open', resolve, {once: true});
+  ws.addEventListener('error', reject, {once: true});
+});
+const created = await send('Target.createTarget', {url, newWindow: true, background: true});
+let windowId = null;
+let bounds = 'background';
+try {
+  const win = await send('Browser.getWindowForTarget', {targetId: created.targetId});
+  windowId = win.windowId;
+} catch (error) {
+  bounds = `window-id-unavailable:${error.message || error}`;
+}
+clearTimeout(timer);
+ws.close();
+process.stdout.write(JSON.stringify({ok: true, targetId: created.targetId, windowId, bounds, url}));
+"""
+    env = {**os.environ, "HERMES_CDP_TIMEOUT_MS": str(max(1000, int(timeout * 1000)))}
     command = ["node", "--input-type=module", "-e", bridge, cdp_http_base_for_port(port), url]
     try:
-        return subprocess.run(command, capture_output=True, text=True, timeout=timeout + 2, env=env)
+        return subprocess.run(command, capture_output=True, text=True, timeout=timeout + 2, env=env, check=False)
     except subprocess.TimeoutExpired as exc:
         return subprocess.CompletedProcess(
             command,
@@ -1419,9 +1690,7 @@ def live_probe_ok(payload: dict[str, Any], *, assert_login: bool = False) -> boo
     status = payload.get("status")
     if status not in {"captured", "captured-without-screenshot"}:
         return False
-    if assert_login and payload.get("inventory", {}).get("login_state") != "signed-in-or-ready":
-        return False
-    return True
+    return not (assert_login and payload.get("inventory", {}).get("login_state") != "signed-in-or-ready")
 
 
 def provider_composer_selector(provider: str) -> str:
@@ -1445,7 +1714,7 @@ def provider_workflow_specs() -> dict[str, dict[str, dict[str, Any]]]:
                 "slash_triggers": [],
                 "confirmation_triggers": [],
                 "attachment_triggers": ["Add files and more", "Attach files", "Upload file"],
-                "running_markers": ["Stop generating", "Stop answering", "Generating"],
+                "running_markers": ["Stop generating", "Stop answering", "Generating", "Thinking", "Pro thinking"],
                 "completion_markers": ["Sources", "Final answer", "Done"],
                 "output_selectors": ["main", "[data-testid='conversation-turn']"],
             },
@@ -1498,12 +1767,23 @@ def provider_workflow_specs() -> dict[str, dict[str, dict[str, Any]]]:
             },
             "deep-research": {
                 "feature_triggers": ["Deep Research", "Deep research", "Recherche"],
-                "menu_triggers": ["Tools", "Canvas"],
+                "menu_triggers": ["Uploads\u00a0& Tools", "Uploads & Tools", "Tools", "Canvas"],
                 "attachment_triggers": ["Menü „Datei hochladen“ öffnen", "Datei hochladen", "Upload files", "Upload file"],
                 "pre_prompt_triggers": [],
                 "slash_triggers": [],
-                "confirmation_triggers": ["Start research", "Recherche starten", "Starten", "Create plan"],
-                "pre_confirm_wait_seconds": 45,
+                "confirmation_triggers": [
+                    "Start research",
+                    "Start Deep Research",
+                    "Recherche starten",
+                    "Research starten",
+                    "Starten",
+                    "Create report",
+                    "Bericht erstellen",
+                    "Create plan",
+                    "Plan bestätigen",
+                ],
+                "requires_post_submit_confirmation": True,
+                "pre_confirm_wait_seconds": 120,
                 "running_markers": ["Creating plan", "Plan erstellen", "Researching", "Analysiere Ergebnisse", "Erstelle Bericht"],
                 "completion_markers": ["Research complete", "Recherche fertig", "Ich bin mit deiner Recherche fertig", "Abgeschlossen"],
                 "output_selectors": ["#extended-response-markdown-content", "message-content", "main"],
@@ -1630,6 +1910,15 @@ def provider_workflow_spec(provider: str, mode: str) -> dict[str, Any]:
     return spec
 
 
+def workflow_requires_post_submit_confirmation(provider: str, mode: str) -> bool:
+    provider_id = normalize_provider_name(provider)
+    return provider_id == "gemini" and slug(mode or "chat") == "deep-research"
+
+
+def effective_confirm_start(confirm_start: bool, *, provider: str, mode: str) -> bool:
+    return bool(confirm_start or workflow_requires_post_submit_confirmation(provider, mode))
+
+
 def build_ai_workflow_plan(
     *,
     browser: dict[str, Any],
@@ -1650,6 +1939,8 @@ def build_ai_workflow_plan(
     browser_id = normalize_browser_name(str(browser.get("id", "")))
     profile_directory = str(profile.get("directory", "Default"))
     spec = provider_workflow_spec(provider_id, mode)
+    confirm_start_requested = bool(confirm_start)
+    confirm_start = effective_confirm_start(confirm_start, provider=provider_id, mode=spec["mode"])
     actions: list[dict[str, Any]] = [
         {"label": "open-provider", "target": spec["url"]},
         {"label": "capture-before", "tool": "snapshot+visible-text+screenshot"},
@@ -1697,6 +1988,8 @@ def build_ai_workflow_plan(
         "profile_name": profile.get("name", ""),
         "submit": submit,
         "confirm_start": confirm_start,
+        "confirm_start_requested": confirm_start_requested,
+        "confirm_start_auto_enabled": bool(confirm_start and not confirm_start_requested),
         "wait_seconds": wait_seconds,
         "response_timeout": response_timeout,
         "copy_output": copy_output,
@@ -1820,6 +2113,8 @@ def clean_workflow_response_text(text: str, *, provider: str, prompt: str = "") 
                 "Ready when you are.",
                 "Where should we begin?",
                 "What’s on the agenda today?",
+                "Pro thinking",
+                "Extended Pro",
             }:
                 continue
             if re.fullmatch(r"/(?:deepresearch|deep research|agent|image|create image)", line, flags=re.I):
@@ -1840,6 +2135,19 @@ RATE_LIMIT_PATTERNS: list[tuple[re.Pattern[str], int]] = [
     (re.compile(r"\b(?:try again|retry|please wait)\s+(?:in|after|for)\s+\d+\s*(?:seconds?|minutes?|hours?|secs?|mins?|hrs?)\b", re.I), 5 * 60),
     (re.compile(r"\b(?:warte|versuch(?:e)? es erneut)\s+(?:in|nach|für)?\s*\d+\s*(?:sekunden?|minuten?|stunden?)\b", re.I), 5 * 60),
     (re.compile(r"\b(?:nicht mehr übrig|limit erreicht|zu viele anfragen|kontingent ausgeschöpft|limit wird .*zurückgesetzt)\b", re.I), 5 * 60),
+    (re.compile(r"\brate[-_ ]limit[-_ ]or[-_ ]quota[-_ ]wall\b", re.I), 5 * 60),
+]
+
+CHALLENGE_COOLDOWN_SECONDS = 30 * 60
+
+CHALLENGE_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"\b(?:captcha|recaptcha|hcaptcha|turnstile)\s+(?:challenge|required|verification|blocked|detected)\b", re.I),
+    re.compile(r"\b(?:solve|complete|pass)\s+(?:the\s+)?(?:captcha|recaptcha|hcaptcha|turnstile)\b", re.I),
+    re.compile(r"\b(?:verify|confirm|prove)\s+(?:you(?:'re| are)?\s+)?(?:human|not a robot)\b", re.I),
+    re.compile(r"\b(?:cloudflare ray id|cloudflare turnstile challenge|checking if the site connection is secure|just a moment)\b", re.I),
+    re.compile(r"\b(?:unusual traffic|suspicious activity|automated queries|automated traffic)\b", re.I),
+    re.compile(r"\b(?:sicherheitsprüfung|bestätige,?\s*dass du ein mensch bist|kein roboter)\b", re.I),
+    re.compile(r"\bcaptcha[-_ ]or[-_ ]challenge[-_ ]wall\b", re.I),
 ]
 
 
@@ -1883,9 +2191,19 @@ def parse_wait_seconds_from_text(text: str) -> int | None:
 def detect_rate_limit_from_text(text: str, *, default_wait_seconds: int = 5 * 60) -> dict[str, Any]:
     expanded = expand_agent_browser_eval_text(text or "")
     lowered = expanded.lower()
+    challenge_matches = [pattern.pattern for pattern in CHALLENGE_PATTERNS if pattern.search(expanded)]
+    if challenge_matches:
+        return {
+            "limited": True,
+            "kind": "challenge",
+            "wait_seconds": CHALLENGE_COOLDOWN_SECONDS,
+            "matched_patterns": challenge_matches,
+            "confidence": "high",
+            "text_preview": expanded[:500],
+        }
     matched = [pattern.pattern for pattern, _ in RATE_LIMIT_PATTERNS if pattern.search(expanded)]
     if not matched:
-        return {"limited": False, "wait_seconds": 0, "matched_patterns": [], "text_preview": expanded[:500]}
+        return {"limited": False, "kind": "", "wait_seconds": 0, "matched_patterns": [], "text_preview": expanded[:500]}
     wait_seconds = parse_wait_seconds_from_text(expanded)
     if wait_seconds is None:
         waits = [fallback for pattern, fallback in RATE_LIMIT_PATTERNS if pattern.search(expanded)]
@@ -1893,6 +2211,7 @@ def detect_rate_limit_from_text(text: str, *, default_wait_seconds: int = 5 * 60
     confidence = "high" if any(term in lowered for term in ["rate", "limit", "too many", "nicht mehr", "zu viele"]) else "medium"
     return {
         "limited": True,
+        "kind": "rate-limit",
         "wait_seconds": int(max(1, wait_seconds)),
         "matched_patterns": matched,
         "confidence": confidence,
@@ -1900,8 +2219,81 @@ def detect_rate_limit_from_text(text: str, *, default_wait_seconds: int = 5 * 60
     }
 
 
-def rate_limit_key(*, browser: str, profile: str, provider: str, mode: str) -> str:
-    return "|".join([normalize_browser_name(browser), slug(profile or "Default"), normalize_provider_name(provider), slug(mode or "chat")])
+def rate_limit_key(*, browser: str, profile: str, provider: str, mode: str, account: str = "") -> str:
+    parts = [normalize_browser_name(browser), slug(profile or "Default"), normalize_provider_name(provider), slug(mode or "chat")]
+    if account:
+        parts.append(slug(account))
+    return "|".join(parts)
+
+
+PAID_WORKFLOW_MODES = {"agent", "deep-research", "image", "image-generation", "research", "artifacts", "labs"}
+
+
+def is_paid_workflow_mode(mode: str) -> bool:
+    return slug(mode or "chat") in PAID_WORKFLOW_MODES
+
+
+def check_and_record_pacing_budget(
+    state: dict[str, Any],
+    *,
+    provider: str,
+    account: str,
+    mode: str,
+    max_daily_paid_runs: int = 0,
+    min_action_delay_ms: int = 0,
+    now: float | None = None,
+    record: bool = False,
+) -> dict[str, Any]:
+    now = time.time() if now is None else float(now)
+    key = "|".join([normalize_provider_name(provider), slug(account or "unknown-account"), slug(mode or "chat")])
+    pacing = state.setdefault("pacing", {})
+    entry = pacing.setdefault(key, {"last_action_at": 0.0, "days": {}})
+    errors: list[str] = []
+    try:
+        last_action_at = float(entry.get("last_action_at") or 0)
+    except (TypeError, ValueError):
+        last_action_at = 0.0
+    min_delay_seconds = max(0, int(min_action_delay_ms)) / 1000
+    remaining_delay = int(math.ceil(last_action_at + min_delay_seconds - now)) if min_delay_seconds else 0
+    if remaining_delay > 0:
+        errors.append("minimum-action-spacing-active")
+
+    day_key = str(int(now // 86400))
+    days = entry.setdefault("days", {})
+    day = days.setdefault(day_key, {"paid_runs": 0})
+    try:
+        paid_runs = int(day.get("paid_runs") or 0)
+    except (TypeError, ValueError):
+        paid_runs = 0
+    paid_mode = is_paid_workflow_mode(mode)
+    if paid_mode and max_daily_paid_runs and paid_runs >= int(max_daily_paid_runs):
+        errors.append("daily-paid-run-budget-exceeded")
+
+    allowed = not errors
+    if allowed and record:
+        entry["last_action_at"] = now
+        if paid_mode:
+            day["paid_runs"] = paid_runs + 1
+        state.setdefault("history", []).append(
+            {
+                "event": "pacing-budget-recorded",
+                "key": key,
+                "provider": normalize_provider_name(provider),
+                "account": account,
+                "mode": slug(mode or "chat"),
+                "recorded_at": now,
+                "paid": paid_mode,
+            }
+        )
+    return {
+        "allowed": allowed,
+        "errors": errors,
+        "key": key,
+        "paid_mode": paid_mode,
+        "remaining_delay_seconds": max(0, remaining_delay),
+        "daily_paid_runs": paid_runs + (1 if allowed and record and paid_mode else 0),
+        "max_daily_paid_runs": int(max_daily_paid_runs or 0),
+    }
 
 
 def default_rate_limit_state_path() -> Path:
@@ -1999,6 +2391,17 @@ def detect_rate_limit_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
         str(payload.get("blocker", "")),
         str(payload.get("error", "")),
     ]
+    guard = payload.get("pre_submit_guard") or {}
+    if isinstance(guard, dict):
+        fragments.append(str(guard.get("status", "")))
+        fragments.extend(str(item) for item in guard.get("errors", []) or [])
+        fragments.extend(str(item) for item in guard.get("matched_markers", []) or [])
+    for event in payload.get("workflow_events", []) or []:
+        if isinstance(event, dict):
+            fragments.append(str(event.get("event", "")))
+            fragments.append(str(event.get("status", "")))
+            fragments.extend(str(item) for item in event.get("errors", []) or [])
+            fragments.extend(str(item) for item in event.get("markers", []) or [])
     if isinstance(output, dict):
         fragments.append(str(output.get("text", "")))
         fragments.append(str(output.get("status", "")))
@@ -2009,12 +2412,53 @@ def detect_rate_limit_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
         if path_value:
             path = Path(str(path_value)).expanduser()
             if path.exists() and path.is_file():
-                try:
+                with contextlib.suppress(OSError):
                     fragments.append(path.read_text(encoding="utf-8", errors="replace")[:20000])
-                except OSError:
-                    pass
-    detected = detect_rate_limit_from_text("\n".join(fragments))
-    return detected
+    return detect_rate_limit_from_text("\n".join(fragments))
+
+
+def record_rate_limit_from_payload(
+    payload: dict[str, Any],
+    *,
+    browser: str,
+    profile: str,
+    provider: str,
+    mode: str,
+    state_path: Path | None = None,
+    source: str = "workflow-live-run",
+) -> dict[str, Any]:
+    """Persist a conservative cooldown when a live workflow hits a provider wall."""
+    detection = detect_rate_limit_from_payload(payload)
+    result: dict[str, Any] = {
+        "detected": bool(detection.get("limited")),
+        "detection": detection,
+        "state_path": str((state_path or default_rate_limit_state_path()).expanduser()),
+    }
+    if not detection.get("limited"):
+        return result
+
+    state_file = (state_path or default_rate_limit_state_path()).expanduser()
+    state = load_rate_limit_state(state_file)
+    cleanup_expired_rate_limits(state)
+    guard = payload.get("pre_submit_guard") or {}
+    account = ""
+    if isinstance(guard, dict):
+        account = str(guard.get("account") or "")
+    key = rate_limit_key(browser=browser, profile=profile, provider=provider, mode=mode, account=account)
+    entry = record_rate_limit(
+        state,
+        key,
+        wait_seconds=int(detection.get("wait_seconds") or 5 * 60),
+        browser=browser,
+        profile=profile,
+        provider=provider,
+        mode=mode,
+        reason=str(detection.get("kind") or "rate-limit"),
+        source=source,
+    )
+    write_rate_limit_state(state_file, state)
+    result.update({"key": key, "entry": entry})
+    return result
 
 
 def session_baseline_key(*, browser: str, profile: str, provider: str) -> str:
@@ -2183,12 +2627,17 @@ def browser_eval_latest_response_script(provider: str, selectors: list[str]) -> 
         "  .filter(line => line && !/^(Copy response|Copy message|Good response|Bad response|Share|More actions|ChatGPT can make mistakes|Gemini can make mistakes)/i.test(line))"
         "  .join('\\n')"
         "  .trim();"
+        "const keepUsefulTail = (text) => {"
+        "  const value = String(text || '');"
+        "  if (value.length <= 60000) return value;"
+        "  return value.slice(-60000);"
+        "};"
         "const texts = [];"
         "for (const selector of selectors) {"
         "  for (const el of Array.from(document.querySelectorAll(selector))) {"
         "    if (hidden(el)) continue;"
         "    const text = clean(el.innerText || el.textContent || '');"
-        "    if (text && !texts.includes(text)) texts.push(text.slice(0, 30000));"
+        "    if (text && !texts.includes(text)) texts.push(keepUsefulTail(text));"
         "  }"
         "}"
         "if (texts.length) return texts[texts.length - 1].slice(0, 60000);"
@@ -2196,11 +2645,45 @@ def browser_eval_latest_response_script(provider: str, selectors: list[str]) -> 
         "for (const selector of fallbackSelectors) {"
         "  for (const el of Array.from(document.querySelectorAll(selector)).slice(-8)) {"
         "    const text = clean(el.innerText || el.textContent || '');"
-        "    if (text && !fallback.includes(text)) fallback.push(text.slice(0, 30000));"
+        "    if (text && !fallback.includes(text)) fallback.push(keepUsefulTail(text));"
         "  }"
         "}"
         "if (fallback.length) return fallback[fallback.length - 1].slice(0, 60000);"
-        "return clean(document.body && (document.body.innerText || document.body.textContent) || '').slice(0, 60000);"
+        "return keepUsefulTail(clean(document.body && (document.body.innerText || document.body.textContent) || '')).slice(0, 60000);"
+        "})()"
+    )
+
+
+def gemini_open_completed_report_js_script() -> str:
+    return (
+        "(() => {"
+        "/* __AI_RESEARCH_GEMINI_OPEN_COMPLETED_REPORT__ */"
+        "const visible = (el) => {"
+        "  const rect = el.getBoundingClientRect();"
+        "  const style = window.getComputedStyle(el);"
+        "  return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';"
+        "};"
+        "if (document.querySelector('#extended-response-markdown-content')) {"
+        "  return {ok:true, alreadyOpen:true};"
+        "}"
+        "for (const close of Array.from(document.querySelectorAll('button[aria-label*=\"Close\"], button[aria-label*=\"Schließen\"], button[aria-label*=\"schließen\"]'))) {"
+        "  if (visible(close)) {"
+        "    close.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true, view:window}));"
+        "    break;"
+        "  }"
+        "}"
+        "const cards = Array.from(document.querySelectorAll('gem-processing-card.completed, [data-test-id=\"gem-processing-card\"].completed, immersive-entry-chip gem-processing-card'))"
+        "  .filter(visible);"
+        "if (!cards.length) return {ok:false, reason:'no-completed-card'};"
+        "const card = cards[cards.length - 1];"
+        "card.scrollIntoView({block:'center', inline:'center'});"
+        "const rect = card.getBoundingClientRect();"
+        "const target = card.querySelector('button,a,[role=\"button\"]') || card.closest('immersive-entry-chip') || card;"
+        "for (const type of ['pointerdown','mousedown','pointerup','mouseup']) {"
+        "  target.dispatchEvent(new MouseEvent(type, {bubbles:true, cancelable:true, view:window, clientX:rect.left + rect.width / 2, clientY:rect.top + rect.height / 2}));"
+        "}"
+        "if (typeof target.click === 'function') target.click();"
+        "return {ok:true, opened:true, text:(card.innerText || card.textContent || '').slice(0, 300)};"
         "})()"
     )
 
@@ -2208,8 +2691,15 @@ def browser_eval_latest_response_script(provider: str, selectors: list[str]) -> 
 def browser_eval_visible_text_script(max_chars: int = 60000) -> str:
     return (
         "(() => {"
-        "const root = document.querySelector('main') || document.body;"
-        "const text = (root && (root.innerText || root.textContent) || '').trim();"
+        "const parts = [];"
+        "const body = document.body && (document.body.innerText || document.body.textContent) || '';"
+        "const main = document.querySelector('main');"
+        "const mainText = main && (main.innerText || main.textContent) || '';"
+        "const ariaText = Array.from(document.querySelectorAll('[aria-label]')).map(el => el.getAttribute('aria-label') || '').filter(Boolean).join('\\n');"
+        "if (body) parts.push(body);"
+        "if (mainText && mainText !== body) parts.push(mainText);"
+        "if (ariaText) parts.push(ariaText);"
+        "const text = parts.join('\\n').trim();"
         f"return text.slice(0, {int(max_chars)});"
         "})()"
     )
@@ -2228,6 +2718,7 @@ def wait_for_workflow_response(
     attachment_names: list[str] | None = None,
 ) -> dict[str, Any]:
     deadline = time.monotonic() + max(0.1, response_timeout)
+    started_at = time.monotonic()
     max_polls = max(1, int(math.ceil(max(0.1, response_timeout) / max(0.2, poll_interval))))
     last_text = ""
     stable_polls = 0
@@ -2241,7 +2732,13 @@ def wait_for_workflow_response(
         "text": "",
         "text_length": 0,
     }
+    requested_markers = extract_requested_completion_markers(prompt)
     for index in range(max_polls):
+        if normalize_provider_name(provider) == "gemini" and slug(mode or "chat") == "deep-research":
+            invoke(
+                f"gemini-open-completed-report-{index}",
+                ["eval", gemini_open_completed_report_js_script()],
+            )
         snapshot = invoke(f"snapshot-response-{index}", ["snapshot", "-i", "-c"])
         if snapshot.stdout:
             visible_text_parts.append(snapshot.stdout)
@@ -2253,6 +2750,37 @@ def wait_for_workflow_response(
             visible_text_parts.append(output_eval.stdout)
         combined = "\n".join(part for part in [snapshot.stdout, output_eval.stdout] if part)
         latest_output = extract_workflow_output_from_text(combined, provider=provider, mode=mode)
+        focused_output = extract_workflow_output_from_text(output_eval.stdout, provider=provider, mode=mode) if output_eval.stdout else latest_output
+        focused_markers_found = requested_completion_markers_in_response(
+            focused_output.get("text", ""),
+            provider=provider,
+            prompt=prompt,
+        )
+        if focused_markers_found:
+            focused_output["status"] = "complete"
+            focused_output["requested_markers_found"] = focused_markers_found
+            polls.append(
+                {
+                    "index": index,
+                    "status": "complete",
+                    "text_length": focused_output.get("text_length", 0),
+                    "effective_text_length": len(clean_workflow_response_text(focused_output.get("text", ""), provider=provider, prompt=prompt)),
+                    "completion_markers_found": focused_output.get("completion_markers_found", []),
+                    "running_markers_found": focused_output.get("running_markers_found", []),
+                    "requested_markers_found": focused_markers_found,
+                    "source": "focused-output",
+                }
+            )
+            return {"event": "wait-for-response", "status": "complete", "polls": polls, "output": focused_output}
+        focused_effective_text = clean_workflow_response_text(focused_output.get("text", ""), provider=provider, prompt=prompt)
+        focused_looks_composer_only = looks_like_composer_only_output(
+            focused_output.get("text", ""),
+            provider=provider,
+            prompt=prompt,
+            attachment_names=attachment_names or [],
+        )
+        if focused_effective_text and not focused_looks_composer_only:
+            latest_output = focused_output
         effective_text = clean_workflow_response_text(latest_output.get("text", ""), provider=provider, prompt=prompt)
         ignored_composer_output = looks_like_composer_only_output(
             latest_output.get("text", ""),
@@ -2260,11 +2788,23 @@ def wait_for_workflow_response(
             prompt=prompt,
             attachment_names=attachment_names or [],
         )
+        requested_markers_in_effective_text = requested_completion_markers_in_response(
+            latest_output.get("text", ""),
+            provider=provider,
+            prompt=prompt,
+        )
+        if requested_markers_in_effective_text:
+            ignored_composer_output = False
         if latest_output.get("text") and not effective_text:
             ignored_composer_output = True
         current_text = effective_text or latest_output.get("text", "")
         if ignored_composer_output:
             current_text = ""
+        requested_markers_found = requested_completion_markers_in_response(
+            current_text,
+            provider=provider,
+            prompt=prompt,
+        )
         if current_text and current_text == last_text and latest_output.get("status") != "running":
             stable_polls += 1
         else:
@@ -2278,18 +2818,57 @@ def wait_for_workflow_response(
             "completion_markers_found": latest_output.get("completion_markers_found", []),
             "running_markers_found": latest_output.get("running_markers_found", []),
         }
+        if requested_markers_found:
+            poll_record["requested_markers_found"] = requested_markers_found
         if ignored_composer_output:
             poll_record["ignored_composer_output"] = True
         polls.append(poll_record)
-        if latest_output.get("status") == "complete" and not ignored_composer_output:
+        if requested_markers_found and not ignored_composer_output:
+            latest_output["status"] = "complete"
+            latest_output["requested_markers_found"] = requested_markers_found
             return {"event": "wait-for-response", "status": "complete", "polls": polls, "output": latest_output}
-        if stable_polls >= 1 and len(effective_text) > 0 and not ignored_composer_output:
+        if latest_output.get("status") == "complete" and not ignored_composer_output and not requested_markers:
+            return {"event": "wait-for-response", "status": "complete", "polls": polls, "output": latest_output}
+        if stable_polls >= 1 and len(effective_text) > 0 and not ignored_composer_output and not is_paid_workflow_mode(slug(mode or "chat")):
             return {"event": "wait-for-response", "status": "stable", "polls": polls, "output": latest_output}
+        no_progress_elapsed = time.monotonic() - started_at
+        if (
+            is_paid_workflow_mode(slug(mode or "chat"))
+            and stable_polls >= 5
+            and no_progress_elapsed >= min(60.0, max(30.0, response_timeout / 4))
+            and not latest_output.get("completion_markers_found")
+            and not latest_output.get("running_markers_found")
+            and not ignored_composer_output
+        ):
+            return {"event": "wait-for-response", "status": "no-progress", "polls": polls, "output": latest_output}
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
         time.sleep(min(max(0.2, poll_interval), remaining))
     return {"event": "wait-for-response", "status": "timeout", "polls": polls, "output": latest_output}
+
+
+def extract_requested_completion_markers(prompt: str) -> list[str]:
+    markers: list[str] = []
+    for match in re.finditer(r"\b[A-Z0-9][A-Z0-9_]{4,}_(?:E2E_)?(?:OK|READY|DONE)\b", prompt or ""):
+        marker = match.group(0)
+        if marker not in markers:
+            markers.append(marker)
+    return markers
+
+
+def requested_completion_markers_in_response(text: str, *, provider: str, prompt: str = "") -> list[str]:
+    cleaned = clean_workflow_response_text(text or "", provider=provider, prompt=prompt)
+    response_lines = [" ".join(line.split()) for line in cleaned.splitlines() if line.strip()]
+    markers: list[str] = []
+    instruction_terms = ("end with", "ends with", "marker", "requested marker", "ensure", "reply exactly", "respond exactly")
+    for marker in extract_requested_completion_markers(prompt):
+        for line in response_lines:
+            line_lower = line.lower()
+            if line == marker or (line.endswith(marker) and not any(term in line_lower for term in instruction_terms)):
+                markers.append(marker)
+                break
+    return markers
 
 
 def looks_like_composer_only_output(text: str, *, provider: str, prompt: str = "", attachment_names: list[str] | None = None) -> bool:
@@ -2352,17 +2931,28 @@ def composer_js_fill_script(text: str) -> str:
         "const el = candidates[0].el;"
         "el.focus();"
         "if (el.isContentEditable) {"
-        "  el.innerText = text;"
         "  const range = document.createRange();"
         "  range.selectNodeContents(el);"
-        "  range.collapse(false);"
         "  const selection = window.getSelection();"
         "  selection.removeAllRanges();"
         "  selection.addRange(range);"
+        "  let inserted = false;"
+        "  try { inserted = document.execCommand('insertText', false, text); } catch (_) {}"
+        "  if (!inserted) {"
+        "    el.textContent = '';"
+        "    const textNode = document.createTextNode(text);"
+        "    el.appendChild(textNode);"
+        "    const fallbackRange = document.createRange();"
+        "    fallbackRange.selectNodeContents(el);"
+        "    fallbackRange.collapse(false);"
+        "    selection.removeAllRanges();"
+        "    selection.addRange(fallbackRange);"
+        "  }"
         "} else {"
         "  el.value = text;"
         "  if (typeof el.setSelectionRange === 'function') el.setSelectionRange(text.length, text.length);"
         "}"
+        "el.dispatchEvent(new InputEvent('beforeinput', {bubbles:true, cancelable:true, inputType:'insertText', data:text}));"
         "el.dispatchEvent(new InputEvent('input', {bubbles:true, inputType:'insertText', data:text}));"
         "el.dispatchEvent(new Event('change', {bubbles:true}));"
         "return {ok:true, tag:el.tagName, role:el.getAttribute('role') || '', textLength:text.length};"
@@ -2454,6 +3044,12 @@ def parse_json_stdout(text: str) -> dict[str, Any]:
         value = json.loads(text or "{}")
     except json.JSONDecodeError:
         return {}
+    if isinstance(value, str):
+        try:
+            nested = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return nested if isinstance(nested, dict) else {}
     return value if isinstance(value, dict) else {}
 
 
@@ -2586,7 +3182,7 @@ def login_heal_js_script(provider: str) -> str:
         "    if (lower !== wanted) continue;"
         "    const rect = el.getBoundingClientRect();"
         "    el.scrollIntoView({block:'center', inline:'center'});"
-        "    for (const type of ['pointerdown','mousedown','pointerup','mouseup','click']) {"
+        "    for (const type of ['pointerdown','mousedown','pointerup','mouseup']) {"
         "      el.dispatchEvent(new MouseEvent(type, {bubbles:true, cancelable:true, view:window, clientX:rect.left + rect.width / 2, clientY:rect.top + rect.height / 2}));"
         "    }"
         "    if (typeof el.click === 'function') el.click();"
@@ -2644,25 +3240,84 @@ def click_text_js_script(label: str) -> str:
         "(() => {"
         f"const wanted = {label_json}.trim().toLowerCase();"
         "const blocked = ['dictation', 'voice'];"
-        "const candidates = Array.from(document.querySelectorAll('button, [role=\"button\"], [role=\"menuitem\"], [role=\"menuitemradio\"], [role=\"option\"], a, [aria-label], [data-testid]'));"
-        "for (const el of candidates) {"
-        "  const text = (el.innerText || el.textContent || el.getAttribute('aria-label') || '').trim();"
-        "  if (!text) continue;"
-        "  const lower = text.toLowerCase();"
-        "  if (blocked.some(item => lower.includes(item))) continue;"
-        "  if (lower === wanted || lower.includes(wanted)) {"
+        "const norm = (text) => String(text || '').replace(/\\s+/g, ' ').trim();"
+        "const roleRank = (role, tag) => ({menuitem:5, menuitemcheckbox:5, menuitemradio:5, option:4, button:3, link:2}[role] || (tag === 'BUTTON' ? 3 : tag === 'A' ? 2 : 0));"
+        "const raw = Array.from(document.querySelectorAll('button, [role=\"button\"], [role=\"menuitem\"], [role=\"menuitemcheckbox\"], [role=\"menuitemradio\"], [role=\"option\"], a, [aria-label], [data-testid]'));"
+        "const candidates = raw.map((el) => {"
+        "  const tag = el.tagName;"
+        "  const role = el.getAttribute('role') || '';"
+        "  const aria = norm(el.getAttribute('aria-label') || el.getAttribute('title') || '');"
+        "  const text = norm(el.innerText || el.textContent || aria);"
+        "  return {el, tag, role, aria, text, lower: text.toLowerCase(), rank: roleRank(role, tag)};"
+        "}).filter((item) => {"
+        "  const el = item.el;"
+        "  if (!item.text) return false;"
+        "  if (el.matches('textarea, input, [contenteditable=\"true\"], [role=\"textbox\"]')) return false;"
+        "  if (blocked.some(blockedText => item.lower.includes(blockedText))) return false;"
+        "  const rect = el.getBoundingClientRect();"
+        "  const style = window.getComputedStyle(el);"
+        "  return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none' && !el.disabled && el.getAttribute('aria-disabled') !== 'true';"
+        "});"
+        "const exact = candidates.filter((item) => item.lower === wanted || item.aria.toLowerCase() === wanted);"
+        "const contains = candidates.filter((item) => (item.lower.includes(wanted) || item.aria.toLowerCase().includes(wanted)) && item.text.length <= wanted.length + 80);"
+        "const ordered = (exact.length ? exact : contains).sort((a, b) => (b.rank - a.rank) || (a.text.length - b.text.length));"
+        "for (const item of ordered) {"
+        "    const el = item.el;"
         "    const rect = el.getBoundingClientRect();"
-        "    const style = window.getComputedStyle(el);"
-        "    if (rect.width <= 0 || rect.height <= 0 || style.visibility === 'hidden' || style.display === 'none') continue;"
         "    el.scrollIntoView({block:'center', inline:'center'});"
-        "    for (const type of ['pointerdown','mousedown','pointerup','mouseup','click']) {"
+        "    for (const type of ['pointerdown','mousedown','pointerup','mouseup']) {"
         "      el.dispatchEvent(new MouseEvent(type, {bubbles:true, cancelable:true, view:window, clientX:rect.left + rect.width / 2, clientY:rect.top + rect.height / 2}));"
         "    }"
         "    if (typeof el.click === 'function') el.click();"
-        "    return {ok:true, text, tag:el.tagName, role:el.getAttribute('role') || ''};"
-        "  }"
+        "    return {ok:true, text:item.text, tag:item.tag, role:item.role, exact: item.lower === wanted || item.aria.toLowerCase() === wanted};"
         "}"
         "return {ok:false, reason:'not-found', label:wanted};"
+        "})()"
+    )
+
+
+def gemini_confirm_deep_research_js_script() -> str:
+    return (
+        "(() => {"
+        "/* __AI_RESEARCH_GEMINI_CONFIRM_DEEP_RESEARCH__ */"
+        "const norm = (text) => String(text || '').replace(/\\s+/g, ' ').trim();"
+        "const visible = (el) => {"
+        "  const rect = el.getBoundingClientRect();"
+        "  const style = window.getComputedStyle(el);"
+        "  return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';"
+        "};"
+        "const click = (el) => {"
+        "  const rect = el.getBoundingClientRect();"
+        "  el.scrollIntoView({block:'center', inline:'center'});"
+        "  for (const type of ['pointerdown','mousedown','pointerup','mouseup']) {"
+        "    el.dispatchEvent(new MouseEvent(type, {bubbles:true, cancelable:true, view:window, clientX:rect.left + rect.width / 2, clientY:rect.top + rect.height / 2}));"
+        "  }"
+        "  if (typeof el.click === 'function') el.click();"
+        "};"
+        "const selectors = ["
+        "  'gem-button[data-test-id=\"confirm-button\"] button',"
+        "  '[data-test-id=\"confirm-button\"] button',"
+        "  'button[aria-label=\"Recherche starten\"]',"
+        "  'button[aria-label=\"Start research\"]',"
+        "  'button[aria-label=\"Start Deep Research\"]',"
+        "  'button[aria-label=\"Create report\"]'"
+        "];"
+        "for (const selector of selectors) {"
+        "  for (const el of Array.from(document.querySelectorAll(selector))) {"
+        "    if (!visible(el) || el.disabled || el.getAttribute('aria-disabled') === 'true') continue;"
+        "    click(el);"
+        "    return {ok:true, method:'gemini-confirm-selector', selector, text:norm(el.innerText || el.textContent || el.getAttribute('aria-label') || '')};"
+        "  }"
+        "}"
+        "const labels = new Set(['recherche starten', 'research starten', 'start research', 'start deep research', 'starten', 'create report', 'bericht erstellen', 'create plan', 'plan bestätigen']);"
+        "for (const el of Array.from(document.querySelectorAll('button, [role=\"button\"]'))) {"
+        "  if (!visible(el) || el.disabled || el.getAttribute('aria-disabled') === 'true') continue;"
+        "  const text = norm(el.innerText || el.textContent || el.getAttribute('aria-label') || '').toLowerCase();"
+        "  if (!labels.has(text)) continue;"
+        "  click(el);"
+        "  return {ok:true, method:'gemini-confirm-label', text};"
+        "}"
+        "return {ok:false, reason:'gemini-confirm-not-found', bodyPreview:norm(document.body && document.body.innerText || '').slice(0, 1000)};"
         "})()"
     )
 
@@ -2795,7 +3450,7 @@ def endpoint_version(port: int, host: str = "127.0.0.1") -> dict[str, Any] | Non
 
 def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
     try:
-        return subprocess.run(cmd, capture_output=True, text=True)
+        return subprocess.run(cmd, capture_output=True, text=True, check=False)
     except PermissionError as exc:
         return subprocess.CompletedProcess(cmd, 126, "", str(exc))
 
@@ -2804,7 +3459,7 @@ def copy_text_to_clipboard(text: str) -> dict[str, Any]:
     if not text:
         return {"requested": True, "copied": False, "text_length": 0, "error": "empty-output"}
     try:
-        result = subprocess.run(["pbcopy"], input=text, text=True, capture_output=True)
+        result = subprocess.run(["pbcopy"], input=text, text=True, capture_output=True, check=False)
     except OSError as exc:
         return {"requested": True, "copied": False, "text_length": len(text), "error": str(exc)}
     payload = {"requested": True, "copied": result.returncode == 0, "text_length": len(text)}
@@ -2986,7 +3641,7 @@ def build_artifact_paths(root: Path, *, provider: str, mode: str, browser: str, 
 def chat_cache_key(*, browser: str, profile: str, provider: str, chat_url: str) -> str:
     browser_id = normalize_browser_name(browser)
     provider_id = normalize_provider_name(provider)
-    digest = hashlib.sha256(f"{browser_id}\0{profile}\0{provider_id}\0{chat_url}".encode("utf-8")).hexdigest()[:16]
+    digest = hashlib.sha256(f"{browser_id}\0{profile}\0{provider_id}\0{chat_url}".encode()).hexdigest()[:16]
     return f"{slug(browser_id)}-{slug(profile)}-{slug(provider_id)}-{digest}"
 
 
@@ -3243,13 +3898,12 @@ def workflow_suite_targets(
         ]
 
     if include_all_features:
-        targets = [
+        return [
             {"provider": provider_id, "mode": mode, "prompt": default_workflow_prompt(provider_id, mode)}
             for provider_id, modes in supported_specs.items()
             if not provider_filter or provider_id in provider_filter
             for mode in modes
         ]
-        return targets
 
     preferred = [
         ("chatgpt", "agent"),
@@ -3363,9 +4017,7 @@ def is_allowed_extension_profile_path(path: Path, extension_ids: set[str]) -> bo
         if root_name in parts:
             index = parts.index(root_name)
             return len(parts) > index + 1 and parts[index + 1].lower() in lower_ids
-    if parts and parts[0] == "Extension State":
-        return True
-    return False
+    return bool(parts and parts[0] == "Extension State")
 
 
 def should_exclude_profile_path(path: Path, *, extension_ids: set[str] | None = None) -> bool:
@@ -3386,9 +4038,7 @@ def should_exclude_profile_path(path: Path, *, extension_ids: set[str] | None = 
         return True
     if "Service Worker" in parts and "CacheStorage" in parts:
         return True
-    if path.suffix == ".blob" and "IndexedDB" in parts:
-        return True
-    return False
+    return bool(path.suffix == ".blob" and "IndexedDB" in parts)
 
 
 def copy_profile_tree(src: Path, dst: Path, *, extension_ids: set[str] | None = None) -> None:
@@ -3439,10 +4089,8 @@ def clone_browser_profile_for_agent_browser(
     for filename in ["Local State", "First Run"]:
         source_file = source_user_data / filename
         if source_file.exists():
-            try:
+            with contextlib.suppress(OSError):
                 shutil.copy2(source_file, clone_user_data / filename)
-            except OSError:
-                pass
     return {
         "ok": True,
         "source_profile": str(source_profile),
@@ -3485,10 +4133,8 @@ def prepare_sibling_profile(
         for filename in ["Local State", "First Run"]:
             source_file = source_user_data / filename
             if source_file.exists():
-                try:
+                with contextlib.suppress(OSError):
                     shutil.copy2(source_file, sibling_user_data / filename)
-                except OSError:
-                    pass
         status = "refreshed" if refresh else "seeded"
     removed_locks = clean_sibling_profile_locks(sibling_user_data, profile_directory)
     return {
@@ -3660,13 +4306,26 @@ def terminate_process(process: subprocess.Popen[str] | None) -> None:
         process.wait(timeout=5)
 
 
-def capture_cdp_screenshot(port: int, screenshot: Path, *, timeout: float = 20.0) -> bool:
+def is_valid_png_file(path: Path, *, minimum_bytes: int = 3) -> bool:
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return False
+    if len(data) < minimum_bytes:
+        return False
+    return data.startswith(b"\x89PNG\r\n\x1a\n") or data[:3].lower() == b"png"
+
+
+def capture_cdp_screenshot(port: int, screenshot: Path, *, timeout: float = 20.0, target_id: str = "") -> bool:
     screenshot.parent.mkdir(parents=True, exist_ok=True)
     script = r"""
-const [base, out] = process.argv.slice(1);
+const [base, out, targetId = ''] = process.argv.slice(1);
 const targets = await (await fetch(`${base}/json/list`)).json();
 const usablePage = (item) => item.type === 'page' && !/^(about:|chrome:|chrome-extension:|devtools:)/.test(String(item.url || ''));
-const target = targets.find((item) => usablePage(item) && /^https?:/.test(String(item.url || ''))) || targets.find(usablePage) || targets.find((item) => item.type === 'page');
+const target = targetId
+  ? targets.find((item) => item.id === targetId)
+  : targets.find((item) => usablePage(item) && /^https?:/.test(String(item.url || ''))) || targets.find(usablePage) || targets.find((item) => item.type === 'page');
+if (targetId && !target) throw new Error(`Requested CDP target not found: ${targetId}`);
 if (!target || !target.webSocketDebuggerUrl) throw new Error('No page target for CDP screenshot');
 const ws = new WebSocket(target.webSocketDebuggerUrl);
 let nextId = 0;
@@ -3699,18 +4358,27 @@ fs.writeFileSync(out, Buffer.from(result.data, 'base64'));
 clearTimeout(timer);
 ws.close();
 """
-    result = subprocess.run(["node", "--input-type=module", "-e", script, cdp_http_base_for_port(port), str(screenshot)], capture_output=True, text=True, timeout=timeout)
-    return result.returncode == 0 and screenshot.exists() and screenshot.stat().st_size > 0
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", script, cdp_http_base_for_port(port), str(screenshot), target_id],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+    return is_valid_png_file(screenshot) if result.returncode == 0 else False
 
 
-def set_cdp_file_input_files(port: int, files: list[Path], *, timeout: float = 20.0) -> subprocess.CompletedProcess[str]:
+def set_cdp_file_input_files(port: int, files: list[Path], *, timeout: float = 20.0, target_id: str = "") -> subprocess.CompletedProcess[str]:
     expanded_files = [str(path.expanduser().resolve()) for path in files if path.expanduser().exists()]
     script = r"""
-const [base, filesJson] = process.argv.slice(1);
+const [base, filesJson, targetId = ''] = process.argv.slice(1);
 const files = JSON.parse(filesJson);
 const targets = await (await fetch(`${base}/json/list`)).json();
 const usablePage = (item) => item.type === 'page' && !/^(about:|chrome:|chrome-extension:|devtools:)/.test(String(item.url || ''));
-const target = targets.find((item) => usablePage(item) && /^https?:/.test(String(item.url || ''))) || targets.find(usablePage) || targets.find((item) => item.type === 'page');
+const target = targetId
+  ? targets.find((item) => item.id === targetId)
+  : targets.find((item) => usablePage(item) && /^https?:/.test(String(item.url || ''))) || targets.find(usablePage) || targets.find((item) => item.type === 'page');
+if (targetId && !target) throw new Error(`Requested CDP target not found: ${targetId}`);
 if (!target || !target.webSocketDebuggerUrl) throw new Error('No page target for CDP file upload');
 const ws = new WebSocket(target.webSocketDebuggerUrl);
 let nextId = 0;
@@ -3762,7 +4430,13 @@ console.log(JSON.stringify(result));
     if not expanded_files:
         return subprocess.CompletedProcess(["cdp-file-upload", str(port)], 1, "", "No existing attachment files")
     try:
-        return subprocess.run(["node", "--input-type=module", "-e", script, cdp_http_base_for_port(port), json.dumps(expanded_files)], capture_output=True, text=True, timeout=timeout)
+        return subprocess.run(
+            ["node", "--input-type=module", "-e", script, cdp_http_base_for_port(port), json.dumps(expanded_files), target_id],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
     except subprocess.TimeoutExpired as exc:
         return subprocess.CompletedProcess(
             ["node", "cdp-file-upload", str(port)],
@@ -3779,11 +4453,12 @@ def upload_cdp_attachments(
     commands: list[dict[str, Any]],
     workflow_events: list[dict[str, Any]],
     timeout: float,
+    target_id: str = "",
     label: str = "attach-files",
 ) -> subprocess.CompletedProcess[str] | None:
     if not attachments:
         return None
-    result = set_cdp_file_input_files(port, attachments, timeout=min(timeout, 20.0))
+    result = set_cdp_file_input_files(port, attachments, timeout=min(timeout, 20.0), target_id=target_id)
     file_paths = [str(path.expanduser()) for path in attachments]
     commands.append(
         {
@@ -3801,10 +4476,8 @@ def upload_cdp_attachments(
         "stdout": result.stdout[-4000:],
         "stderr": result.stderr[-4000:],
     }
-    try:
+    with contextlib.suppress(json.JSONDecodeError):
         upload_event["result"] = json.loads(result.stdout)
-    except json.JSONDecodeError:
-        pass
     workflow_events.append(upload_event)
     return result
 
@@ -3819,6 +4492,7 @@ def prepare_and_upload_attachments(
     invoke: Any,
     snapshot: str,
     menu_triggers: list[str],
+    target_id: str = "",
     label: str = "attach-files",
 ) -> subprocess.CompletedProcess[str] | None:
     if not attachments:
@@ -3839,6 +4513,7 @@ def prepare_and_upload_attachments(
         commands=commands,
         workflow_events=workflow_events,
         timeout=timeout,
+        target_id=target_id,
         label=label,
     )
 
@@ -4025,6 +4700,88 @@ def click_first_agent_browser_text(
     return {"clicked": False, "label": "", "attempts": attempts}
 
 
+def prepare_gemini_deep_research_mode(invoke: Any, *, snapshot: str = "") -> tuple[dict[str, Any], str]:
+    attempts: list[dict[str, Any]] = []
+    open_result = invoke(
+        "gemini-open-mode-menu",
+        [
+            "eval",
+            "(() => {"
+            "const btn = Array.from(document.querySelectorAll('button')).find(el => "
+            "String(el.getAttribute('aria-label') || '').includes('Modusauswahl öffnen') || "
+            "String(el.innerText || el.textContent || '').includes('Flash') || "
+            "String(el.innerText || el.textContent || '').trim() === 'Pro');"
+            "if (!btn) return JSON.stringify({ok:false, reason:'mode-menu-not-found'});"
+            "btn.click();"
+            "return JSON.stringify({ok:true, label: btn.getAttribute('aria-label') || btn.innerText || ''});"
+            "})()",
+        ],
+    )
+    attempts.append({"step": "open-mode-menu", "returncode": open_result.returncode})
+    invoke("wait-after-gemini-mode-menu", ["wait", "1000"])
+    mode_snapshot = invoke("snapshot-after-gemini-mode-menu", ["snapshot", "-i", "-c"])
+    current_snapshot = mode_snapshot.stdout or snapshot
+    pro_result = click_first_agent_browser_text(
+        invoke,
+        ["3.1 Pro", "Pro"],
+        command_log_label="gemini-select-pro-mode",
+        snapshot=current_snapshot,
+        prefer_js=True,
+    )
+    attempts.append({"step": "select-pro-mode", **pro_result})
+    if pro_result.get("clicked"):
+        invoke("wait-after-gemini-pro-mode", ["wait", "1000"])
+        post_snapshot = invoke("snapshot-after-gemini-pro-mode", ["snapshot", "-i", "-c"])
+        current_snapshot = post_snapshot.stdout or current_snapshot
+    return {"clicked": bool(pro_result.get("clicked")), "attempts": attempts}, current_snapshot
+
+
+def gemini_select_tool_js_script(label: str) -> str:
+    label_json = json.dumps(label)
+    return (
+        "(async () => {"
+        f"const wanted = {label_json}.trim().toLowerCase();"
+        "const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));"
+        "const norm = (text) => String(text || '').replace(/\\s+/g, ' ').trim();"
+        "const visible = (el) => {"
+        "  const rect = el.getBoundingClientRect();"
+        "  const style = window.getComputedStyle(el);"
+        "  return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';"
+        "};"
+        "const click = (el) => {"
+        "  const rect = el.getBoundingClientRect();"
+        "  el.scrollIntoView({block:'center', inline:'center'});"
+        "  for (const type of ['pointerdown','mousedown','pointerup','mouseup']) {"
+        "    el.dispatchEvent(new MouseEvent(type, {bubbles:true, cancelable:true, view:window, clientX:rect.left + rect.width / 2, clientY:rect.top + rect.height / 2}));"
+        "  }"
+        "  if (typeof el.click === 'function') el.click();"
+        "};"
+        "const buttonText = (el) => norm(el.innerText || el.textContent || el.getAttribute('aria-label') || el.getAttribute('title') || '');"
+        "let opener = Array.from(document.querySelectorAll('button, [role=\"button\"], [aria-label]')).find((el) => {"
+        "  if (!visible(el) || el.disabled || el.getAttribute('aria-disabled') === 'true') return false;"
+        "  const text = buttonText(el).toLowerCase();"
+        "  return text.includes('uploads') || text.includes('tools') || text.includes('canvas');"
+        "});"
+        "if (!opener) return {ok:false, reason:'tool-menu-opener-not-found'};"
+        "click(opener);"
+        "await sleep(1800);"
+        "const items = Array.from(document.querySelectorAll('button, [role=\"menuitemcheckbox\"], [role=\"menuitem\"], [role=\"option\"]')).map((el) => ({"
+        "  el,"
+        "  text: buttonText(el),"
+        "  role: el.getAttribute('role') || '',"
+        "  tag: el.tagName,"
+        "})).filter((item) => visible(item.el) && !item.el.disabled && item.el.getAttribute('aria-disabled') !== 'true');"
+        "const exact = items.find((item) => item.text.toLowerCase() === wanted);"
+        "const contains = items.find((item) => item.text.toLowerCase().includes(wanted) && item.text.length <= wanted.length + 80);"
+        "const target = exact || contains;"
+        "if (!target) return {ok:false, reason:'tool-item-not-found', opener: buttonText(opener), visibleItems: items.map(item => ({text:item.text, role:item.role, tag:item.tag})).slice(0, 30)};"
+        "click(target.el);"
+        "await sleep(600);"
+        "return {ok:true, text:target.text, role:target.role, tag:target.tag, opener:buttonText(opener), exact: !!exact};"
+        "})()"
+    )
+
+
 def fill_agent_browser_composer(
     invoke: Any,
     *,
@@ -4066,9 +4823,11 @@ def agent_browser_profile_workflow_run(
     refresh_cache: bool = True,
     include_extension_ids: list[str] | None = None,
     attachments: list[Path] | None = None,
+    allow_paid_quota_use: bool = False,
 ) -> dict[str, Any]:
     provider_id = normalize_provider_name(provider)
     spec = provider_workflow_spec(provider_id, mode)
+    confirm_start = effective_confirm_start(confirm_start, provider=provider_id, mode=spec["mode"])
     browser_id = normalize_browser_name(str(browser.get("id", "")))
     profile_directory = str(profile.get("directory", "Default"))
     run_name = f"{browser_id}-{slug(profile_directory)}-{provider_id}-{slug(spec['mode'])}-workflow"
@@ -4159,6 +4918,38 @@ def agent_browser_profile_workflow_run(
                 return min(timeout, 15.0)
         return timeout
 
+    automation_target: dict[str, Any] = {}
+
+    def current_target_id() -> str:
+        return str(automation_target.get("targetId") or "") if isinstance(automation_target, dict) else ""
+
+    def cdp_eval_scoped(expression: str, *, label: str, extra_args: list[str]) -> subprocess.CompletedProcess[str]:
+        target_id = current_target_id()
+        try:
+            if target_id:
+                return run_cdp_javascript(cdp_port, expression, timeout=command_timeout(label, extra_args), target_id=target_id)
+            return run_cdp_javascript(cdp_port, expression, timeout=command_timeout(label, extra_args))
+        except TypeError:
+            return run_cdp_javascript(cdp_port, expression, timeout=command_timeout(label, extra_args))
+
+    def cdp_keypress_scoped(key: str, *, label: str, extra_args: list[str]) -> subprocess.CompletedProcess[str]:
+        target_id = current_target_id()
+        try:
+            if target_id:
+                return run_cdp_keypress(cdp_port, key, timeout=command_timeout(label, extra_args), target_id=target_id)
+            return run_cdp_keypress(cdp_port, key, timeout=command_timeout(label, extra_args))
+        except TypeError:
+            return run_cdp_keypress(cdp_port, key, timeout=command_timeout(label, extra_args))
+
+    def cdp_screenshot_scoped(path: Path) -> bool:
+        target_id = current_target_id()
+        try:
+            if target_id:
+                return capture_cdp_screenshot(cdp_port, path, timeout=min(timeout, 20.0), target_id=target_id)
+            return capture_cdp_screenshot(cdp_port, path, timeout=min(timeout, 20.0))
+        except TypeError:
+            return capture_cdp_screenshot(cdp_port, path, timeout=min(timeout, 20.0))
+
     def invoke(label: str, extra_args: list[str]) -> subprocess.CompletedProcess[str]:
         if extra_args[:1] == ["open"] and len(extra_args) > 1:
             result = run_cdp_navigate(cdp_port, str(extra_args[1]), timeout=command_timeout(label, extra_args))
@@ -4197,8 +4988,10 @@ def agent_browser_profile_workflow_run(
 
     visible_text_parts: list[str] = []
     screenshot = paths["screenshot_png"]
+    pre_submit_screenshot = paths["run_dir"] / "pre-submit.png"
     current_url = ""
     latest_response_text = ""
+    pre_submit_guard_payload: dict[str, Any] | None = None
     try:
         invoke("open-provider", ["open", spec["url"]])
         invoke("wait-initial", ["wait", "4000"])
@@ -4270,30 +5063,64 @@ def agent_browser_profile_workflow_run(
                     snapshot=current_snapshot_text,
                 )
                 workflow_events.append({"event": "select-feature", **feature_result})
+            pre_submit_eval = invoke("eval-before-pre-submit-guard", ["eval", browser_eval_visible_text_script()])
+            if pre_submit_eval.stdout:
+                visible_text_parts.append(pre_submit_eval.stdout)
+            pre_submit_snapshot = invoke("snapshot-before-pre-submit-guard", ["snapshot", "-i", "-c"])
+            current_snapshot_text = pre_submit_snapshot.stdout or current_snapshot_text
+            if current_snapshot_text:
+                visible_text_parts.append(current_snapshot_text)
+            pre_submit_screenshot_ok = cdp_screenshot_scoped(pre_submit_screenshot)
+            workflow_events.append(
+                {
+                    "event": "pre-submit-screenshot",
+                    "captured": bool(pre_submit_screenshot_ok),
+                    "path": str(pre_submit_screenshot) if pre_submit_screenshot.exists() else "",
+                }
+            )
+            guard_inventory = extract_provider_inventory(provider_id, "\n".join(visible_text_parts))
+            pre_submit_guard_payload = provider_typing_guard(
+                guard_inventory,
+                provider=provider_id,
+                mode=spec["mode"],
+                requested_model=inventory_model_evidence(guard_inventory),
+                screenshot_path=str(pre_submit_screenshot) if pre_submit_screenshot.exists() else "",
+                allow_paid_quota_use=allow_paid_quota_use,
+            )
+            workflow_events.append({"event": "pre-submit-guard", **pre_submit_guard_payload})
+            if not pre_submit_guard_payload.get("allowed"):
+                status = "blocked"
             if not feature_result.get("clicked") and spec.get("slash_triggers"):
                 slash = str(spec["slash_triggers"][0])
-                slash_result = fill_agent_browser_composer(
+                if pre_submit_guard_payload.get("allowed"):
+                    slash_result = fill_agent_browser_composer(
+                        invoke,
+                        snapshot=current_snapshot_text,
+                        selector=spec["composer_selector"],
+                        text=slash,
+                        label="slash-feature",
+                    )
+                    workflow_events.append({"event": "slash-feature", "trigger": slash, "returncode": slash_result.returncode})
+                    if slash_result.returncode == 0:
+                        invoke("slash-enter", ["press", "Enter"])
+                        invoke("wait-after-slash", ["wait", "1500"])
+                        slash_snapshot = invoke("snapshot-after-slash", ["snapshot", "-i", "-c"])
+                        current_snapshot_text = slash_snapshot.stdout or current_snapshot_text
+                else:
+                    workflow_events.append({"event": "slash-feature", "trigger": slash, "returncode": 1, "skipped": "pre-submit-guard-blocked"})
+
+            fill_result = subprocess.CompletedProcess(["pre-submit-guard-blocked"], 1, "", "")
+            if pre_submit_guard_payload.get("allowed"):
+                fill_result = fill_agent_browser_composer(
                     invoke,
                     snapshot=current_snapshot_text,
                     selector=spec["composer_selector"],
-                    text=slash,
-                    label="slash-feature",
+                    text=prompt,
+                    label="fill-prompt",
                 )
-                workflow_events.append({"event": "slash-feature", "trigger": slash, "returncode": slash_result.returncode})
-                if slash_result.returncode == 0:
-                    invoke("slash-enter", ["press", "Enter"])
-                    invoke("wait-after-slash", ["wait", "1500"])
-                    slash_snapshot = invoke("snapshot-after-slash", ["snapshot", "-i", "-c"])
-                    current_snapshot_text = slash_snapshot.stdout or current_snapshot_text
-
-            fill_result = fill_agent_browser_composer(
-                invoke,
-                snapshot=current_snapshot_text,
-                selector=spec["composer_selector"],
-                text=prompt,
-                label="fill-prompt",
-            )
-            workflow_events.append({"event": "fill-prompt", "returncode": fill_result.returncode})
+                workflow_events.append({"event": "fill-prompt", "returncode": fill_result.returncode})
+            else:
+                workflow_events.append({"event": "fill-prompt", "returncode": 1, "skipped": "pre-submit-guard-blocked"})
             if fill_result.returncode == 0:
                 prepare_and_upload_attachments(
                     port=cdp_port,
@@ -4313,10 +5140,7 @@ def agent_browser_profile_workflow_run(
                     attachment_names=[path.expanduser().name for path in attachments or []],
                 )
                 workflow_events.append(submit_event)
-                if not submit_event.get("submitted"):
-                    status = "blocked"
-                else:
-                    status = "submitted"
+                status = "blocked" if not submit_event.get("submitted") else "submitted"
                 pre_confirm_wait_seconds = int(spec.get("pre_confirm_wait_seconds", 12))
                 invoke("wait-after-submit", ["wait", str(max(1000, min(wait_seconds, 8) * 1000))])
                 if confirm_start and spec.get("confirmation_triggers"):
@@ -4356,6 +5180,52 @@ def agent_browser_profile_workflow_run(
                                 provider=provider_id,
                                 mode=spec["mode"],
                             )
+                            requested_markers_found = requested_completion_markers_in_response(
+                                current_snapshot_text,
+                                provider=provider_id,
+                                prompt=prompt,
+                            )
+                            if requested_markers_found:
+                                confirm_attempts.append(
+                                    {
+                                        "label": "",
+                                        "returncode": 0,
+                                        "skipped": "response-marker-already-present",
+                                        "requested_markers_found": requested_markers_found,
+                                    }
+                                )
+                                confirm_result = {
+                                    "clicked": False,
+                                    "label": "",
+                                    "ref": "",
+                                    "response_marker_seen": True,
+                                    "attempts": confirm_attempts,
+                                }
+                                break
+                            if provider_id == "gemini" and spec["mode"] == "deep-research":
+                                gemini_confirm = invoke(
+                                    f"confirm-start-gemini-js-{confirm_index}",
+                                    ["eval", gemini_confirm_deep_research_js_script()],
+                                )
+                                gemini_confirm_payload = parse_json_stdout(gemini_confirm.stdout)
+                                confirm_attempts.append(
+                                    {
+                                        "label": "Recherche starten",
+                                        "returncode": gemini_confirm.returncode,
+                                        "method": str(gemini_confirm_payload.get("method") or "gemini-confirm-js"),
+                                        "clicked": bool(gemini_confirm.returncode == 0 and gemini_confirm_payload.get("ok")),
+                                        "reason": gemini_confirm_payload.get("reason", ""),
+                                    }
+                                )
+                                if gemini_confirm.returncode == 0 and gemini_confirm_payload.get("ok"):
+                                    confirm_result = {
+                                        "clicked": True,
+                                        "label": "Recherche starten",
+                                        "ref": "",
+                                        "method": str(gemini_confirm_payload.get("method") or "gemini-confirm-js"),
+                                        "attempts": confirm_attempts,
+                                    }
+                                    break
                             specific_confirmation_labels = [
                                 str(label)
                                 for label in spec["confirmation_triggers"]
@@ -4406,7 +5276,7 @@ def agent_browser_profile_workflow_run(
                         confirm_index += 1
                         invoke(f"wait-before-confirm-{confirm_index}", ["wait", wait_milliseconds(remaining, maximum_ms=3000)])
                     workflow_events.append({"event": "confirm-start", **confirm_result})
-                    if confirm_result.get("clicked") or confirm_result.get("running_marker_seen"):
+                    if confirm_result.get("clicked") or confirm_result.get("running_marker_seen") or confirm_result.get("response_marker_seen"):
                         status = "started"
                         invoke("wait-after-confirm", ["wait", str(max(1000, min(wait_seconds, 30) * 1000))])
                 response_event = wait_for_workflow_response(
@@ -4424,6 +5294,8 @@ def agent_browser_profile_workflow_run(
                     status = "verified"
                 elif response_event.get("output", {}).get("status") == "running" and status == "submitted":
                     status = "started"
+                elif response_event.get("status") == "timeout" and status in {"submitted", "started"}:
+                    status = "timeout"
 
         after_snapshot = invoke("snapshot-after", ["snapshot", "-i", "-c"])
         visible_text_parts.append(after_snapshot.stdout)
@@ -4494,6 +5366,14 @@ def agent_browser_profile_workflow_run(
         "inventory": final_inventory,
         "real_session_preflight": real_session_preflight,
         "verification": verification,
+        "pre_submit_guard": pre_submit_guard_payload or provider_typing_guard(
+            final_inventory,
+            provider=provider_id,
+            mode=spec["mode"],
+            requested_model=inventory_model_evidence(final_inventory),
+            screenshot_path=str(pre_submit_screenshot) if pre_submit_screenshot.exists() else "",
+            allow_paid_quota_use=allow_paid_quota_use,
+        ),
         "workflow_events": workflow_events,
         "output": output,
         "clipboard": clipboard_payload,
@@ -4531,9 +5411,15 @@ def agent_browser_live_workflow_run(
     ignore_existing_non_cdp: bool = False,
     allow_active_tab_navigation_fallback: bool = False,
     allow_real_session_required: bool = False,
+    artifact_privacy: str = "redacted",
+    allow_paid_quota_use: bool = False,
+    pacing: str = "conservative",
+    min_action_delay_ms: int = 1500,
+    max_daily_paid_runs: int = 0,
 ) -> dict[str, Any]:
     provider_id = normalize_provider_name(provider)
     spec = provider_workflow_spec(provider_id, mode)
+    confirm_start = effective_confirm_start(confirm_start, provider=provider_id, mode=spec["mode"])
     browser_id = normalize_browser_name(str(browser.get("id", "")))
     profile_directory = str(profile.get("directory", "Default"))
     run_name = f"{browser_id}-{slug(profile_directory)}-{provider_id}-{slug(spec['mode'])}-live"
@@ -4595,6 +5481,36 @@ def agent_browser_live_workflow_run(
                 return min(timeout, 15.0)
         return timeout
 
+    def current_target_id() -> str:
+        return str(automation_target.get("targetId") or "") if isinstance(automation_target, dict) else ""
+
+    def cdp_eval_scoped(expression: str, *, label: str, extra_args: list[str]) -> subprocess.CompletedProcess[str]:
+        target_id = current_target_id()
+        try:
+            if target_id:
+                return run_cdp_javascript(cdp_port, expression, timeout=command_timeout(label, extra_args), target_id=target_id)
+            return run_cdp_javascript(cdp_port, expression, timeout=command_timeout(label, extra_args))
+        except TypeError:
+            return run_cdp_javascript(cdp_port, expression, timeout=command_timeout(label, extra_args))
+
+    def cdp_keypress_scoped(key: str, *, label: str, extra_args: list[str]) -> subprocess.CompletedProcess[str]:
+        target_id = current_target_id()
+        try:
+            if target_id:
+                return run_cdp_keypress(cdp_port, key, timeout=command_timeout(label, extra_args), target_id=target_id)
+            return run_cdp_keypress(cdp_port, key, timeout=command_timeout(label, extra_args))
+        except TypeError:
+            return run_cdp_keypress(cdp_port, key, timeout=command_timeout(label, extra_args))
+
+    def cdp_screenshot_scoped(path: Path) -> bool:
+        target_id = current_target_id()
+        try:
+            if target_id:
+                return capture_cdp_screenshot(cdp_port, path, timeout=min(timeout, 20.0), target_id=target_id)
+            return capture_cdp_screenshot(cdp_port, path, timeout=min(timeout, 20.0))
+        except TypeError:
+            return capture_cdp_screenshot(cdp_port, path, timeout=min(timeout, 20.0))
+
     def invoke(label: str, extra_args: list[str]) -> subprocess.CompletedProcess[str]:
         if extra_args[:1] == ["wait"] and len(extra_args) > 1:
             try:
@@ -4604,17 +5520,24 @@ def agent_browser_live_workflow_run(
             time.sleep(max(0, milliseconds) / 1000.0)
             result = subprocess.CompletedProcess(["sleep", str(milliseconds)], 0, f"waited {milliseconds}ms", "")
         elif extra_args[:2] == ["tab", "new"] and len(extra_args) > 2:
-            result = run_cdp_navigate(cdp_port, str(extra_args[2]), timeout=command_timeout(label, extra_args))
+            target_id = current_target_id()
+            try:
+                if target_id:
+                    result = run_cdp_navigate(cdp_port, str(extra_args[2]), timeout=command_timeout(label, extra_args), target_id=target_id)
+                else:
+                    result = run_cdp_navigate(cdp_port, str(extra_args[2]), timeout=command_timeout(label, extra_args))
+            except TypeError:
+                result = run_cdp_navigate(cdp_port, str(extra_args[2]), timeout=command_timeout(label, extra_args))
         elif extra_args[:1] == ["eval"] and len(extra_args) > 1:
-            result = run_cdp_javascript(cdp_port, extra_args[1], timeout=command_timeout(label, extra_args))
+            result = cdp_eval_scoped(extra_args[1], label=label, extra_args=extra_args)
         elif extra_args[:1] == ["snapshot"]:
-            result = run_cdp_javascript(cdp_port, browser_eval_visible_text_script(), timeout=command_timeout(label, extra_args))
+            result = cdp_eval_scoped(browser_eval_visible_text_script(), label=label, extra_args=extra_args)
         elif extra_args[:1] == ["press"] and len(extra_args) > 1 and str(extra_args[1]).lower() in {"enter", "return"}:
-            result = run_cdp_keypress(cdp_port, str(extra_args[1]), timeout=command_timeout(label, extra_args))
+            result = cdp_keypress_scoped(str(extra_args[1]), label=label, extra_args=extra_args)
         elif extra_args == ["get", "url"]:
-            result = run_cdp_javascript(cdp_port, "location.href", timeout=command_timeout(label, extra_args))
+            result = cdp_eval_scoped("location.href", label=label, extra_args=extra_args)
         elif extra_args[:1] == ["screenshot"] and len(extra_args) > 1:
-            ok = capture_cdp_screenshot(cdp_port, Path(extra_args[1]), timeout=min(timeout, 20.0))
+            ok = cdp_screenshot_scoped(Path(extra_args[1]))
             result = subprocess.CompletedProcess(["cdp-screenshot", str(cdp_port), extra_args[1]], 0 if ok else 1, str(extra_args[1]) if ok else "", "")
         elif extra_args[:1] == ["close"]:
             result = subprocess.CompletedProcess(["skip-close-live-tab"], 0, "skipped: live automation tab is left open", "")
@@ -4636,51 +5559,46 @@ def agent_browser_live_workflow_run(
     current_url = ""
     latest_response_text = ""
     status = "blocked"
+    automation_target: dict[str, Any] = {}
+    pre_submit_guard_payload: dict[str, Any] | None = None
+    pacing_guard_payload: dict[str, Any] = {"allowed": True, "errors": []}
+    response_event: dict[str, Any] = {}
+    pre_submit_screenshot = paths["run_dir"] / "pre-submit.png"
 
-    tab_result = invoke("open-background-tab", ["tab", "new", spec["url"]])
-    if tab_result.returncode != 0:
-        if allow_active_tab_navigation_fallback:
-            nav_result = run_cdp_navigate(cdp_port, spec["url"], timeout=min(timeout, 20.0))
-            commands.append(
+    tab_result = run_cdp_create_automation_target(cdp_port, spec["url"], timeout=min(timeout, 20.0))
+    commands.append(
+        {
+            "label": "create-automation-target",
+            "args": ["cdp-create-automation-target", str(cdp_port), spec["url"]],
+            "returncode": tab_result.returncode,
+            "stdout": tab_result.stdout[-4000:],
+            "stderr": tab_result.stderr[-4000:],
+        }
+    )
+    if tab_result.returncode == 0 and tab_result.stdout.strip():
+        try:
+            automation_target = json.loads(tab_result.stdout)
+        except json.JSONDecodeError:
+            automation_target = {"raw": tab_result.stdout.strip()}
+    if tab_result.returncode != 0 or not str(automation_target.get("targetId", "") if isinstance(automation_target, dict) else ""):
+        payload = {
+            **plan,
+            "status": "blocked",
+            "blocker": "CDP automation target creation failed",
+            "real_session_preflight": real_session_preflight,
+            "workflow_events": [
                 {
-                    "label": "open-background-tab-fallback-navigate",
-                    "args": ["cdp-navigate", str(cdp_port), spec["url"]],
-                    "returncode": nav_result.returncode,
-                    "stdout": nav_result.stdout[-4000:],
-                    "stderr": nav_result.stderr[-4000:],
+                    "event": "create-automation-target",
+                    "returncode": tab_result.returncode,
+                    "active_tab_navigation_fallback_requested": bool(allow_active_tab_navigation_fallback),
+                    "active_tab_navigation_fallback_used": False,
                 }
-            )
-            workflow_events.append(
-                {
-                    "event": "open-background-tab-fallback-navigate",
-                    "tab_new_returncode": tab_result.returncode,
-                    "navigate_returncode": nav_result.returncode,
-                }
-            )
-            if nav_result.returncode != 0:
-                payload = {
-                    **plan,
-                    "status": "blocked",
-                    "blocker": "agent-browser tab new and CDP navigation fallback both failed",
-                    "real_session_preflight": real_session_preflight,
-                    "workflow_events": workflow_events,
-                    "commands": commands,
-                    "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-                }
-                write_json(paths["status_json"], payload)
-                return {**payload, "status_json": str(paths["status_json"])}
-        else:
-            payload = {
-                **plan,
-                "status": "blocked",
-                "blocker": "agent-browser could not open a new live CDP tab",
-                "real_session_preflight": real_session_preflight,
-                "workflow_events": [{"event": "open-background-tab", "returncode": tab_result.returncode}],
-                "commands": commands,
-                "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-            }
-            write_json(paths["status_json"], payload)
-            return {**payload, "status_json": str(paths["status_json"])}
+            ],
+            "commands": commands,
+            "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        }
+        write_json(paths["status_json"], payload)
+        return {**payload, "status_json": str(paths["status_json"])}
 
     invoke("wait-initial", ["wait", "4000"])
     before_eval = invoke("eval-before-text", ["eval", browser_eval_visible_text_script()])
@@ -4718,6 +5636,11 @@ def agent_browser_live_workflow_run(
     else:
         status = "opened"
         feature_result = {"clicked": False, "label": "", "attempts": []}
+        if provider_id == "gemini" and spec["mode"] == "deep-research":
+            gemini_mode_result, current_snapshot_text = prepare_gemini_deep_research_mode(invoke, snapshot=current_snapshot_text)
+            workflow_events.append({"event": "gemini-select-pro-mode", **gemini_mode_result})
+            if current_snapshot_text:
+                visible_text_parts.append(current_snapshot_text)
         if spec.get("pre_prompt_triggers"):
             pre_prompt_result = click_first_agent_browser_text(
                 invoke,
@@ -4731,7 +5654,29 @@ def agent_browser_live_workflow_run(
                 pre_prompt_snapshot = invoke("snapshot-after-pre-prompt-trigger", ["snapshot", "-i", "-c"])
                 current_snapshot_text = pre_prompt_snapshot.stdout or current_snapshot_text
                 visible_text_parts.append(current_snapshot_text)
-        if spec.get("feature_triggers"):
+        if provider_id == "gemini" and spec["mode"] == "deep-research":
+            tool_result = invoke("gemini-select-deep-research-tool", ["eval", gemini_select_tool_js_script("Deep Research")])
+            tool_payload = parse_json_stdout(tool_result.stdout)
+            feature_result = {
+                "clicked": bool(tool_result.returncode == 0 and tool_payload.get("ok")),
+                "label": str(tool_payload.get("text") or ""),
+                "attempts": [
+                    {
+                        "label": "Deep Research",
+                        "returncode": tool_result.returncode,
+                        "method": "gemini-tool-js",
+                        "reason": tool_payload.get("reason", ""),
+                        "role": tool_payload.get("role", ""),
+                        "tag": tool_payload.get("tag", ""),
+                    }
+                ],
+            }
+            workflow_events.append({"event": "select-feature", **feature_result})
+            invoke("wait-after-feature-select", ["wait", "1000"])
+            feature_snapshot = invoke("snapshot-after-feature-select", ["snapshot", "-i", "-c"])
+            current_snapshot_text = feature_snapshot.stdout or current_snapshot_text
+            visible_text_parts.append(current_snapshot_text)
+        elif spec.get("feature_triggers"):
             menu_result = click_first_agent_browser_text(
                 invoke,
                 list(spec.get("menu_triggers", [])),
@@ -4767,14 +5712,63 @@ def agent_browser_live_workflow_run(
                 slash_snapshot = invoke("snapshot-after-slash", ["snapshot", "-i", "-c"])
                 current_snapshot_text = slash_snapshot.stdout or current_snapshot_text
 
-        fill_result = fill_agent_browser_composer(
-            invoke,
-            snapshot=current_snapshot_text,
-            selector=spec["composer_selector"],
-            text=prompt,
-            label="fill-prompt",
+        pre_submit_eval = invoke("eval-before-pre-submit-guard", ["eval", browser_eval_visible_text_script()])
+        if pre_submit_eval.stdout:
+            visible_text_parts.append(pre_submit_eval.stdout)
+        pre_submit_snapshot = invoke("snapshot-before-pre-submit-guard", ["snapshot", "-i", "-c"])
+        current_snapshot_text = pre_submit_snapshot.stdout or current_snapshot_text
+        if current_snapshot_text:
+            visible_text_parts.append(current_snapshot_text)
+        pre_submit_screenshot_ok = cdp_screenshot_scoped(pre_submit_screenshot)
+        workflow_events.append(
+            {
+                "event": "pre-submit-screenshot",
+                "captured": bool(pre_submit_screenshot_ok),
+                "path": str(pre_submit_screenshot) if pre_submit_screenshot.exists() else "",
+            }
         )
-        workflow_events.append({"event": "fill-prompt", "returncode": fill_result.returncode})
+        guard_inventory = extract_provider_inventory(provider_id, "\n".join(visible_text_parts))
+        pre_submit_guard_payload = provider_typing_guard(
+            guard_inventory,
+            provider=provider_id,
+            mode=spec["mode"],
+            requested_model=inventory_model_evidence(guard_inventory),
+            screenshot_path=str(pre_submit_screenshot) if pre_submit_screenshot.exists() else "",
+            allow_paid_quota_use=allow_paid_quota_use,
+        )
+        workflow_events.append({"event": "pre-submit-guard", **pre_submit_guard_payload})
+        if pre_submit_guard_payload.get("allowed") and pacing != "off":
+            pacing_state_path = default_rate_limit_state_path()
+            pacing_state = load_rate_limit_state(pacing_state_path)
+            pacing_guard_payload = check_and_record_pacing_budget(
+                pacing_state,
+                provider=provider_id,
+                account=str(pre_submit_guard_payload.get("account") or "unknown-account"),
+                mode=spec["mode"],
+                max_daily_paid_runs=int(max_daily_paid_runs),
+                min_action_delay_ms=int(min_action_delay_ms),
+                record=True,
+            )
+            if pacing_guard_payload.get("allowed"):
+                write_rate_limit_state(pacing_state_path, pacing_state)
+            else:
+                status = "blocked"
+            workflow_events.append({"event": "pacing-guard", **pacing_guard_payload})
+
+        fill_result = subprocess.CompletedProcess(["pre-submit-guard-blocked"], 1, "", "")
+        if pre_submit_guard_payload.get("allowed") and pacing_guard_payload.get("allowed", True):
+            fill_result = fill_agent_browser_composer(
+                invoke,
+                snapshot=current_snapshot_text,
+                selector=spec["composer_selector"],
+                text=prompt,
+                label="fill-prompt",
+            )
+            workflow_events.append({"event": "fill-prompt", "returncode": fill_result.returncode})
+        else:
+            status = "blocked"
+            skipped_reason = "pacing-guard-blocked" if pre_submit_guard_payload.get("allowed") else "pre-submit-guard-blocked"
+            workflow_events.append({"event": "fill-prompt", "returncode": 1, "skipped": skipped_reason})
         if fill_result.returncode == 0:
             prepare_and_upload_attachments(
                 port=cdp_port,
@@ -4785,6 +5779,7 @@ def agent_browser_live_workflow_run(
                 invoke=invoke,
                 snapshot=current_snapshot_text,
                 menu_triggers=list(spec.get("attachment_triggers", [])),
+                target_id=current_target_id(),
             )
         if submit and fill_result.returncode == 0:
             attachment_names = [path.expanduser().name for path in attachments or []]
@@ -4795,10 +5790,7 @@ def agent_browser_live_workflow_run(
                 attachment_names=attachment_names,
             )
             workflow_events.append(submit_event)
-            if not submit_event.get("submitted"):
-                status = "blocked"
-            else:
-                status = "submitted"
+            status = "blocked" if not submit_event.get("submitted") else "submitted"
             pre_confirm_wait_seconds = int(spec.get("pre_confirm_wait_seconds", 12))
             invoke("wait-after-submit", ["wait", str(max(1000, min(wait_seconds, 8) * 1000))])
             if confirm_start and spec.get("confirmation_triggers"):
@@ -4828,6 +5820,77 @@ def agent_browser_live_workflow_run(
                             confirm_result = {"clicked": True, "label": exact_label, "ref": exact_ref, "attempts": confirm_attempts}
                             break
                     else:
+                        requested_markers_found = requested_completion_markers_in_response(
+                            current_snapshot_text,
+                            provider=provider_id,
+                            prompt=prompt,
+                        )
+                        if requested_markers_found:
+                            confirm_attempts.append(
+                                {
+                                    "label": "",
+                                    "returncode": 0,
+                                    "skipped": "response-marker-already-present",
+                                    "requested_markers_found": requested_markers_found,
+                                }
+                            )
+                            confirm_result = {
+                                "clicked": False,
+                                "label": "",
+                                "ref": "",
+                                "response_marker_seen": True,
+                                "attempts": confirm_attempts,
+                            }
+                            break
+                        if provider_id == "gemini" and spec["mode"] == "deep-research":
+                            gemini_confirm = invoke(
+                                f"confirm-start-gemini-js-{confirm_index}",
+                                ["eval", gemini_confirm_deep_research_js_script()],
+                            )
+                            gemini_confirm_payload = parse_json_stdout(gemini_confirm.stdout)
+                            confirm_attempts.append(
+                                {
+                                    "label": "Recherche starten",
+                                    "returncode": gemini_confirm.returncode,
+                                    "method": str(gemini_confirm_payload.get("method") or "gemini-confirm-js"),
+                                    "clicked": bool(gemini_confirm.returncode == 0 and gemini_confirm_payload.get("ok")),
+                                    "reason": gemini_confirm_payload.get("reason", ""),
+                                }
+                            )
+                            if gemini_confirm.returncode == 0 and gemini_confirm_payload.get("ok"):
+                                confirm_result = {
+                                    "clicked": True,
+                                    "label": "Recherche starten",
+                                    "ref": "",
+                                    "method": str(gemini_confirm_payload.get("method") or "gemini-confirm-js"),
+                                    "attempts": confirm_attempts,
+                                }
+                                break
+                        js_confirm = click_first_agent_browser_text(
+                            invoke,
+                            list(spec["confirmation_triggers"]),
+                            command_log_label=f"confirm-start-js-{confirm_index}",
+                            snapshot=current_snapshot_text,
+                            prefer_js=True,
+                        )
+                        confirm_attempts.append(
+                            {
+                                "label": js_confirm.get("label", ""),
+                                "returncode": 0 if js_confirm.get("clicked") else 1,
+                                "method": "js",
+                                "clicked": bool(js_confirm.get("clicked")),
+                                "attempts": js_confirm.get("attempts", []),
+                            }
+                        )
+                        if js_confirm.get("clicked"):
+                            confirm_result = {
+                                "clicked": True,
+                                "label": str(js_confirm.get("label") or ""),
+                                "ref": "",
+                                "method": "js",
+                                "attempts": confirm_attempts,
+                            }
+                            break
                         marker_probe = extract_workflow_output_from_text(current_snapshot_text, provider=provider_id, mode=spec["mode"])
                         confirm_attempts.append(
                             {
@@ -4847,7 +5910,7 @@ def agent_browser_live_workflow_run(
                     confirm_index += 1
                     invoke(f"wait-before-confirm-{confirm_index}", ["wait", wait_milliseconds(remaining, maximum_ms=3000)])
                 workflow_events.append({"event": "confirm-start", **confirm_result})
-                if confirm_result.get("clicked") or confirm_result.get("running_marker_seen"):
+                if confirm_result.get("clicked") or confirm_result.get("running_marker_seen") or confirm_result.get("response_marker_seen"):
                     status = "started"
                     invoke("wait-after-confirm", ["wait", str(max(1000, min(wait_seconds, 30) * 1000))])
             response_event = wait_for_workflow_response(
@@ -4865,6 +5928,10 @@ def agent_browser_live_workflow_run(
                 status = "verified"
             elif response_event.get("output", {}).get("status") == "running" and status == "submitted":
                 status = "started"
+            elif response_event.get("status") == "no-progress" and status in {"submitted", "started"}:
+                status = "blocked"
+            elif response_event.get("status") == "timeout" and status in {"submitted", "started"}:
+                status = "timeout"
 
     if status == "signed-out-or-wall":
         current_url = invoke("get-url", ["get", "url"]).stdout.strip()
@@ -4892,6 +5959,8 @@ def agent_browser_live_workflow_run(
             "text_length": len(cleaned_output_text),
             "status": "empty" if not cleaned_output_text and output.get("status") in {"captured", "complete"} else output.get("status"),
         }
+    if status == "verified" and output.get("status") == "running" and response_event.get("status") in {"complete", "stable"}:
+        output = {**output, "status": "complete"}
     verification = verify_visible_text(visible_text, provider=provider_id, mode=spec["mode"]) if visible_text else None
     if output["status"] == "complete" and status in {"submitted", "started"}:
         status = "verified"
@@ -4925,6 +5994,16 @@ def agent_browser_live_workflow_run(
     final_inventory = extract_provider_inventory_with_url_guard(provider_id, visible_text, current_url)
     if allow_real_session_required:
         status, final_inventory = apply_real_session_requirement(status, final_inventory, real_session_preflight)
+    screenshot_for_baseline = str(screenshot) if screenshot.exists() else (str(pre_submit_screenshot) if pre_submit_screenshot.exists() else "")
+    pre_submit_guard = pre_submit_guard_payload or provider_typing_guard(
+        final_inventory,
+        provider=provider_id,
+        mode=spec["mode"],
+        requested_model=inventory_model_evidence(final_inventory),
+        screenshot_path=screenshot_for_baseline,
+        allow_paid_quota_use=allow_paid_quota_use,
+    )
+    target_id = str(automation_target.get("targetId", "")) if isinstance(automation_target, dict) else ""
     healing_payload = None
     if status in {"real-session-required", "signed-out-or-wall"}:
         healing_payload = build_real_session_healing_command(
@@ -4939,6 +6018,26 @@ def agent_browser_live_workflow_run(
         **plan,
         "status": status,
         "chat_url": current_url,
+        "target_id": target_id,
+        "target_verification": {
+            "target_id": target_id,
+            "automation_target_created": bool(target_id),
+            "active_tab_navigation_fallback_allowed": bool(allow_active_tab_navigation_fallback),
+        },
+        "automation_target": automation_target,
+        "privacy": {"artifact_privacy": artifact_privacy, "command_logs": "redacted" if artifact_privacy != "full" else "full"},
+        "pre_submit_guard": pre_submit_guard,
+        "pacing": {
+            "mode": pacing,
+            "min_action_delay_ms": int(min_action_delay_ms),
+            "human_safe": pacing != "off",
+            "stealth_or_fingerprint_bypass": False,
+            "guard": pacing_guard_payload,
+        },
+        "rate_limit_budget": {
+            "max_daily_paid_runs": int(max_daily_paid_runs),
+            "allow_paid_quota_use": bool(allow_paid_quota_use),
+        },
         "inventory": final_inventory,
         "real_session_preflight": real_session_preflight,
         "verification": verification,
@@ -4948,7 +6047,7 @@ def agent_browser_live_workflow_run(
         "healing": healing_payload,
         "cache": cache_payload,
         "screenshot": str(screenshot) if screenshot.exists() else "",
-        "commands": commands,
+        "commands": [redact_command_log_entry(command, privacy=artifact_privacy) for command in commands],
         "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
     }
     write_json(paths["status_json"], payload)
@@ -5465,6 +6564,62 @@ def pre_submit_login_gate_event(inventory: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def provider_typing_guard(
+    inventory: dict[str, Any],
+    *,
+    provider: str,
+    mode: str,
+    requested_model: str = "",
+    screenshot_path: str = "",
+    allow_paid_quota_use: bool = False,
+) -> dict[str, Any]:
+    provider_id = normalize_provider_name(provider)
+    mode_id = slug(mode or "chat")
+    errors: list[str] = []
+    visible_status = inventory.get("visible_status") if isinstance(inventory.get("visible_status"), dict) else {}
+    available_modes = inventory.get("available_modes") if isinstance(inventory.get("available_modes"), dict) else {}
+    available_models = [str(item) for item in inventory.get("available_models") or []]
+    model_evidence = inventory_model_evidence(inventory)
+
+    if str(inventory.get("login_state") or "") != "signed-in-or-ready":
+        errors.append("login-not-verified")
+    if not str(visible_status.get("account") or "").strip():
+        errors.append("account-not-verified")
+    if not str(visible_status.get("plan") or "").strip():
+        errors.append("plan-not-verified")
+    if not model_evidence:
+        errors.append("model-not-verified")
+    if (
+        requested_model
+        and requested_model not in available_models
+        and requested_model != str(visible_status.get("model") or "")
+        and requested_model != model_evidence
+    ):
+        errors.append("model-not-verified")
+    if mode_id != "chat" and available_modes.get(mode_id) is not True:
+        errors.append("feature-not-verified")
+    if not screenshot_path:
+        errors.append("screenshot-not-captured")
+    if is_paid_workflow_mode(mode_id) and not allow_paid_quota_use:
+        errors.append("paid-quota-use-not-allowed")
+    rate_limit = detect_rate_limit_from_text("\n".join(str(item) for item in inventory.get("usage_lines") or []))
+    if rate_limit.get("limited"):
+        errors.append("rate-limit-or-quota-wall")
+    challenge = detect_rate_limit_from_text("\n".join(str(item) for item in inventory.get("matched_markers") or []))
+    if challenge.get("limited") and challenge.get("kind") == "challenge":
+        errors.append("captcha-or-challenge-wall")
+    return {
+        "allowed": not errors,
+        "errors": sorted(set(errors), key=errors.index),
+        "provider": provider_id,
+        "mode": mode_id,
+        "account": visible_status.get("account", ""),
+        "plan": visible_status.get("plan", ""),
+        "model": requested_model or model_evidence,
+        "paid_mode": is_paid_workflow_mode(mode_id),
+    }
+
+
 def provider_session_cookie_names(provider: str) -> list[str]:
     return {
         "chatgpt": ["session", "__Secure-next-auth.session-token", "oai-client-auth-session", "unified_session_manifest", "_puid"],
@@ -5524,17 +6679,17 @@ def provider_session_evidence(profile: dict[str, str], provider: str) -> dict[st
     for source in cookie_db_paths(profile):
         cookie_db_count += 1
         try:
-            tmpdir = Path(tempfile.mkdtemp(prefix="ai-research-cookie-scan-"))
-            tmp = tmpdir / "Cookies"
-            shutil.copy2(source, tmp)
-            con = sqlite3.connect(tmp)
-            try:
-                rows = con.execute(
-                    "select host_key, name from cookies where " + " or ".join(["host_key like ?" for _ in domains]),
-                    [f"%{domain}%" for domain in domains],
-                ).fetchall()
-            finally:
-                con.close()
+            with tempfile.TemporaryDirectory(prefix="ai-research-cookie-scan-") as tmpdir_raw:
+                tmp = Path(tmpdir_raw) / "Cookies"
+                shutil.copy2(source, tmp)
+                con = sqlite3.connect(tmp)
+                try:
+                    rows = con.execute(
+                        "select host_key, name from cookies where " + " or ".join(["host_key like ?" for _ in domains]),
+                        [f"%{domain}%" for domain in domains],
+                    ).fetchall()
+                finally:
+                    con.close()
         except Exception:
             continue
         for host, name in rows:
@@ -5583,25 +6738,118 @@ def detect_cdp_endpoint(port: int, hosts: list[str] | None = None) -> dict[str, 
     return {"ok": False, "base": "", "version": {}, "attempts": attempts}
 
 
-def lsof_port_owner(port: int) -> dict[str, Any]:
-    result = subprocess.run(["lsof", "-nP", f"-iTCP:{int(port)}", "-sTCP:LISTEN"], capture_output=True, text=True)
+def lsof_port_owners(port: int) -> list[dict[str, Any]]:
+    result = subprocess.run(["lsof", "-nP", f"-iTCP:{int(port)}", "-sTCP:LISTEN"], capture_output=True, text=True, check=False)
     lines = [line for line in result.stdout.splitlines() if line.strip()]
     if result.returncode != 0 or len(lines) < 2:
-        return {"port": int(port), "listening": False, "command": "", "pid": "", "raw": result.stdout}
-    parts = lines[1].split()
+        return []
+    owners: list[dict[str, Any]] = []
+    for line in lines[1:]:
+        parts = line.split()
+        owners.append(
+            {
+                "port": int(port),
+                "listening": True,
+                "command": parts[0] if parts else "",
+                "pid": parts[1] if len(parts) > 1 else "",
+                "raw": result.stdout,
+                "line": line,
+            }
+        )
+    return owners
+
+
+def lsof_port_owner(port: int) -> dict[str, Any]:
+    owners = lsof_port_owners(port)
+    if not owners:
+        return {"port": int(port), "listening": False, "command": "", "pid": "", "raw": ""}
+    debug_flag = f"--remote-debugging-port={int(port)}"
+    for owner in owners:
+        owner_args = process_args_for_pid(str(owner.get("pid", "")))
+        if debug_flag in owner_args and "Code Helper" not in owner_args:
+            return {**owner, "owner_args": owner_args}
+    for owner in owners:
+        owner_args = process_args_for_pid(str(owner.get("pid", "")))
+        if debug_flag in owner_args:
+            return {**owner, "owner_args": owner_args}
+    return owners[0]
+
+
+def process_args_for_pid(pid: str | int) -> str:
+    pid_text = str(pid or "").strip()
+    if not pid_text:
+        return ""
+    result = subprocess.run(["ps", "-ww", "-p", pid_text, "-o", "args="], capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
+def extract_chromium_arg(command_line: str, name: str) -> str:
+    match = re.search(rf"(?:^|\s){re.escape(name)}=(\"[^\"]+\"|'[^']+'|[^\s]+)", command_line or "")
+    if not match:
+        return ""
+    return match.group(1).strip("\"'")
+
+
+def normalize_path_for_compare(path_text: str) -> str:
+    if not path_text:
+        return ""
+    try:
+        return str(Path(path_text).expanduser().resolve())
+    except OSError:
+        return str(Path(path_text).expanduser())
+
+
+def verify_cdp_port_owner(
+    *,
+    browser: dict[str, Any],
+    profile: dict[str, str],
+    owner: dict[str, Any],
+) -> dict[str, Any]:
+    browser_id = normalize_browser_name(str(browser.get("id", "")))
+    expected_name = str(browser.get("display_name", browser_id)).lower()
+    owner_command = str(owner.get("command", "")).replace("\\x20", " ").lower()
+    owner_pid = str(owner.get("pid", "") or "")
+    owner_args = process_args_for_pid(owner_pid)
+    owner_text = " ".join([owner_command, owner_args.lower()])
+    expected_fragments = [browser_id.lower(), expected_name.split()[0]]
+    binary_path = str(browser.get("binary_path") or "")
+    app_path = str(browser.get("app_path") or "")
+    if binary_path:
+        expected_fragments.append(binary_path.lower())
+    if app_path:
+        expected_fragments.append(app_path.lower())
+    owner_matches_browser = bool(owner_command or owner_args) and any(fragment and fragment in owner_text for fragment in expected_fragments)
+
+    expected_user_data = normalize_path_for_compare(str(browser.get("user_data_dir") or ""))
+    actual_user_data = normalize_path_for_compare(extract_chromium_arg(owner_args, "--user-data-dir"))
+    if expected_user_data and f"--user-data-dir={expected_user_data}" in owner_args:
+        actual_user_data = expected_user_data
+    expected_profile = str(profile.get("directory", "") or "Default")
+    actual_profile = extract_chromium_arg(owner_args, "--profile-directory")
+    user_data_matches = not actual_user_data or not expected_user_data or actual_user_data == expected_user_data
+    profile_matches = not actual_profile or actual_profile == expected_profile
     return {
-        "port": int(port),
-        "listening": True,
-        "command": parts[0] if parts else "",
-        "pid": parts[1] if len(parts) > 1 else "",
-        "raw": result.stdout,
+        "ok": bool(owner_matches_browser and user_data_matches and profile_matches),
+        "owner_matches_browser": bool(owner_matches_browser),
+        "owner_command": str(owner.get("command", "")),
+        "owner_pid": owner_pid,
+        "owner_args": owner_args,
+        "expected_browser": browser_id,
+        "expected_user_data_dir": expected_user_data,
+        "actual_user_data_dir": actual_user_data,
+        "user_data_dir_matches": bool(user_data_matches),
+        "expected_profile_directory": expected_profile,
+        "actual_profile_directory": actual_profile,
+        "profile_directory_matches": bool(profile_matches),
     }
 
 
 def browser_main_process_args(browser: dict[str, Any]) -> list[str]:
     binary_path = str(browser.get("binary_path", ""))
     app_path = str(browser.get("app_path", ""))
-    result = subprocess.run(["ps", "-ww", "-axo", "args="], capture_output=True, text=True)
+    result = subprocess.run(["ps", "-ww", "-axo", "args="], capture_output=True, text=True, check=False)
     if result.returncode != 0:
         return []
     matches: list[str] = []
@@ -5631,16 +6879,31 @@ def build_real_session_preflight(
     cdp_port = int(port or browser.get("default_port") or 0)
     endpoint = detect_cdp_endpoint(cdp_port) if cdp_port else {"ok": False, "base": "", "version": {}, "attempts": []}
     owner = lsof_port_owner(cdp_port) if cdp_port else {"port": 0, "listening": False, "command": "", "pid": "", "raw": ""}
+    owner_verification = verify_cdp_port_owner(browser=browser, profile=profile, owner=owner) if owner.get("listening") else {
+        "ok": False,
+        "owner_matches_browser": False,
+        "owner_command": "",
+        "owner_pid": "",
+        "owner_args": "",
+        "expected_browser": browser_id,
+        "expected_user_data_dir": normalize_path_for_compare(str(browser.get("user_data_dir") or "")),
+        "actual_user_data_dir": "",
+        "user_data_dir_matches": False,
+        "expected_profile_directory": str(profile.get("directory", "") or "Default"),
+        "actual_profile_directory": "",
+        "profile_directory_matches": False,
+    }
     main_args = browser_main_process_args(browser)
     running_without_cdp = bool(main_args) and not any("--remote-debugging-port" in line for line in main_args)
-    expected_name = str(browser.get("display_name", browser_id)).lower()
-    owner_command = str(owner.get("command", "")).lower()
-    owner_matches_browser = bool(owner_command) and any(part in owner_command for part in [browser_id.lower(), expected_name.split()[0]])
     blockers: list[str] = []
     if owner.get("listening") and not endpoint.get("ok"):
         blockers.append("port-listener-is-not-cdp")
-    if owner.get("listening") and not owner_matches_browser and not endpoint.get("ok"):
-        blockers.append("port-owned-by-other-process")
+    if owner.get("listening") and not owner_verification.get("owner_matches_browser"):
+        blockers.append("cdp-port-owned-by-unexpected-process")
+    if owner.get("listening") and not owner_verification.get("user_data_dir_matches"):
+        blockers.append("cdp-owner-user-data-dir-mismatch")
+    if owner.get("listening") and not owner_verification.get("profile_directory_matches"):
+        blockers.append("cdp-owner-profile-directory-mismatch")
     if running_without_cdp and not ignore_existing_non_cdp:
         blockers.append("browser-running-without-remote-debugging")
     if not endpoint.get("ok") and not blockers:
@@ -5655,6 +6918,7 @@ def build_real_session_preflight(
         "port": cdp_port,
         "can_attach": bool(endpoint.get("ok")) and not blockers,
         "blockers": blockers,
+        "cdp_owner_verification": owner_verification,
         "cdp_endpoint": endpoint,
         "port_owner": owner,
         "browser_main_process_count": len(main_args),
@@ -5684,6 +6948,540 @@ def build_real_session_preflight(
                 "<prompt>",
             ],
         },
+    }
+
+
+def recovery_artifact_root() -> Path:
+    return Path.home() / ".cache" / "ai-research-browser" / "recovery"
+
+
+def recovery_port_conflict(preflight: dict[str, Any]) -> bool:
+    blockers = {str(item) for item in preflight.get("blockers", [])}
+    owner = preflight.get("port_owner", {}) if isinstance(preflight.get("port_owner"), dict) else {}
+    return bool(owner.get("listening")) and bool(
+        blockers
+        & {
+            "port-listener-is-not-cdp",
+            "cdp-port-owned-by-unexpected-process",
+            "cdp-owner-user-data-dir-mismatch",
+            "cdp-owner-profile-directory-mismatch",
+        }
+    )
+
+
+def select_recovery_port(
+    *,
+    browser: dict[str, Any],
+    profile: dict[str, str],
+    provider: str,
+    requested_port: int,
+) -> tuple[int, dict[str, Any], dict[str, Any]]:
+    initial_preflight = build_real_session_preflight(
+        browser=browser,
+        profile=profile,
+        provider=provider,
+        port=requested_port,
+        ignore_existing_non_cdp=True,
+    )
+    selection: dict[str, Any] = {
+        "requested_port": int(requested_port),
+        "selected_port": int(requested_port),
+        "fallback_used": False,
+        "reason": "",
+        "attempts": [],
+    }
+    if not recovery_port_conflict(initial_preflight):
+        return int(requested_port), initial_preflight, selection
+
+    selection["reason"] = "requested CDP port is occupied by a non-matching or non-CDP process"
+    for _ in range(10):
+        candidate = find_available_port()
+        candidate_preflight = build_real_session_preflight(
+            browser=browser,
+            profile=profile,
+            provider=provider,
+            port=candidate,
+            ignore_existing_non_cdp=True,
+        )
+        selection["attempts"].append(
+            {
+                "port": int(candidate),
+                "owner_listening": bool(candidate_preflight.get("port_owner", {}).get("listening")),
+                "blockers": candidate_preflight.get("blockers", []),
+            }
+        )
+        if not candidate_preflight.get("port_owner", {}).get("listening"):
+            selection["selected_port"] = int(candidate)
+            selection["fallback_used"] = True
+            return int(candidate), candidate_preflight, selection
+
+    selection["blocked"] = True
+    selection["blocker"] = "no free fallback CDP port found"
+    return int(requested_port), initial_preflight, selection
+
+
+def redacted_domain(url: str) -> str:
+    try:
+        return urllib.parse.urlparse(url).hostname or ""
+    except Exception:
+        return ""
+
+
+def snapshot_chromium_session_files(
+    browser: dict[str, Any],
+    *,
+    artifact_root: Path,
+    profile_directory: str = "Default",
+    include_full_tab_urls: bool = False,
+) -> dict[str, Any]:
+    user_data_dir = Path(os.path.expanduser(str(browser.get("user_data_dir") or "")))
+    display_name = str(browser.get("display_name") or browser.get("id") or "browser")
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    snapshot_path = artifact_root / f"{slug(display_name)}-{stamp}-session-files.json"
+    sessions_dir = user_data_dir / profile_directory / "Sessions"
+    if not sessions_dir.exists():
+        payload = {
+            "appName": display_name,
+            "capturedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "redacted": True,
+            "method": "chromium-session-files",
+            "error": f"Sessions directory not found for profile {profile_directory}",
+            "windows": [],
+        }
+        write_json(snapshot_path, payload)
+        return {
+            "status": "best-effort-failed",
+            "path": str(snapshot_path),
+            "redacted": True,
+            "method": "chromium-session-files",
+            "window_count": 0,
+            "tab_count": 0,
+            "domains": [],
+            "browser_was_frontmost": False,
+            "frontmost_app": "",
+        }
+    candidates = sorted(
+        list(sessions_dir.glob("Session_*")) + list(sessions_dir.glob("Tabs_*")),
+        key=lambda item: item.stat().st_mtime,
+        reverse=True,
+    )[:4]
+    urls: list[str] = []
+    seen_urls: set[str] = set()
+    url_pattern = re.compile(rb"https?://[^\x00\s<>\"'`\)\]]+")
+    for candidate in candidates:
+        try:
+            data = candidate.read_bytes()[:8 * 1024 * 1024]
+        except OSError:
+            continue
+        for raw_url in url_pattern.findall(data):
+            url = raw_url.decode("utf-8", errors="ignore")
+            url = re.sub(r"[\x00-\x1f\x7f].*$", "", url).strip()
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            urls.append(url)
+    tabs: list[dict[str, Any]] = []
+    for index, url in enumerate(urls):
+        domain = redacted_domain(url)
+        if include_full_tab_urls:
+            tabs.append({"index": index, "title": "", "url": url, "domain": domain})
+        else:
+            tabs.append({"index": index, "domain": domain, "url_redacted": bool(domain)})
+    redacted = not include_full_tab_urls
+    payload = {
+        "appName": display_name,
+        "capturedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "redacted": redacted,
+        "method": "chromium-session-files",
+        "profileDirectory": profile_directory,
+        "source_file_count": len(candidates),
+        "windows": [{"index": 0, "activeTabIndex": 0, "tab_count": len(tabs), "tabs": tabs}] if tabs else [],
+    }
+    write_json(snapshot_path, payload)
+    domains = sorted({redacted_domain(url) for url in urls if redacted_domain(url)})
+    return {
+        "status": "captured" if tabs else "best-effort-failed",
+        "path": str(snapshot_path),
+        "redacted": redacted,
+        "method": "chromium-session-files",
+        "window_count": 1 if tabs else 0,
+        "tab_count": len(tabs),
+        "domains": domains[:40],
+        "browser_was_frontmost": False,
+        "frontmost_app": "",
+    }
+
+
+def snapshot_macos_browser_windows(
+    browser: dict[str, Any],
+    *,
+    artifact_root: Path | None = None,
+    include_full_tab_urls: bool = False,
+    profile_directory: str = "Default",
+) -> dict[str, Any]:
+    artifact_root = artifact_root or recovery_artifact_root()
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    display_name = str(browser.get("display_name") or browser.get("id") or "")
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    snapshot_path = artifact_root / f"{slug(display_name or 'browser')}-{stamp}-tabs.json"
+    script = r"""
+const appName = ObjC.unwrap($.NSProcessInfo.processInfo.environment.objectForKey('HERMES_BROWSER_APP'));
+const se = Application('System Events');
+let frontmost = '';
+for (const proc of se.applicationProcesses()) {
+  if (proc.frontmost()) { frontmost = proc.name(); break; }
+}
+const app = Application(appName);
+app.includeStandardAdditions = true;
+const windows = [];
+try {
+  const appWindows = app.windows();
+  for (let wi = 0; wi < appWindows.length; wi++) {
+    const win = appWindows[wi];
+    const tabs = [];
+    let activeTabIndex = 0;
+    try {
+      const active = win.activeTab();
+      const allTabs = win.tabs();
+      for (let ti = 0; ti < allTabs.length; ti++) {
+        const tab = allTabs[ti];
+        if (String(tab.url()) === String(active.url())) activeTabIndex = ti;
+        tabs.push({index: ti, title: String(tab.title()), url: String(tab.url())});
+      }
+    } catch (e) {}
+    let bounds = [];
+    try { bounds = win.bounds(); } catch (e) {}
+    windows.push({index: wi, activeTabIndex, bounds, tabs});
+  }
+} catch (e) {}
+JSON.stringify({appName, frontmost, browserWasFrontmost: frontmost === appName, capturedAt: new Date().toISOString(), windows});
+"""
+    try:
+        result = subprocess.run(
+            ["osascript", "-l", "JavaScript", "-e", script],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            env={**os.environ, "HERMES_BROWSER_APP": display_name},
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        result = subprocess.CompletedProcess(
+            exc.cmd,
+            124,
+            stdout=(exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")),
+            stderr=(exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")) + "\nTimed out while snapshotting browser windows",
+        )
+    if result.returncode == 0 and result.stdout.strip():
+        try:
+            snapshot = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            snapshot = {"appName": display_name, "frontmost": "", "browserWasFrontmost": False, "windows": [], "raw": result.stdout}
+    else:
+        snapshot = {"appName": display_name, "frontmost": "", "browserWasFrontmost": False, "windows": [], "error": result.stderr.strip()}
+    windows = snapshot.get("windows") if isinstance(snapshot.get("windows"), list) else []
+    redacted_windows: list[dict[str, Any]] = []
+    for win in windows:
+        if not isinstance(win, dict):
+            continue
+        redacted_tabs: list[dict[str, Any]] = []
+        for tab in win.get("tabs") or []:
+            if not isinstance(tab, dict):
+                continue
+            domain = redacted_domain(str(tab.get("url") or ""))
+            redacted_tabs.append(
+                {
+                    "index": tab.get("index", 0),
+                    "domain": domain,
+                    "url_redacted": bool(domain),
+                }
+            )
+        redacted_windows.append(
+            {
+                "index": win.get("index", 0),
+                "activeTabIndex": win.get("activeTabIndex", 0),
+                "tab_count": len(redacted_tabs),
+                "tabs": redacted_tabs,
+            }
+        )
+    if include_full_tab_urls:
+        write_json(snapshot_path, {**snapshot, "redacted": False})
+    else:
+        write_json(
+            snapshot_path,
+            {
+                "appName": snapshot.get("appName", display_name),
+                "frontmost": snapshot.get("frontmost", ""),
+                "browserWasFrontmost": bool(snapshot.get("browserWasFrontmost")),
+                "capturedAt": snapshot.get("capturedAt", time.strftime("%Y-%m-%dT%H:%M:%S%z")),
+                "redacted": True,
+                "windows": redacted_windows,
+                **({"error": snapshot.get("error")} if snapshot.get("error") else {}),
+            },
+        )
+    tab_count = sum(len(win.get("tabs") or []) for win in windows if isinstance(win, dict))
+    domains = sorted(
+        {
+            redacted_domain(str(tab.get("url") or ""))
+            for win in windows
+            if isinstance(win, dict)
+            for tab in (win.get("tabs") or [])
+            if isinstance(tab, dict) and redacted_domain(str(tab.get("url") or ""))
+        }
+    )
+    if (result.returncode != 0 or tab_count <= 0) and browser.get("user_data_dir"):
+        fallback = snapshot_chromium_session_files(
+            browser,
+            artifact_root=artifact_root,
+            profile_directory=profile_directory,
+            include_full_tab_urls=include_full_tab_urls,
+        )
+        if fallback.get("status") == "captured":
+            return {**fallback, "fallback_from": "macos-window-snapshot"}
+    return {
+        "status": "captured" if result.returncode == 0 else "best-effort-failed",
+        "path": str(snapshot_path),
+        "redacted": not include_full_tab_urls,
+        "method": "macos-window-snapshot",
+        "window_count": len(windows),
+        "tab_count": tab_count,
+        "domains": domains[:40],
+        "browser_was_frontmost": bool(snapshot.get("browserWasFrontmost")),
+        "frontmost_app": str(snapshot.get("frontmost") or ""),
+    }
+
+
+def recovery_launch_args(browser: dict[str, Any], *, profile_directory: str, port: int) -> list[str]:
+    binary = browser.get("binary_path") or str(Path(browser["app_path"]) / "Contents/MacOS" / browser.get("display_name", ""))
+    return [
+        str(binary),
+        "--remote-debugging-address=127.0.0.1",
+        f"--remote-debugging-port={int(port)}",
+        f"--user-data-dir={browser['user_data_dir']}",
+        f"--profile-directory={profile_directory}",
+        "--restore-last-session",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-session-crashed-bubble",
+        "about:blank",
+    ]
+
+
+def recovery_launch_command(browser: dict[str, Any], launch_args: list[str]) -> tuple[list[str], str]:
+    app_path = str(browser.get("app_path") or "")
+    if sys.platform == "darwin" and app_path and Path(app_path).exists():
+        return ["open", "-g", "-na", app_path, "--args", *launch_args[1:]], "macos-open-new-instance"
+    return launch_args, "direct-binary"
+
+
+def build_browser_cdp_recover_plan(
+    *,
+    browser: dict[str, Any],
+    profile: dict[str, str],
+    provider: str = "chatgpt",
+    port: int,
+    artifact_root: Path | None = None,
+    execute: bool = False,
+    restore_focus: str = "original",
+    include_full_tab_urls: bool = False,
+) -> dict[str, Any]:
+    browser_id = normalize_browser_name(str(browser.get("id", "")))
+    profile_directory = str(profile.get("directory", "Default"))
+    selected_port, preflight, port_selection = select_recovery_port(
+        browser=browser,
+        profile=profile,
+        provider=provider,
+        requested_port=int(port),
+    )
+    snapshot_path = recovery_artifact_root() / f"{browser_id}-{slug(profile_directory)}-planned-tabs.json"
+    snapshot_plan = {
+        "status": "planned",
+        "path": str(snapshot_path),
+        "redacted": not include_full_tab_urls,
+        "full_tab_urls_included": bool(include_full_tab_urls),
+        "window_count": 0,
+        "tab_count": 0,
+    }
+    launch_args = recovery_launch_args(browser, profile_directory=profile_directory, port=selected_port)
+    launch_command, launch_method = recovery_launch_command(browser, launch_args)
+    return {
+        "status": "planned",
+        "dry_run": not execute,
+        "strategy": "restart-cdp",
+        "browser": browser_id,
+        "browser_name": browser.get("display_name", ""),
+        "profile_directory": profile_directory,
+        "provider": normalize_provider_name(provider),
+        "port": int(selected_port),
+        "requested_port": int(port),
+        "port_selection": port_selection,
+        "approval_required": True,
+        "will_execute": bool(execute),
+        "preflight": preflight,
+        "snapshot": snapshot_plan,
+        "restart_plan": {
+            "will_quit_browser": True,
+            "launch_args": launch_args,
+            "launch_command": launch_command,
+            "launch_method": launch_method,
+            "binds_loopback_only": True,
+        },
+        "restore_plan": {
+            "restore_windows": True,
+            "restore_focus": restore_focus,
+        },
+        "launch_args": launch_args,
+        "launch_command": launch_command,
+        "launch_method": launch_method,
+        "required_execute_flags": ["--execute"],
+    }
+
+
+def confirm_cdp_restart_popup(plan: dict[str, Any]) -> dict[str, Any]:
+    message = (
+        f"Hermes needs to restart {plan.get('browser_name') or plan.get('browser')} with CDP enabled.\n\n"
+        f"Profile: {plan.get('profile_directory')}\n"
+        f"Port: {plan.get('port')}\n\n"
+        "The browser will quit and reopen with the previous session restored."
+    )
+    try:
+        result = subprocess.run(
+            [
+                "osascript",
+                "-e",
+                f'display dialog {json.dumps(message)} buttons {{"Cancel", "Restart"}} default button "Restart" cancel button "Cancel" with icon caution',
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "shown": True,
+            "accepted": False,
+            "timed_out": True,
+            "stdout": exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or ""),
+            "stderr": exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or ""),
+        }
+    return {"shown": True, "accepted": result.returncode == 0, "stdout": result.stdout.strip(), "stderr": result.stderr.strip()}
+
+
+def execute_browser_cdp_recover(
+    *,
+    browser: dict[str, Any],
+    profile: dict[str, str],
+    provider: str,
+    port: int,
+    artifact_root: Path | None = None,
+    confirm_restart: bool = True,
+    no_popup: bool = False,
+    restore_focus: str = "original",
+    startup_timeout: float = 20.0,
+    include_full_tab_urls: bool = False,
+) -> dict[str, Any]:
+    plan = build_browser_cdp_recover_plan(
+        browser=browser,
+        profile=profile,
+        provider=provider,
+        port=port,
+        artifact_root=artifact_root,
+        execute=True,
+        restore_focus=restore_focus,
+        include_full_tab_urls=include_full_tab_urls,
+    )
+    if plan.get("preflight", {}).get("can_attach"):
+        return {**plan, "status": "already-cdp-enabled", "dry_run": False}
+    if plan.get("port_selection", {}).get("blocked"):
+        return {
+            **plan,
+            "status": "blocked",
+            "blocker": str(plan.get("port_selection", {}).get("blocker") or "recovery port selection failed"),
+            "dry_run": False,
+            "confirmation": {"shown": False, "accepted": False, "required": False},
+        }
+    if not confirm_restart and not no_popup:
+        return {
+            **plan,
+            "status": "blocked",
+            "blocker": "restart execution requires --confirm-restart or explicit --no-popup",
+            "dry_run": False,
+            "confirmation": {"shown": False, "accepted": False, "required": True},
+        }
+    snapshot = snapshot_macos_browser_windows(
+        browser,
+        artifact_root=artifact_root,
+        include_full_tab_urls=include_full_tab_urls,
+        profile_directory=str(profile.get("directory") or "Default"),
+    )
+    if snapshot.get("status") != "captured" or int(snapshot.get("window_count") or 0) <= 0 or int(snapshot.get("tab_count") or 0) <= 0:
+        return {
+            **plan,
+            "status": "blocked",
+            "blocker": "restart recovery requires a non-empty browser window/tab snapshot before prompting or quitting",
+            "dry_run": False,
+            "confirmation": {"shown": False, "accepted": False, "required": bool(confirm_restart and not no_popup)},
+            "snapshot": snapshot,
+            "quit": {"ok": False, "skipped": True},
+            "launch": {"ok": False, "skipped": True},
+            "restore": {"status": "not-attempted"},
+            "focus_restored": False,
+        }
+    confirmation = {"shown": False, "accepted": True}
+    if confirm_restart and not no_popup:
+        confirmation = confirm_cdp_restart_popup(plan)
+        if not confirmation.get("accepted"):
+            return {**plan, "status": "cancelled", "confirmation": confirmation, "snapshot": snapshot}
+    display_name = str(browser.get("display_name") or browser.get("id") or "")
+    quit_result = subprocess.run(["osascript", "-e", f'tell application "{display_name}" to quit'], capture_output=True, text=True, timeout=20, check=False)
+    launch_process = subprocess.Popen(plan["launch_command"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True, start_new_session=True)
+    deadline = time.time() + max(1.0, startup_timeout)
+    endpoint = {"ok": False}
+    selected_port = int(plan.get("port") or port)
+    while time.time() < deadline:
+        endpoint = detect_cdp_endpoint(selected_port)
+        if endpoint.get("ok"):
+            break
+        time.sleep(0.25)
+    post_launch_preflight = build_real_session_preflight(
+        browser=browser,
+        profile=profile,
+        provider=provider,
+        port=selected_port,
+        ignore_existing_non_cdp=True,
+    ) if endpoint.get("ok") else {}
+    focus_restored = False
+    if restore_focus == "none":
+        subprocess.run(["osascript", "-e", f'tell application "{display_name}" to set visible to false'], capture_output=True, text=True, timeout=5, check=False)
+    elif restore_focus == "original" and snapshot.get("browser_was_frontmost"):
+        subprocess.run(["osascript", "-e", f'tell application "{display_name}" to activate'], capture_output=True, text=True, timeout=5, check=False)
+        focus_restored = True
+    status = "restored" if endpoint.get("ok") and post_launch_preflight.get("can_attach") else "restart-failed"
+    return {
+        **plan,
+        "status": status,
+        **(
+            {"blocker": "post-launch CDP owner/profile verification failed"}
+            if endpoint.get("ok") and not post_launch_preflight.get("can_attach")
+            else {}
+        ),
+        "dry_run": False,
+        "confirmation": confirmation,
+        "snapshot": snapshot,
+        "quit": {"ok": quit_result.returncode == 0, "stderr": quit_result.stderr.strip()},
+        "launch": {
+            "ok": bool(endpoint.get("ok")) or launch_process.poll() in {None, 0},
+            "pid": launch_process.pid,
+            "method": plan.get("launch_method", ""),
+        },
+        "cdp_endpoint": endpoint,
+        "post_launch_preflight": post_launch_preflight,
+        "restore": {
+            "status": "session-restore-requested",
+            "windows_restored": snapshot.get("window_count", 0),
+            "tabs_restored": snapshot.get("tab_count", 0),
+        },
+        "focus_restored": focus_restored,
     }
 
 
@@ -6298,11 +8096,21 @@ def cmd_agent_browser_suite(args: argparse.Namespace) -> int:
         "artifact_root": str(Path(args.artifact_root).expanduser()),
         "clone_root": str(Path(args.clone_root).expanduser()),
         "results": results,
+        "summary": {
+            "total": len(results),
+            "captured": sum(1 for result in results if (result.get("probe_result") or {}).get("status") == "captured"),
+            "captured_without_screenshot": sum(1 for result in results if (result.get("probe_result") or {}).get("status") == "captured-without-screenshot"),
+            "signed_out_or_wall": sum(1 for result in results if (result.get("probe_result") or {}).get("status") == "signed-out-or-wall"),
+            "blocked": sum(1 for result in results if (result.get("probe_result") or {}).get("status") not in {"captured", "captured-without-screenshot", "signed-out-or-wall"}),
+        },
     }
     if args.output:
         write_json(Path(args.output).expanduser(), payload)
     print(json.dumps(payload, ensure_ascii=False, indent=2))
-    return 0 if all((result.get("probe_result") or {}).get("status") in {"captured", "captured-without-screenshot", "signed-out-or-wall"} for result in results) else 1
+    summary = payload["summary"]
+    has_success = bool(summary["captured"] or summary["captured_without_screenshot"])
+    statuses_ok = all((result.get("probe_result") or {}).get("status") in {"captured", "captured-without-screenshot", "signed-out-or-wall"} for result in results)
+    return 0 if has_success and statuses_ok else 1
 
 
 def cmd_agent_browser_live_suite(args: argparse.Namespace) -> int:
@@ -6396,6 +8204,24 @@ def workflow_prompt_from_args(args: argparse.Namespace) -> str:
     return prompt
 
 
+def paid_quota_cli_guard(args: argparse.Namespace) -> dict[str, Any]:
+    mode = str(getattr(args, "mode", "chat") or "chat")
+    submit = bool(getattr(args, "submit", False))
+    allow = bool(getattr(args, "allow_paid_quota_use", False))
+    paid_mode = is_paid_workflow_mode(mode)
+    errors = []
+    if submit and paid_mode and not allow:
+        errors.append("paid-quota-use-not-allowed")
+    return {
+        "allowed": not errors,
+        "errors": errors,
+        "mode": slug(mode),
+        "paid_mode": paid_mode,
+        "submit": submit,
+        "allow_paid_quota_use": allow,
+    }
+
+
 def resolve_workflow_browser_profile(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str, str]]:
     browsers = discover_browsers()
     browser_id = normalize_browser_name(args.browser)
@@ -6433,24 +8259,201 @@ def cmd_workflow_run(args: argparse.Namespace) -> int:
     browser, profile = resolve_workflow_browser_profile(args)
     extension_ids = requested_extension_ids(getattr(args, "include_extension", None), include_ai_exporter=getattr(args, "include_ai_exporter", False))
     attachments = [Path(item).expanduser() for item in getattr(args, "attachment", []) or []]
-    payload = agent_browser_profile_workflow_run(
-        browser=browser,
-        profile=profile,
-        provider=args.provider,
-        mode=args.mode,
-        prompt=workflow_prompt_from_args(args),
-        artifact_root=Path(args.artifact_root).expanduser(),
-        clone_root=Path(args.clone_root).expanduser(),
-        submit=args.submit,
-        confirm_start=args.confirm_start,
-        wait_seconds=args.wait_seconds,
-        response_timeout=args.response_timeout,
-        copy_output=args.copy_output,
-        timeout=args.timeout,
-        cache_root=Path(args.cache_root).expanduser() if args.cache else None,
-        refresh_cache=not args.no_refresh_cache,
-        include_extension_ids=extension_ids,
-        attachments=attachments,
+    prompt = workflow_prompt_from_args(args)
+    quota_guard = paid_quota_cli_guard(args)
+    if not quota_guard["allowed"]:
+        payload = {
+            "status": "blocked",
+            "blocker": "paid/quota-spending workflow requires --allow-paid-quota-use before any UI typing",
+            "pre_submit_guard": quota_guard,
+            "privacy": {"artifact_privacy": str(getattr(args, "artifact_privacy", "redacted"))},
+        }
+        if args.output:
+            write_json(Path(args.output).expanduser(), payload)
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 1
+    cdp_port = int(args.cdp_port or browser.get("default_port") or 0)
+    preflight = build_real_session_preflight(browser=browser, profile=profile, provider=args.provider, port=cdp_port, ignore_existing_non_cdp=False)
+    strategy = choose_workflow_strategy(
+        requested=args.strategy,
+        real_session_preflight=preflight,
+        allow_browser_restart=bool(args.allow_browser_restart),
+        sibling_available=bool(args.strategy == "sibling" or getattr(args, "allow_sibling_fallback", False)),
+        allow_sibling_fallback=bool(getattr(args, "allow_sibling_fallback", False)),
+    )
+    selected_strategy = str(strategy.get("selected") or strategy.get("strategy") or "")
+    cache_root = Path(args.cache_root).expanduser() if args.cache else None
+    if selected_strategy == "live-cdp":
+        payload = agent_browser_live_workflow_run(
+            browser=browser,
+            profile=profile,
+            provider=args.provider,
+            mode=args.mode,
+            prompt=prompt,
+            artifact_root=Path(args.artifact_root).expanduser(),
+            cdp_port=cdp_port,
+            submit=args.submit,
+            confirm_start=args.confirm_start,
+            wait_seconds=args.wait_seconds,
+            response_timeout=args.response_timeout,
+            copy_output=args.copy_output,
+            timeout=args.timeout,
+            cache_root=cache_root,
+            refresh_cache=not args.no_refresh_cache,
+            attachments=attachments,
+            allow_active_tab_navigation_fallback=bool(getattr(args, "allow_active_tab_navigation_dangerously", False)),
+            artifact_privacy=str(getattr(args, "artifact_privacy", "redacted")),
+            allow_paid_quota_use=bool(getattr(args, "allow_paid_quota_use", False)),
+            pacing=str(getattr(args, "pacing", "conservative")),
+            min_action_delay_ms=int(getattr(args, "min_action_delay_ms", 1500)),
+            max_daily_paid_runs=int(getattr(args, "max_daily_paid_runs", 0)),
+        )
+    elif selected_strategy == "restart-cdp":
+        if args.restart_execute:
+            recovery = execute_browser_cdp_recover(
+                browser=browser,
+                profile=profile,
+                provider=args.provider,
+                port=cdp_port,
+                artifact_root=Path(args.artifact_root).expanduser(),
+                confirm_restart=bool(args.confirm_restart),
+                no_popup=bool(args.no_popup),
+                include_full_tab_urls=bool(getattr(args, "include_full_tab_urls", False)),
+            )
+            if recovery.get("status") in {"restored", "already-cdp-enabled"}:
+                recovered_cdp_port = int(recovery.get("port") or cdp_port)
+                payload = agent_browser_live_workflow_run(
+                    browser=browser,
+                    profile=profile,
+                    provider=args.provider,
+                    mode=args.mode,
+                    prompt=prompt,
+                    artifact_root=Path(args.artifact_root).expanduser(),
+                    cdp_port=recovered_cdp_port,
+                    submit=args.submit,
+                    confirm_start=args.confirm_start,
+                    wait_seconds=args.wait_seconds,
+                    response_timeout=args.response_timeout,
+                    copy_output=args.copy_output,
+                    timeout=args.timeout,
+                    cache_root=cache_root,
+                    refresh_cache=not args.no_refresh_cache,
+                    attachments=attachments,
+                    ignore_existing_non_cdp=True,
+                    allow_active_tab_navigation_fallback=bool(getattr(args, "allow_active_tab_navigation_dangerously", False)),
+                    artifact_privacy=str(getattr(args, "artifact_privacy", "redacted")),
+                    allow_paid_quota_use=bool(getattr(args, "allow_paid_quota_use", False)),
+                    pacing=str(getattr(args, "pacing", "conservative")),
+                    min_action_delay_ms=int(getattr(args, "min_action_delay_ms", 1500)),
+                    max_daily_paid_runs=int(getattr(args, "max_daily_paid_runs", 0)),
+                )
+                payload["restart_snapshot"] = recovery.get("snapshot", {})
+                payload["restore_result"] = recovery.get("restore", {})
+                payload["focus_restored"] = recovery.get("focus_restored", False)
+            else:
+                payload = {
+                    "status": "blocked" if recovery.get("status") != "cancelled" else "cancelled",
+                    "blocker": f"restart-cdp recovery did not complete: {recovery.get('status')}",
+                    "recovery": recovery,
+                }
+        else:
+            recovery_plan = build_browser_cdp_recover_plan(
+                browser=browser,
+                profile=profile,
+                provider=args.provider,
+                port=cdp_port,
+                artifact_root=Path(args.artifact_root).expanduser(),
+                execute=False,
+                include_full_tab_urls=bool(getattr(args, "include_full_tab_urls", False)),
+            )
+            payload = {
+                "status": "blocked",
+                "blocker": "restart-cdp selected but --restart-execute was not provided",
+                "recovery": recovery_plan,
+            }
+    elif selected_strategy == "persistent-sibling":
+        payload = run_sibling_workflow_payload(
+            browser=browser,
+            source_profile=profile,
+            provider=args.provider,
+            mode=args.mode,
+            prompt=prompt,
+            artifact_root=Path(args.artifact_root).expanduser(),
+            submit=args.submit,
+            confirm_start=args.confirm_start,
+            wait_seconds=args.wait_seconds,
+            response_timeout=args.response_timeout,
+            copy_output=args.copy_output,
+            timeout=args.timeout,
+            cache_root=cache_root,
+            refresh_cache=not args.no_refresh_cache,
+            include_extension_ids=extension_ids,
+            attachments=attachments,
+            close_after=args.close_after,
+            headless=args.headless,
+            refresh_sibling=args.refresh_sibling,
+            allow_active_tab_navigation_fallback=bool(getattr(args, "allow_active_tab_navigation_dangerously", False)),
+            artifact_privacy=str(getattr(args, "artifact_privacy", "redacted")),
+            allow_paid_quota_use=bool(getattr(args, "allow_paid_quota_use", False)),
+            pacing=str(getattr(args, "pacing", "conservative")),
+            min_action_delay_ms=int(getattr(args, "min_action_delay_ms", 1500)),
+            max_daily_paid_runs=int(getattr(args, "max_daily_paid_runs", 0)),
+        )
+    elif selected_strategy == "diagnostic-clone":
+        payload = agent_browser_profile_workflow_run(
+            browser=browser,
+            profile=profile,
+            provider=args.provider,
+            mode=args.mode,
+            prompt=prompt,
+            artifact_root=Path(args.artifact_root).expanduser(),
+            clone_root=Path(args.clone_root).expanduser(),
+            submit=args.submit,
+            confirm_start=args.confirm_start,
+            wait_seconds=args.wait_seconds,
+            response_timeout=args.response_timeout,
+            copy_output=args.copy_output,
+            timeout=args.timeout,
+            cache_root=cache_root,
+            refresh_cache=not args.no_refresh_cache,
+            include_extension_ids=extension_ids,
+            attachments=attachments,
+            allow_paid_quota_use=bool(getattr(args, "allow_paid_quota_use", False)),
+        )
+    else:
+        payload = {
+            "status": "blocked",
+            "blocker": str(strategy.get("reason") or f"selected strategy is not executable by CLI yet: {selected_strategy}"),
+            "manual_action_required": selected_strategy == "gui-fallback",
+        }
+    payload = {
+        **payload,
+        "strategy": strategy,
+        "selected_strategy": selected_strategy,
+        "restart_required": selected_strategy == "restart-cdp" or any("remote-debugging" in str(item) or "cdp" in str(item) for item in preflight.get("blockers", [])),
+        "sibling_fallback_allowed": bool(getattr(args, "allow_sibling_fallback", False)),
+        "cdp_owner_verification": preflight.get("cdp_owner_verification", {}),
+        "account_baseline": workflow_account_baseline(payload, strategy=selected_strategy),
+    }
+    artifact_privacy = str(getattr(args, "artifact_privacy", "redacted"))
+    if isinstance(payload.get("commands"), list):
+        payload["commands"] = [redact_command_log_entry(command, privacy=artifact_privacy) for command in payload["commands"]]
+    payload.setdefault("privacy", {"artifact_privacy": artifact_privacy, "command_logs": "redacted" if artifact_privacy != "full" else "full"})
+    payload.setdefault(
+        "pacing",
+        {
+            "mode": str(getattr(args, "pacing", "conservative")),
+            "min_action_delay_ms": int(getattr(args, "min_action_delay_ms", 1500)),
+            "human_safe": str(getattr(args, "pacing", "conservative")) != "off",
+            "stealth_or_fingerprint_bypass": False,
+        },
+    )
+    payload.setdefault(
+        "rate_limit_budget",
+        {
+            "max_daily_paid_runs": int(getattr(args, "max_daily_paid_runs", 0)),
+            "allow_paid_quota_use": bool(getattr(args, "allow_paid_quota_use", False)),
+        },
     )
     if args.output:
         write_json(Path(args.output).expanduser(), payload)
@@ -6461,26 +8464,91 @@ def cmd_workflow_run(args: argparse.Namespace) -> int:
 def cmd_workflow_live_run(args: argparse.Namespace) -> int:
     browser, profile = resolve_workflow_browser_profile(args)
     attachments = [Path(item).expanduser() for item in getattr(args, "attachment", []) or []]
+    prompt = workflow_prompt_from_args(args)
+    quota_guard = paid_quota_cli_guard(args)
+    if not quota_guard["allowed"]:
+        payload = {
+            "status": "blocked",
+            "blocker": "paid/quota-spending workflow requires --allow-paid-quota-use before any UI typing",
+            "pre_submit_guard": quota_guard,
+            "privacy": {"artifact_privacy": str(getattr(args, "artifact_privacy", "redacted"))},
+        }
+        if args.output:
+            write_json(Path(args.output).expanduser(), payload)
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 1
     payload = agent_browser_live_workflow_run(
         browser=browser,
         profile=profile,
         provider=args.provider,
         mode=args.mode,
-        prompt=workflow_prompt_from_args(args),
+        prompt=prompt,
         artifact_root=Path(args.artifact_root).expanduser(),
         cdp_port=args.cdp_port,
         submit=args.submit,
         confirm_start=args.confirm_start,
         wait_seconds=args.wait_seconds,
+        response_timeout=args.response_timeout,
+        copy_output=args.copy_output,
         timeout=args.timeout,
         cache_root=Path(args.cache_root).expanduser() if args.cache else None,
         refresh_cache=not args.no_refresh_cache,
         attachments=attachments,
+        allow_active_tab_navigation_fallback=bool(getattr(args, "allow_active_tab_navigation_dangerously", False)),
+        artifact_privacy=str(getattr(args, "artifact_privacy", "redacted")),
+        allow_paid_quota_use=bool(getattr(args, "allow_paid_quota_use", False)),
+        pacing=str(getattr(args, "pacing", "conservative")),
+        min_action_delay_ms=int(getattr(args, "min_action_delay_ms", 1500)),
+        max_daily_paid_runs=int(getattr(args, "max_daily_paid_runs", 0)),
     )
+    payload["rate_limit"] = record_rate_limit_from_payload(
+        payload,
+        browser=str(browser.get("id") or args.browser),
+        profile=str(profile.get("directory") or args.profile),
+        provider=args.provider,
+        mode=args.mode,
+        state_path=Path(args.rate_limit_state).expanduser(),
+        source=args.output or "workflow-live-run",
+    )
+    if payload["rate_limit"].get("detected"):
+        payload.setdefault("pause_required", True)
+        payload.setdefault("resume_after", payload["rate_limit"].get("entry", {}).get("cooldown_until"))
     if args.output:
         write_json(Path(args.output).expanduser(), payload)
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0 if payload.get("status") in {"opened", "submitted", "started", "verified", "captured"} else 1
+
+
+def cmd_browser_cdp_recover(args: argparse.Namespace) -> int:
+    browser, profile = resolve_workflow_browser_profile(args)
+    port = int(args.port or browser.get("default_port") or 0)
+    if args.execute and not args.dry_run:
+        payload = execute_browser_cdp_recover(
+            browser=browser,
+            profile=profile,
+            provider=args.provider,
+            port=port,
+            artifact_root=Path(args.artifact_root).expanduser(),
+            confirm_restart=bool(args.confirm_restart),
+            no_popup=bool(args.no_popup),
+            restore_focus=args.restore_focus,
+            include_full_tab_urls=bool(getattr(args, "include_full_tab_urls", False)),
+        )
+    else:
+        payload = build_browser_cdp_recover_plan(
+            browser=browser,
+            profile=profile,
+            provider=args.provider,
+            port=port,
+            artifact_root=Path(args.artifact_root).expanduser(),
+            execute=False,
+            restore_focus=args.restore_focus,
+            include_full_tab_urls=bool(getattr(args, "include_full_tab_urls", False)),
+        )
+    if args.output:
+        write_json(Path(args.output).expanduser(), payload)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0 if payload.get("status") in {"planned", "already-cdp-enabled", "restored"} else 1
 
 
 def cmd_workflow_login_heal(args: argparse.Namespace) -> int:
@@ -6505,6 +8573,19 @@ def cmd_workflow_sibling_run(args: argparse.Namespace) -> int:
     browser, source_profile = resolve_workflow_browser_profile(args)
     provider_id = normalize_provider_name(args.provider)
     prompt = workflow_prompt_from_args(args)
+    quota_guard = paid_quota_cli_guard(args)
+    if not quota_guard["allowed"]:
+        payload = {
+            "status": "blocked",
+            "execution_mode": "sibling-cdp-automation-profile",
+            "blocker": "paid/quota-spending workflow requires --allow-paid-quota-use before any UI typing",
+            "pre_submit_guard": quota_guard,
+            "closed_after": False,
+        }
+        if args.output:
+            write_json(Path(args.output).expanduser(), payload)
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 1
     extension_ids = requested_extension_ids(getattr(args, "include_extension", None), include_ai_exporter=getattr(args, "include_ai_exporter", False))
     sibling_user_data = Path(args.sibling_user_data).expanduser() if args.sibling_user_data else default_sibling_user_data_dir(
         browser=str(browser.get("id", "")),
@@ -6587,8 +8668,13 @@ def cmd_workflow_sibling_run(args: argparse.Namespace) -> int:
             refresh_cache=not args.no_refresh_cache,
             attachments=[Path(item).expanduser() for item in args.attachment],
             ignore_existing_non_cdp=True,
-            allow_active_tab_navigation_fallback=True,
+            allow_active_tab_navigation_fallback=bool(getattr(args, "allow_active_tab_navigation_dangerously", False)),
             allow_real_session_required=True,
+            artifact_privacy=str(getattr(args, "artifact_privacy", "redacted")),
+            allow_paid_quota_use=bool(getattr(args, "allow_paid_quota_use", False)),
+            pacing=str(getattr(args, "pacing", "conservative")),
+            min_action_delay_ms=int(getattr(args, "min_action_delay_ms", 1500)),
+            max_daily_paid_runs=int(getattr(args, "max_daily_paid_runs", 0)),
         )
         payload = {
             **workflow_payload,
@@ -7015,6 +9101,12 @@ def compact_workflow_run_payload(payload: dict[str, Any]) -> dict[str, Any]:
     clone = payload.get("clone") or {}
     return {
         "status": payload.get("status", ""),
+        "strategy": payload.get("strategy", {}),
+        "target_id": payload.get("target_id", ""),
+        "account_baseline": payload.get("account_baseline", {}),
+        "restart_snapshot": payload.get("restart_snapshot", {}),
+        "restore_result": payload.get("restore_result", {}),
+        "focus_restored": payload.get("focus_restored", False),
         "status_json": payload.get("status_json", ""),
         "visible_text_path": payload.get("visible_text_path", ""),
         "output_text_path": payload.get("output_text_path", ""),
@@ -7128,6 +9220,12 @@ def run_sibling_workflow_payload(
     sibling_user_data: Path | None = None,
     headless: bool = False,
     refresh_sibling: bool = False,
+    allow_active_tab_navigation_fallback: bool = False,
+    artifact_privacy: str = "redacted",
+    allow_paid_quota_use: bool = False,
+    pacing: str = "conservative",
+    min_action_delay_ms: int = 1500,
+    max_daily_paid_runs: int = 0,
 ) -> dict[str, Any]:
     provider_id = normalize_provider_name(provider)
     sibling_user_data = sibling_user_data or default_sibling_user_data_dir(
@@ -7201,8 +9299,13 @@ def run_sibling_workflow_payload(
             refresh_cache=refresh_cache,
             attachments=attachments or [],
             ignore_existing_non_cdp=True,
-            allow_active_tab_navigation_fallback=True,
+            allow_active_tab_navigation_fallback=bool(allow_active_tab_navigation_fallback),
             allow_real_session_required=True,
+            artifact_privacy=artifact_privacy,
+            allow_paid_quota_use=bool(allow_paid_quota_use),
+            pacing=pacing,
+            min_action_delay_ms=int(min_action_delay_ms),
+            max_daily_paid_runs=int(max_daily_paid_runs),
         )
         payload = {
             **workflow_payload,
@@ -7390,7 +9493,7 @@ def cmd_workflow_suite(args: argparse.Namespace) -> int:
         retry_index = 0
         while True:
             try:
-                def execute_row_payload():
+                def execute_row_payload(row=row, browser=browser, profile=profile):
                     if args.sibling:
                         return run_sibling_workflow_payload(
                             browser=browser,
@@ -7412,6 +9515,12 @@ def cmd_workflow_suite(args: argparse.Namespace) -> int:
                             close_after=args.close_after,
                             headless=args.headless,
                             refresh_sibling=args.refresh_sibling,
+                            allow_active_tab_navigation_fallback=bool(getattr(args, "allow_active_tab_navigation_dangerously", False)),
+                            artifact_privacy=str(getattr(args, "artifact_privacy", "redacted")),
+                            allow_paid_quota_use=bool(getattr(args, "allow_paid_quota_use", False)),
+                            pacing=str(getattr(args, "pacing", "conservative")),
+                            min_action_delay_ms=int(getattr(args, "min_action_delay_ms", 1500)),
+                            max_daily_paid_runs=int(getattr(args, "max_daily_paid_runs", 0)),
                         )
                     return agent_browser_profile_workflow_run(
                         browser=browser,
@@ -7446,7 +9555,7 @@ def cmd_workflow_suite(args: argparse.Namespace) -> int:
                         provider=str(row.get("provider", "")),
                         mode=str(row.get("mode", "")),
                         reason=str(detected_rate_limit.get("text_preview", ""))[:240],
-                        source=str((run_payload.get("status_json") or run_payload.get("visible_text_path") or "")),
+                        source=str(run_payload.get("status_json") or run_payload.get("visible_text_path") or ""),
                     )
                     write_rate_limit_state(rate_limit_state_path, rate_limit_state)
                     rate_limit_event = {
@@ -7780,6 +9889,18 @@ def cmd_parse_chats(args: argparse.Namespace) -> int:
     return 0
 
 
+def add_hardening_cli_args(command: argparse.ArgumentParser, *, include_restart_flags: bool = False) -> None:
+    command.add_argument("--artifact-privacy", choices=["redacted", "metadata-only", "full"], default="redacted")
+    command.add_argument("--allow-paid-quota-use", action="store_true", help="Required for quota-spending modes such as Deep Research, Agent, or image generation.")
+    command.add_argument("--pacing", choices=["conservative", "normal", "off"], default="conservative")
+    command.add_argument("--min-action-delay-ms", type=int, default=1500)
+    command.add_argument("--max-daily-paid-runs", type=int, default=0)
+    command.add_argument("--allow-active-tab-navigation-dangerously", action="store_true", help="Permit legacy active-tab navigation fallback when target creation fails.")
+    command.add_argument("--allow-rate-limit-fallback", action="store_true", help="Permit switching to another verified target after a detected rate limit.")
+    if include_restart_flags:
+        command.add_argument("--include-full-tab-urls", action="store_true", help="Store full restart snapshot URLs. Default stores only redacted domains.")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Discover browser profiles and run AI research/agent workflows with E2E artifacts.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -7957,6 +10078,7 @@ def build_parser() -> argparse.ArgumentParser:
     ask.add_argument("--cache-root", default=str(default_chat_cache_root()))
     ask.add_argument("--timeout", type=float, default=90.0)
     ask.add_argument("--output", default="")
+    add_hardening_cli_args(ask)
     workflow_plan = sub.add_parser("workflow-plan")
     workflow_plan.add_argument("--artifact-root", default="/tmp/hermes-ai-research-workflows")
     workflow_plan.add_argument("--clone-root", default="/tmp/hermes-ai-research-workflow-clones")
@@ -7978,6 +10100,16 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_run.add_argument("--profile", default="work")
     workflow_run.add_argument("--provider", choices=provider_cli_choices(), required=True)
     workflow_run.add_argument("--mode", default="chat")
+    workflow_run.add_argument("--strategy", choices=WORKFLOW_STRATEGIES, default="auto", help="Execution strategy: live CDP first by default, with safe fallbacks.")
+    workflow_run.add_argument("--cdp-port", type=int, help="CDP port for live-cdp/restart-cdp. Defaults to the browser's configured port.")
+    workflow_run.add_argument("--allow-browser-restart", action="store_true", help="Allow auto strategy to choose restart-cdp when live CDP is unavailable.")
+    workflow_run.add_argument("--allow-sibling-fallback", action="store_true", help="Allow auto strategy to fall back to a persistent sibling automation profile. Default blocks instead.")
+    workflow_run.add_argument("--confirm-restart", action="store_true", help="Show an interactive macOS confirmation before restart-cdp execution.")
+    workflow_run.add_argument("--restart-execute", action="store_true", help="Actually perform restart-cdp recovery. Without this, restart-cdp returns a dry-run recovery plan.")
+    workflow_run.add_argument("--no-popup", action="store_true", help="Skip the restart confirmation popup; only honored with --restart-execute.")
+    workflow_run.add_argument("--refresh-sibling", action="store_true", help="Re-seed the persistent sibling profile before a sibling fallback run.")
+    workflow_run.add_argument("--headless", action="store_true", help="Use Chromium headless mode for sibling fallback launches.")
+    workflow_run.add_argument("--close-after", action="store_true", help="Terminate a launched sibling browser after the workflow.")
     workflow_run.add_argument("--prompt", default="")
     workflow_run.add_argument("--prompt-file", default="")
     workflow_run.add_argument("--submit", action="store_true", help="Actually send the prompt.")
@@ -7993,6 +10125,20 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_run.add_argument("--include-ai-exporter", action="store_true", help="Copy/load SaveAI / AI Exporter into the temporary clone.")
     workflow_run.add_argument("--attachment", action="append", default=[], help="Local file/image path to attach through the provider file input when visible.")
     workflow_run.add_argument("--output", default="")
+    add_hardening_cli_args(workflow_run)
+    browser_cdp_recover = sub.add_parser("browser-cdp-recover")
+    browser_cdp_recover.add_argument("--browser", default="brave")
+    browser_cdp_recover.add_argument("--profile", default="work")
+    browser_cdp_recover.add_argument("--provider", choices=provider_cli_choices(), default="chatgpt")
+    browser_cdp_recover.add_argument("--port", type=int)
+    browser_cdp_recover.add_argument("--artifact-root", default=str(recovery_artifact_root()))
+    browser_cdp_recover.add_argument("--dry-run", action="store_true")
+    browser_cdp_recover.add_argument("--execute", action="store_true")
+    browser_cdp_recover.add_argument("--confirm-restart", action="store_true")
+    browser_cdp_recover.add_argument("--no-popup", action="store_true")
+    browser_cdp_recover.add_argument("--restore-focus", choices=["original", "browser", "none"], default="original")
+    browser_cdp_recover.add_argument("--output", default="")
+    add_hardening_cli_args(browser_cdp_recover, include_restart_flags=True)
     workflow_live_run = sub.add_parser("workflow-live-run")
     workflow_live_run.add_argument("--artifact-root", default="/tmp/hermes-ai-research-live-workflows")
     workflow_live_run.add_argument("--browser", default="brave")
@@ -8013,6 +10159,8 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_live_run.add_argument("--no-refresh-cache", action="store_true")
     workflow_live_run.add_argument("--attachment", action="append", default=[], help="Local file/image path to attach through the provider file input when visible.")
     workflow_live_run.add_argument("--output", default="")
+    add_hardening_cli_args(workflow_live_run)
+    workflow_live_run.add_argument("--rate-limit-state", default=str(default_rate_limit_state_path()), help="JSON state file for learned provider/browser/account cooldowns.")
     workflow_login_heal = sub.add_parser("workflow-login-heal")
     workflow_login_heal.add_argument("--artifact-root", default="/tmp/hermes-ai-research-login-heal")
     workflow_login_heal.add_argument("--browser", default="brave")
@@ -8049,6 +10197,7 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_sibling_run.add_argument("--include-ai-exporter", action="store_true", help="Copy/load SaveAI / AI Exporter into the sibling session.")
     workflow_sibling_run.add_argument("--attachment", action="append", default=[], help="Local file/image path to attach through the provider file input when visible.")
     workflow_sibling_run.add_argument("--output", default="")
+    add_hardening_cli_args(workflow_sibling_run)
     sibling_profile_init = sub.add_parser("sibling-profile-init")
     sibling_profile_init.add_argument("--artifact-root", default="/tmp/hermes-ai-research-sibling-profile-init")
     sibling_profile_init.add_argument("--browser", default="brave")
@@ -8131,6 +10280,7 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_suite.add_argument("--session-state", default=str(default_session_state_path()), help="JSON state file for known-good signed-in browser/profile/provider baselines.")
     workflow_suite.add_argument("--keep-clones", action="store_true", help="Keep temporary profile clones after each suite row for debugging.")
     workflow_suite.add_argument("--output", default="")
+    add_hardening_cli_args(workflow_suite)
     workflow_orchestrate = sub.add_parser("workflow-orchestrate")
     workflow_orchestrate.add_argument("--artifact-root", default="/tmp/hermes-ai-research-orchestrate")
     workflow_orchestrate.add_argument("--clone-root", default="/tmp/hermes-ai-research-orchestrate-clones")
@@ -8294,6 +10444,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_workflow_run(args)
     if args.command == "workflow-live-run":
         return cmd_workflow_live_run(args)
+    if args.command == "browser-cdp-recover":
+        return cmd_browser_cdp_recover(args)
     if args.command == "workflow-login-heal":
         return cmd_workflow_login_heal(args)
     if args.command == "workflow-sibling-run":

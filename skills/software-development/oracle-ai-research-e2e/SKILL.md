@@ -51,6 +51,8 @@ This runs only local, public-safe checks:
 - `oracle-e2e-smoke` opt-in blocking proof
 - public-safety audit
 
+On Linux CI hosts without Brave/Comet/Chrome profiles, the browser-dependent `workflow-run` runner proof is reported as `skipped: browser-not-discovered-on-this-host`; on the local macOS Hermes machine it should run and prove `blocked-by-local-guards`.
+
 ## Real Provider E2E
 
 Run real E2E only when the browser CDP session and paid-quota use are intentional:

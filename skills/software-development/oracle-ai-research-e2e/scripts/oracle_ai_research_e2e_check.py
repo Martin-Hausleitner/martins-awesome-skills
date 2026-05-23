@@ -186,8 +186,13 @@ def main(argv: list[str] | None = None) -> int:
         expect={1},
     )
     runner_payload = parse_json_stdout(runner)
-    assert_payload(runner_payload.get("oracle", {}).get("runner_status") == "blocked-by-local-guards", "Oracle runner did not block behind local guards", failures)
-    assert_payload(runner_payload.get("oracle_evidence", {}).get("prompt_redacted") is True, "Oracle runner evidence did not redact prompt", failures)
+    if runner_payload:
+        assert_payload(runner_payload.get("oracle", {}).get("runner_status") == "blocked-by-local-guards", "Oracle runner did not block behind local guards", failures)
+        assert_payload(runner_payload.get("oracle_evidence", {}).get("prompt_redacted") is True, "Oracle runner evidence did not redact prompt", failures)
+    elif "browser not discovered" in str(runner.get("stderr", "")).casefold():
+        runner["skipped"] = "browser-not-discovered-on-this-host"
+    else:
+        failures.append("workflow runner proof did not emit JSON payload")
 
     smoke = record(
         "oracle_e2e_smoke_opt_in_block",

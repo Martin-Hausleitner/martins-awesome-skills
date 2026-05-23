@@ -121,6 +121,7 @@ Why it matters:
 - **Local guards stay in charge:** Oracle cannot bypass login, account, plan, feature, screenshot, paid-quota, challenge, rate-limit, or ChatGPT model-safety checks.
 - **Cost safety:** ChatGPT Pro/Extended Pro/GPT-5.5 Pro are blocked before typing in automated tests; non-Pro Thinking, Agent, and Deep Research paths are preferred.
 - **Evidence-first:** runs write `status.json`, screenshot paths, target ids, redacted command logs, and Oracle reattach instructions.
+- **Hermes-testable:** `oracle-ai-research-e2e` installs as a local Hermes skill and ships a deterministic checker for the combined GitHub/local workflow.
 
 Try a public-safe Oracle plan:
 
@@ -149,6 +150,12 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 ```
 
 Read the full skill docs: [AI Research Browser](skills/software-development/ai-research-browser/README.md).
+
+Run the dedicated local proof skill:
+
+```bash
+python3 skills/software-development/oracle-ai-research-e2e/scripts/oracle_ai_research_e2e_check.py --quick --json
+```
 
 ## 💬 Featured: Telegram Approval Gate
 
@@ -239,6 +246,7 @@ skills/
     multi-search-engine/
   software-development/
     ai-research-browser/
+    oracle-ai-research-e2e/
     plan/
     requesting-code-review/
     subagent-driven-development/
@@ -259,6 +267,7 @@ Run the currently bundled executable tests:
 python3 skills/telegram-approval-gate/tests/test_telegram_approval_gate.py
 (cd skills/telegram-channel-poster && python3 scripts/test_telegram_channel_post.py)
 python3 -m unittest discover -s skills/software-development/ai-research-browser/tests -p 'test_ai_research_browser.py'
+python3 -m unittest discover -s skills/software-development/oracle-ai-research-e2e/tests -p 'test_*.py'
 ```
 
 Run the public safety scan:

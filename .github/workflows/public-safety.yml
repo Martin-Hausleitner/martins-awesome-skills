@@ -17,6 +17,10 @@ jobs:
         run: scripts/audit-public-safety.sh
       - name: Run skill sync doctor tests
         run: node --test tests/skill-sync-doctor.test.mjs
+      - name: Run Oracle AI Research E2E skill tests
+        run: python3 -m unittest discover -s skills/software-development/oracle-ai-research-e2e/tests -p 'test_*.py'
+      - name: Run Oracle AI Research E2E checker
+        run: python3 skills/software-development/oracle-ai-research-e2e/scripts/oracle_ai_research_e2e_check.py --quick --json
       - name: Run Telegram approval tests
         run: python3 skills/telegram-approval-gate/tests/test_telegram_approval_gate.py
       - name: Run Telegram channel poster tests

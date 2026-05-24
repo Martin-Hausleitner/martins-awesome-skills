@@ -193,10 +193,18 @@ def backend_registry() -> dict[str, dict[str, Any]]:
         },
         "oracle": {
             "scope": "local-or-api",
-            "aliases": ["Peter Steinberger Oracle", "@steipete/oracle", "multi-model consult"],
+            "aliases": ["Peter Steinberger Oracle", "@steipete/oracle", "@steipete/oracle@0.13.0", "multi-model consult"],
             "description": (
                 "Consult GPT/Gemini/Claude through Oracle API or browser sessions; useful for code review, "
                 "long-run reattach, and session artifacts, not a replacement for local provider account audits."
+            ),
+        },
+        "cloakbrowser": {
+            "scope": "isolated-cdp-profile",
+            "aliases": ["CloakBrowser", "cloakbrowser-manager", "cloakhq/cloakbrowser-manager", "isolated CDP profile"],
+            "description": (
+                "Optional isolated browser profile/CDP backend. Use only after a profile is manually authenticated "
+                "and verified by the same account/plan guards as live CDP workflows."
             ),
         },
         "openai-cua": {
@@ -369,27 +377,241 @@ def build_oracle_plan(
     files: list[str] | None = None,
     cdp_port: int | None = None,
     deep_research: bool = False,
+    research_depth: str = "off",
+    model: str = "",
+    browser_attachment_timeout: int | None = None,
+    remote_chrome: str = "",
     model_strategy: str = "current",
+    provider: str = "",
+    mode: str = "",
 ) -> dict[str, Any]:
-    base = ["npx", "-y", "@steipete/oracle"]
+    package = "@steipete/oracle@0.13.0"
+    provider_id = normalize_provider_name(provider) if provider else ""
+    mode_id = slug(mode or "")
+    if provider_id == "chatgpt" and not model:
+        if mode_id in {"thinking", "chat"}:
+            model = "GPT-5.5 Thinking"
+        elif mode_id in {"agent", "deep-research"}:
+            model = "GPT-5.5 Thinking"
+    if provider_id == "chatgpt" and mode_id in {"agent", "deep-research"} and research_depth == "off":
+        research_depth = "deep"
+    execution_policy = "assist-or-runner"
+    if provider_id == "gemini" and mode_id == "deep-research":
+        execution_policy = "assist-only"
+    base = ["npx", "-y", package]
     consult = [*base, "--dry-run", "summary", "--engine", "browser", "--browser-model-strategy", model_strategy]
-    if cdp_port:
-        consult.extend(["--browser-attach-running", "--remote-chrome", f"127.0.0.1:{cdp_port}"])
-    if deep_research:
-        consult.extend(["--browser-research", "deep"])
+    remote = remote_chrome or (f"127.0.0.1:{cdp_port}" if cdp_port else "")
+    if remote:
+        consult.extend(["--browser-attach-running", "--remote-chrome", remote])
+    if model:
+        consult.extend(["--model", model])
+    depth = "deep" if deep_research and research_depth == "off" else research_depth
+    if depth and depth != "off":
+        consult.extend(["--browser-research", depth])
+    if browser_attachment_timeout:
+        consult.extend(["--browser-attachment-timeout", str(int(browser_attachment_timeout))])
     consult.extend(["-p", prompt])
     for file_pattern in files or []:
         consult.extend(["--file", file_pattern])
     return {
+        "backend": "oracle",
+        "package": package,
+        "version": "0.13.0",
+        "provider": provider_id,
+        "mode": mode_id,
+        "execution_policy": execution_policy,
         "purpose": "Use Oracle for multi-model/code consults and ChatGPT browser-session artifacts; keep account audits in ai_research_browser.",
         "consult_dry_run": consult,
         "status": [*base, "status", "--hours", "72", "--browser-tabs"],
+        "reattach": [*base, "status", "--hours", "72", "--browser-tabs"],
         "show_session": [*base, "session", "<session-id>", "--render"],
+        "remote_chrome": remote,
         "notes": [
             "Use --dry-run summary first on shared desktops.",
             "Use --browser-attach-running with a real CDP-enabled signed-in browser.",
+            "Oracle is an assist/reattach layer: workflow-run/workflow-live-run still own login, account, plan, feature, screenshot, and paid-quota guards.",
             "Use session/status to fetch/show long-running Oracle browser results instead of starting duplicates.",
         ],
+    }
+
+
+def build_oracle_assist_payload(
+    *,
+    prompt: str,
+    provider: str,
+    mode: str,
+    cdp_port: int,
+    artifact_privacy: str = "redacted",
+    oracle_mode: str = "assist",
+) -> dict[str, Any]:
+    plan_prompt = prompt if artifact_privacy == "full" else "<redacted-prompt>"
+    plan = build_oracle_plan(
+        prompt=plan_prompt,
+        provider=provider,
+        mode=mode,
+        cdp_port=cdp_port,
+        remote_chrome=f"127.0.0.1:{int(cdp_port)}",
+    )
+    return {
+        "mode": oracle_mode,
+        "session_id": "<session-id>",
+        "reattach_available": True,
+        "commands": {
+            "consult_dry_run": plan["consult_dry_run"],
+            "status": plan["status"],
+            "reattach": plan["reattach"],
+            "show_session": plan["show_session"],
+        },
+        "evidence": {
+            "provider": normalize_provider_name(provider),
+            "workflow_mode": slug(mode or "chat"),
+            "remote_chrome": plan.get("remote_chrome", ""),
+            "prompt_redacted": artifact_privacy != "full",
+        },
+        "notes": plan.get("notes", []),
+    }
+
+
+def inspect_cloakbrowser_proxy_file(proxy_file: str = "") -> dict[str, Any]:
+    source = proxy_file or os.environ.get("AI_RESEARCH_BROWSER_PROXY_FILE", "")
+    if not source:
+        return {"ok": True, "status": "not-configured", "source": "none", "count": 0, "entries": []}
+    path = Path(source).expanduser()
+    result: dict[str, Any] = {
+        "ok": False,
+        "status": "missing",
+        "path": str(path),
+        "count": 0,
+        "entries": [],
+        "redaction": "raw proxy values are never written to artifacts",
+    }
+    if not path.exists():
+        return result
+    mode = path.stat().st_mode & 0o777
+    if mode & 0o077:
+        result.update({"status": "insecure-permissions", "mode": oct(mode), "required_mode": "0600"})
+        return result
+    entries = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip() and not line.strip().startswith("#")]
+    result.update(
+        {
+            "ok": True,
+            "status": "ready",
+            "mode": oct(mode),
+            "count": len(entries),
+            "entries": ["<redacted-proxy>" for _ in entries],
+        }
+    )
+    return result
+
+
+def build_cloakbrowser_manager_plan(*, port: int = 18080) -> dict[str, Any]:
+    port = int(port or 18080)
+    return {
+        "backend": "cloakbrowser",
+        "scope": "isolated-cdp-profile",
+        "manager_url": f"http://127.0.0.1:{port}",
+        "health_url": f"http://127.0.0.1:{port}/api/status",
+        "commands": {
+            "check_docker": ["docker", "--version"],
+            "check_port": ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN"],
+            "docker_run": [
+                "docker",
+                "run",
+                "-d",
+                "--name",
+                "cloakbrowser-manager",
+                "-p",
+                f"127.0.0.1:{port}:8080",
+                "-v",
+                "cloakprofiles:/data",
+                "cloakhq/cloakbrowser-manager",
+            ],
+            "health": ["curl", "-fsS", f"http://127.0.0.1:{port}/api/status"],
+        },
+        "safety": {
+            "provider_actions_require_verified_login_baseline": True,
+            "no_captcha_solving": True,
+            "no_secret_logging": True,
+        },
+    }
+
+
+def build_cloakbrowser_preflight_plan(*, manager_url: str = "http://127.0.0.1:18080", proxy_file: str = "") -> dict[str, Any]:
+    manager_url = manager_url.rstrip("/")
+    proxy_status = inspect_cloakbrowser_proxy_file(proxy_file)
+    return {
+        "backend": "cloakbrowser",
+        "status": "planned" if proxy_status.get("ok") else "blocked",
+        "manager_url": manager_url,
+        "health_url": f"{manager_url}/api/status",
+        "proxy_file": proxy_status,
+        "commands": {
+            "health": ["curl", "-fsS", f"{manager_url}/api/status"],
+            "list_containers": ["docker", "ps", "--format", "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"],
+        },
+        "notes": [
+            "CloakBrowser is an optional isolated CDP profile backend.",
+            "Create and sign into provider profiles manually before any workflow-run can spend quota.",
+            "Captcha, login challenge, provider warning, or rate-limit text must block and cool down instead of retrying.",
+        ],
+    }
+
+
+def build_cloakbrowser_profile_plan(
+    *,
+    profile_name: str,
+    provider: str,
+    manager_url: str = "http://127.0.0.1:18080",
+    proxy_file: str = "",
+    baseline_file: str = "",
+) -> dict[str, Any]:
+    provider_id = normalize_provider_name(provider)
+    proxy_status = inspect_cloakbrowser_proxy_file(proxy_file)
+    baseline_check = inspect_account_baseline_file(baseline_file)
+    login_state = str(baseline_check.get("login_state") or "")
+    verified = bool(baseline_check.get("ok"))
+    payload = {
+        "backend": "cloakbrowser",
+        "profile_name": profile_name,
+        "provider": provider_id,
+        "manager_url": manager_url.rstrip("/"),
+        "proxy_file": proxy_status,
+        "requires_manual_login": True,
+        "requires_verified_account_baseline": True,
+        "safety": {
+            "no_captcha_bypass": True,
+            "no_automatic_proxy_rotation": True,
+            "guards_required_before_submit": True,
+        },
+    }
+    if not verified:
+        return {
+            **payload,
+            "status": "blocked",
+            "blocker": "cloakbrowser provider workflows require a verified account baseline before any UI typing",
+        }
+    return {
+        **payload,
+        "status": "planned",
+        "baseline": {"verified": True, "login_state": login_state or "verified"},
+        "next_step": "Use the profile CDP endpoint with workflow-run only after live target verification succeeds.",
+    }
+
+
+def inspect_account_baseline_file(baseline_file: str = "") -> dict[str, Any]:
+    if not baseline_file:
+        return {"ok": False, "status": "missing", "login_state": ""}
+    path = Path(baseline_file).expanduser()
+    if not path.exists():
+        return {"ok": False, "status": "missing", "path": str(path), "login_state": ""}
+    baseline = read_json(path)
+    login_state = str(baseline.get("login_state") or baseline.get("status") or "")
+    verified = bool(baseline.get("verified") or login_state in {"signed-in-or-ready", "ready", "verified"})
+    return {
+        "ok": verified,
+        "status": "verified" if verified else "not-verified",
+        "path": str(path),
+        "login_state": login_state,
     }
 
 
@@ -1059,6 +1281,8 @@ def parse_visible_status(text: str, *, provider: str = "") -> dict[str, Any]:
             candidate_text = candidate.group(1).strip()
             if provider_id in provider_model_prefixes and not candidate_text.casefold().startswith(provider_model_prefixes[provider_id]):
                 continue
+            if provider_id == "chatgpt" and not re.match(r"^(?:GPT[-\s]*(?:[0-9]|[45]|5\.5|5\.3|4|3)|o[0-9])", candidate_text, flags=re.I):
+                continue
             line_start = text.rfind("\n", 0, candidate.start()) + 1
             line_end = text.find("\n", candidate.end())
             if line_end == -1:
@@ -1084,6 +1308,17 @@ def parse_visible_status(text: str, *, provider: str = "") -> dict[str, Any]:
                 if re.fullmatch(r"Grok(?:\s+[\w.\-]+){0,4}", line):
                     model_match = re.match(r"(.+)", line)
                     break
+    if provider_id == "chatgpt" and not model_match:
+        for index, line in enumerate(lines):
+            normalized = line.casefold()
+            previous = lines[index - 1].casefold() if index > 0 else ""
+            context = f"{previous}\n{normalized}"
+            if re.fullmatch(r"(?:extended\s+pro|gpt[-\s]*5\.5\s+pro)", line, flags=re.I):
+                model_match = re.match(r"(.+)", line)
+                break
+            if re.fullmatch(r"pro", line, flags=re.I) and re.search(r"\b(model|selected|current|active)\b", context, flags=re.I):
+                model_match = re.match(r"(.+)", line)
+                break
     def is_entitlement_upsell_match(match: re.Match[str]) -> bool:
         line_start = text.rfind("\n", 0, match.start()) + 1
         line_end = text.find("\n", match.end())
@@ -1343,16 +1578,62 @@ def extract_provider_inventory(provider: str, text: str) -> dict[str, Any]:
         key: [hint for hint in values if normalized_contains(text, str(hint))]
         for key, values in specs.items()
     }
+    active_model = str(visible_status.get("model") or "").strip()
+    if provider_id == "chatgpt" and not active_model:
+        active_model = infer_chatgpt_visible_active_model_label(text, visible_status=visible_status)
+    active_mode = infer_active_provider_mode(provider_id, text, active_model=active_model)
     return {
         "provider": provider_id,
         "login_state": infer_login_state(text, provider_id),
         "visible_status": visible_status,
+        "active_model": active_model,
+        "active_mode": active_mode,
         "available_models": models,
         "available_tools": tools,
         "available_modes": modes,
         "matched_hints": matched_hints,
         "usage_lines": extract_usage_lines(text),
     }
+
+
+def infer_chatgpt_visible_active_model_label(text: str, *, visible_status: dict[str, Any] | None = None) -> str:
+    """Detect ChatGPT model-selector short labels without confusing plan labels for models."""
+    visible_status = visible_status or {}
+    lines = [line.strip().strip('"') for line in expand_agent_browser_eval_text(text or "").splitlines() if line.strip()]
+    plan = str(visible_status.get("plan") or "").strip()
+    formal_plan_seen = any(
+        re.search(r"\b(?:free|plus|pro|team|enterprise)\s+(?:plan|subscription|abo|tier)\b", line, flags=re.I)
+        or re.search(r"\bChatGPT\s+(?:Free|Plus|Pro|Team|Enterprise)\b", line, flags=re.I)
+        for line in lines
+    )
+    composer_markers = re.compile(r"\b(?:message chatgpt|chat with chatgpt|what(?:'|’)s on your mind|ask anything|where should we begin)\b", re.I)
+    for index, line in enumerate(lines):
+        if re.search(r"\b(?:plan|subscription|abo|tier)\b", line, flags=re.I):
+            continue
+        if re.fullmatch(r"Extended\s+Pro", line, flags=re.I):
+            return "Extended Pro"
+        if not re.fullmatch(r"Pro", line, flags=re.I):
+            continue
+        previous = lines[index - 1] if index > 0 else ""
+        following = "\n".join(lines[index + 1 : index + 3])
+        if not (formal_plan_seen or (plan and plan.casefold() != "pro")):
+            continue
+        if previous and not re.search(r"\b(?:plan|subscription|abo|tier)\b", previous, flags=re.I) and composer_markers.search(following):
+            return "Pro"
+    return ""
+
+
+def infer_active_provider_mode(provider: str, text: str, *, active_model: str = "") -> str:
+    provider_id = normalize_provider_name(provider)
+    combined = f"{active_model}\n{text or ''}".casefold()
+    if provider_id == "chatgpt":
+        if "thinking" in combined:
+            return "thinking"
+        if "deep research" in combined or "deep-research" in combined:
+            return "deep-research"
+        if re.search(r"\bagent\b", combined):
+            return "agent"
+    return ""
 
 
 def agent_browser_command() -> str:
@@ -2062,7 +2343,13 @@ def provider_workflow_specs() -> dict[str, dict[str, dict[str, Any]]]:
 
 def provider_workflow_spec(provider: str, mode: str) -> dict[str, Any]:
     provider_id = normalize_provider_name(provider)
-    mode_id = "research" if provider_id in {"perplexity", "grok", "claude"} and mode == "deep-research" else mode
+    requested_mode = slug(mode or "chat")
+    if provider_id == "chatgpt" and requested_mode == "thinking":
+        mode_id = "chat"
+    elif provider_id in {"perplexity", "grok", "claude"} and requested_mode == "deep-research":
+        mode_id = "research"
+    else:
+        mode_id = requested_mode
     specs = provider_workflow_specs()
     provider_specs = specs.get(provider_id, {})
     if mode_id not in provider_specs:
@@ -5372,7 +5659,7 @@ def agent_browser_profile_workflow_run(
             )
             workflow_events.append({"event": "pre-submit-guard", **pre_submit_guard_payload})
             if not pre_submit_guard_payload.get("allowed"):
-                status = "blocked"
+                status = "model-safety-blocked" if "chatgpt-pro-model-blocked" in pre_submit_guard_payload.get("errors", []) else "blocked"
             if not feature_result.get("clicked") and spec.get("slash_triggers"):
                 slash = str(spec["slash_triggers"][0])
                 if pre_submit_guard_payload.get("allowed"):
@@ -6033,22 +6320,6 @@ def agent_browser_live_workflow_run(
                 snapshot=current_snapshot_text,
             )
             workflow_events.append({"event": "select-feature", **feature_result})
-        if not feature_result.get("clicked") and spec.get("slash_triggers"):
-            slash = str(spec["slash_triggers"][0])
-            slash_result = fill_agent_browser_composer(
-                invoke,
-                snapshot=current_snapshot_text,
-                selector=spec["composer_selector"],
-                text=slash,
-                label="slash-feature",
-            )
-            workflow_events.append({"event": "slash-feature", "trigger": slash, "returncode": slash_result.returncode})
-            if slash_result.returncode == 0:
-                invoke("slash-enter", ["press", "Enter"])
-                invoke("wait-after-slash", ["wait", "1500"])
-                slash_snapshot = invoke("snapshot-after-slash", ["snapshot", "-i", "-c"])
-                current_snapshot_text = slash_snapshot.stdout or current_snapshot_text
-
         pre_submit_eval = invoke("eval-before-pre-submit-guard", ["eval", browser_eval_visible_text_script()])
         if pre_submit_eval.stdout:
             visible_text_parts.append(pre_submit_eval.stdout)
@@ -6092,6 +6363,32 @@ def agent_browser_live_workflow_run(
                 status = "blocked"
             workflow_events.append({"event": "pacing-guard", **pacing_guard_payload})
 
+        if pre_submit_guard_payload.get("allowed") and pacing_guard_payload.get("allowed", True):
+            if not feature_result.get("clicked") and spec.get("slash_triggers"):
+                slash = str(spec["slash_triggers"][0])
+                slash_result = fill_agent_browser_composer(
+                    invoke,
+                    snapshot=current_snapshot_text,
+                    selector=spec["composer_selector"],
+                    text=slash,
+                    label="slash-feature",
+                )
+                workflow_events.append({"event": "slash-feature", "trigger": slash, "returncode": slash_result.returncode})
+                if slash_result.returncode == 0:
+                    invoke("slash-enter", ["press", "Enter"])
+                    invoke("wait-after-slash", ["wait", "1500"])
+                    slash_snapshot = invoke("snapshot-after-slash", ["snapshot", "-i", "-c"])
+                    current_snapshot_text = slash_snapshot.stdout or current_snapshot_text
+        elif not feature_result.get("clicked") and spec.get("slash_triggers"):
+            workflow_events.append(
+                {
+                    "event": "slash-feature",
+                    "trigger": str(spec["slash_triggers"][0]),
+                    "returncode": 1,
+                    "skipped": "pre-submit-guard-blocked" if not pre_submit_guard_payload.get("allowed") else "pacing-guard-blocked",
+                }
+            )
+
         fill_result = subprocess.CompletedProcess(["pre-submit-guard-blocked"], 1, "", "")
         if pre_submit_guard_payload.get("allowed") and pacing_guard_payload.get("allowed", True):
             fill_result = fill_agent_browser_composer(
@@ -6103,7 +6400,7 @@ def agent_browser_live_workflow_run(
             )
             workflow_events.append({"event": "fill-prompt", "returncode": fill_result.returncode})
         else:
-            status = "blocked"
+            status = "model-safety-blocked" if "chatgpt-pro-model-blocked" in pre_submit_guard_payload.get("errors", []) else "blocked"
             skipped_reason = "pacing-guard-blocked" if pre_submit_guard_payload.get("allowed") else "pre-submit-guard-blocked"
             workflow_events.append({"event": "fill-prompt", "returncode": 1, "skipped": skipped_reason})
         if fill_result.returncode == 0:
@@ -6922,6 +7219,7 @@ def provider_typing_guard(
     available_modes = inventory.get("available_modes") if isinstance(inventory.get("available_modes"), dict) else {}
     available_models = [str(item) for item in inventory.get("available_models") or []]
     model_evidence = inventory_model_evidence(inventory)
+    model_safety = chatgpt_model_safety_guard(inventory, mode=mode_id)
 
     if str(inventory.get("login_state") or "") != "signed-in-or-ready":
         errors.append("login-not-verified")
@@ -6944,6 +7242,8 @@ def provider_typing_guard(
         errors.append("screenshot-not-captured")
     if is_paid_workflow_mode(mode_id) and not allow_paid_quota_use:
         errors.append("paid-quota-use-not-allowed")
+    if not model_safety.get("allowed", True):
+        errors.extend(str(item) for item in model_safety.get("errors", []) or [])
     rate_limit = detect_rate_limit_from_text("\n".join(str(item) for item in inventory.get("usage_lines") or []))
     if rate_limit.get("limited"):
         errors.append("rate-limit-or-quota-wall")
@@ -6958,7 +7258,40 @@ def provider_typing_guard(
         "account": visible_status.get("account", ""),
         "plan": visible_status.get("plan", ""),
         "model": requested_model or model_evidence,
+        "model_safety": model_safety,
         "paid_mode": is_paid_workflow_mode(mode_id),
+    }
+
+
+def chatgpt_model_safety_guard(
+    inventory: dict[str, Any],
+    *,
+    mode: str = "",
+    allow_pro_model_dangerously: bool = False,
+) -> dict[str, Any]:
+    if normalize_provider_name(str(inventory.get("provider", ""))) != "chatgpt":
+        return {"allowed": True, "status": "not-applicable", "errors": []}
+    visible_status = inventory.get("visible_status") if isinstance(inventory.get("visible_status"), dict) else {}
+    active_model = str(inventory.get("active_model") or visible_status.get("model") or "").strip()
+    active_mode = str(inventory.get("active_mode") or "").strip()
+    mode_id = slug(mode or active_mode or "chat")
+    candidate = active_model.casefold()
+    pro_detected = bool(re.search(r"\bpro\b|extended\s+pro|gpt[-\s]*5\.5\s*pro", candidate, flags=re.I))
+    allowed_modes = {"thinking", "agent", "deep-research", "chat"}
+    errors: list[str] = []
+    if pro_detected and not allow_pro_model_dangerously:
+        errors.append("chatgpt-pro-model-blocked")
+    if mode_id not in allowed_modes:
+        errors.append("chatgpt-mode-not-allowed-for-test")
+    return {
+        "allowed": not errors,
+        "status": "allowed" if not errors else "blocked",
+        "errors": errors,
+        "active_model": active_model,
+        "active_mode": active_mode,
+        "requested_mode": mode_id,
+        "pro_detected": pro_detected,
+        "allow_pro_model_dangerously": allow_pro_model_dangerously,
     }
 
 
@@ -8340,10 +8673,48 @@ def cmd_oracle_plan(args: argparse.Namespace) -> int:
         files=files,
         cdp_port=args.cdp_port,
         deep_research=args.deep_research,
+        research_depth=args.research_depth,
+        model=args.model,
+        browser_attachment_timeout=args.browser_attachment_timeout,
+        remote_chrome=args.remote_chrome,
         model_strategy=args.browser_model_strategy,
+        provider=args.provider,
+        mode=args.mode,
     )
+    if args.output:
+        write_json(Path(args.output).expanduser(), payload)
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
+
+
+def cmd_cloakbrowser_manager_plan(args: argparse.Namespace) -> int:
+    payload = build_cloakbrowser_manager_plan(port=args.port)
+    if args.output:
+        write_json(Path(args.output).expanduser(), payload)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_cloakbrowser_preflight(args: argparse.Namespace) -> int:
+    payload = build_cloakbrowser_preflight_plan(manager_url=args.manager_url, proxy_file=args.proxy_file)
+    if args.output:
+        write_json(Path(args.output).expanduser(), payload)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0 if payload.get("status") == "planned" else 1
+
+
+def cmd_cloakbrowser_profile_plan(args: argparse.Namespace) -> int:
+    payload = build_cloakbrowser_profile_plan(
+        profile_name=args.profile_name,
+        provider=args.provider,
+        manager_url=args.manager_url,
+        proxy_file=args.proxy_file,
+        baseline_file=args.baseline_file,
+    )
+    if args.output:
+        write_json(Path(args.output).expanduser(), payload)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0 if payload.get("status") == "planned" else 1
 
 
 def cmd_e2e_probe(args: argparse.Namespace) -> int:
@@ -8598,6 +8969,25 @@ def cmd_workflow_plan(args: argparse.Namespace) -> int:
 
 
 def cmd_workflow_run(args: argparse.Namespace) -> int:
+    if getattr(args, "backend", "") == "cloakbrowser":
+        baseline_check = inspect_account_baseline_file(getattr(args, "account_baseline", ""))
+        blocker = ""
+        if not baseline_check.get("ok"):
+            blocker = "cloakbrowser workflow-run requires --account-baseline from a verified manual login before any UI typing"
+        elif not getattr(args, "cdp_port", None):
+            blocker = "cloakbrowser workflow-run requires --cdp-port for the verified isolated profile endpoint"
+        if blocker:
+            payload = {
+                "status": "blocked",
+                "backend": "cloakbrowser",
+                "blocker": blocker,
+                "account_baseline": baseline_check,
+                "safety": {"guards_required_before_submit": True, "no_captcha_bypass": True},
+            }
+            if args.output:
+                write_json(Path(args.output).expanduser(), payload)
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+            return 1
     browser, profile = resolve_workflow_browser_profile(args)
     extension_ids = requested_extension_ids(getattr(args, "include_extension", None), include_ai_exporter=getattr(args, "include_ai_exporter", False))
     attachments = [Path(item).expanduser() for item in getattr(args, "attachment", []) or []]
@@ -8770,6 +9160,7 @@ def cmd_workflow_run(args: argparse.Namespace) -> int:
         }
     payload = {
         **payload,
+        "backend": str(getattr(args, "backend", "playwright-cdp")),
         "strategy": strategy,
         "selected_strategy": selected_strategy,
         "restart_required": selected_strategy == "restart-cdp" or any("remote-debugging" in str(item) or "cdp" in str(item) for item in preflight.get("blockers", [])),
@@ -8797,6 +9188,23 @@ def cmd_workflow_run(args: argparse.Namespace) -> int:
             "allow_paid_quota_use": bool(getattr(args, "allow_paid_quota_use", False)),
         },
     )
+    oracle_mode = str(getattr(args, "oracle_mode", "assist") or "off")
+    if getattr(args, "oracle_assist", False) and oracle_mode == "off":
+        oracle_mode = "assist"
+    if oracle_mode != "off":
+        oracle_payload = build_oracle_assist_payload(
+            prompt=prompt,
+            provider=args.provider,
+            mode=args.mode,
+            cdp_port=cdp_port,
+            artifact_privacy=artifact_privacy,
+            oracle_mode=oracle_mode,
+        )
+        if oracle_mode == "runner" and payload.get("status") not in {"opened", "submitted", "started", "verified", "captured"}:
+            oracle_payload["runner_status"] = "blocked-by-local-guards"
+            oracle_payload["runner_blocker"] = "Oracle runner requires successful local login/account/plan/feature/screenshot guards first."
+        payload["oracle"] = oracle_payload
+        payload["oracle_evidence"] = oracle_payload.get("evidence", {})
     if args.output:
         write_json(Path(args.output).expanduser(), payload)
     print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -8859,6 +9267,64 @@ def cmd_workflow_live_run(args: argparse.Namespace) -> int:
         write_json(Path(args.output).expanduser(), payload)
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0 if payload.get("status") in {"opened", "submitted", "started", "verified", "captured"} else 1
+
+
+def cmd_oracle_e2e_smoke(args: argparse.Namespace) -> int:
+    provider_id = normalize_provider_name(args.provider)
+    mode_id = slug(args.mode or "thinking")
+    payload = {
+        "status": "blocked",
+        "blocker": "real Oracle E2E smoke requires AI_RESEARCH_BROWSER_E2E=1",
+        "provider": provider_id,
+        "mode": mode_id,
+        "browser": normalize_browser_name(args.browser),
+        "profile": args.profile,
+        "safety": {
+            "pro_model_allowed": False,
+            "requires_real_cdp_session": True,
+            "requires_login_account_plan_feature_screenshot": True,
+        },
+        "planned_workflow": [
+            "real-session-preflight",
+            "create isolated automation target",
+            "verify ChatGPT login/account/plan/model picker",
+            "block Pro models before typing",
+            "submit debug prompt only after local guards",
+            "record Oracle status/reattach/show_session evidence",
+        ],
+    }
+    if os.environ.get("AI_RESEARCH_BROWSER_E2E") != "1":
+        if args.output:
+            write_json(Path(args.output).expanduser(), payload)
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 1
+    workflow_mode = "chat" if mode_id == "thinking" else mode_id
+    workflow_args = [
+        "workflow-run",
+        "--browser",
+        args.browser,
+        "--profile",
+        args.profile,
+        "--provider",
+        provider_id,
+        "--mode",
+        workflow_mode,
+        "--prompt",
+        args.prompt or "Analysiere kurz, warum Oracle-Reattach im aktuellen CLI-Flow stabiler sein soll.",
+        "--submit",
+        "--oracle-mode",
+        args.oracle_mode,
+        "--allow-paid-quota-use",
+    ]
+    if args.cdp_port:
+        workflow_args.extend(["--cdp-port", str(args.cdp_port)])
+    if args.confirm_start:
+        workflow_args.append("--confirm-start")
+    if args.copy_output:
+        workflow_args.append("--copy-output")
+    if args.output:
+        workflow_args.extend(["--output", args.output])
+    return main(workflow_args)
 
 
 def cmd_browser_cdp_recover(args: argparse.Namespace) -> int:
@@ -10289,7 +10755,28 @@ def build_parser() -> argparse.ArgumentParser:
     oracle_plan.add_argument("--file", action="append")
     oracle_plan.add_argument("--cdp-port", type=int)
     oracle_plan.add_argument("--deep-research", action="store_true")
+    oracle_plan.add_argument("--research-depth", choices=["off", "deep", "max"], default="off")
+    oracle_plan.add_argument("--model", default="")
+    oracle_plan.add_argument("--provider", choices=["", *provider_cli_choices()], default="")
+    oracle_plan.add_argument("--mode", default="")
+    oracle_plan.add_argument("--browser-attachment-timeout", type=int)
+    oracle_plan.add_argument("--remote-chrome", default="")
     oracle_plan.add_argument("--browser-model-strategy", choices=["select", "current", "ignore"], default="current")
+    oracle_plan.add_argument("--output", default="")
+    cloak_manager = sub.add_parser("cloakbrowser-manager-plan")
+    cloak_manager.add_argument("--port", type=int, default=18080)
+    cloak_manager.add_argument("--output", default="")
+    cloak_preflight = sub.add_parser("cloakbrowser-preflight")
+    cloak_preflight.add_argument("--manager-url", default="http://127.0.0.1:18080")
+    cloak_preflight.add_argument("--proxy-file", default="")
+    cloak_preflight.add_argument("--output", default="")
+    cloak_profile = sub.add_parser("cloakbrowser-profile-plan")
+    cloak_profile.add_argument("--profile-name", required=True)
+    cloak_profile.add_argument("--provider", choices=provider_cli_choices(), required=True)
+    cloak_profile.add_argument("--manager-url", default="http://127.0.0.1:18080")
+    cloak_profile.add_argument("--proxy-file", default="")
+    cloak_profile.add_argument("--baseline-file", default="")
+    cloak_profile.add_argument("--output", default="")
     models = sub.add_parser("models")
     models.add_argument("--provider", choices=provider_cli_choices(), default="")
     matrix = sub.add_parser("matrix")
@@ -10442,6 +10929,10 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_run.add_argument("--profile", default="work")
     workflow_run.add_argument("--provider", choices=provider_cli_choices(), required=True)
     workflow_run.add_argument("--mode", default="chat")
+    workflow_run.add_argument("--backend", choices=sorted(backend_registry().keys()), default="playwright-cdp")
+    workflow_run.add_argument("--account-baseline", default="", help="Verified baseline file required for cloakbrowser backend runs.")
+    workflow_run.add_argument("--oracle-assist", action="store_true", help="Include Oracle reattach/status guidance in workflow artifacts without bypassing local guards.")
+    workflow_run.add_argument("--oracle-mode", choices=["off", "assist", "runner"], default="assist", help="Include Oracle reattach/status evidence or mark Oracle as a guarded runner layer.")
     workflow_run.add_argument("--strategy", choices=WORKFLOW_STRATEGIES, default="auto", help="Execution strategy: live CDP first by default, with safe fallbacks.")
     workflow_run.add_argument("--cdp-port", type=int, help="CDP port for live-cdp/restart-cdp. Defaults to the browser's configured port.")
     workflow_run.add_argument("--allow-browser-restart", action="store_true", help="Allow auto strategy to choose restart-cdp when live CDP is unavailable.")
@@ -10468,6 +10959,17 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_run.add_argument("--attachment", action="append", default=[], help="Local file/image path to attach through the provider file input when visible.")
     workflow_run.add_argument("--output", default="")
     add_hardening_cli_args(workflow_run)
+    oracle_e2e_smoke = sub.add_parser("oracle-e2e-smoke")
+    oracle_e2e_smoke.add_argument("--browser", default="brave")
+    oracle_e2e_smoke.add_argument("--profile", default="work")
+    oracle_e2e_smoke.add_argument("--provider", choices=["chatgpt", "gemini", "google"], default="chatgpt")
+    oracle_e2e_smoke.add_argument("--mode", choices=["thinking", "agent", "deep-research"], default="thinking")
+    oracle_e2e_smoke.add_argument("--cdp-port", type=int)
+    oracle_e2e_smoke.add_argument("--prompt", default="")
+    oracle_e2e_smoke.add_argument("--oracle-mode", choices=["assist", "runner"], default="assist")
+    oracle_e2e_smoke.add_argument("--confirm-start", action="store_true")
+    oracle_e2e_smoke.add_argument("--copy-output", action="store_true")
+    oracle_e2e_smoke.add_argument("--output", default="")
     browser_cdp_recover = sub.add_parser("browser-cdp-recover")
     browser_cdp_recover.add_argument("--browser", default="brave")
     browser_cdp_recover.add_argument("--profile", default="work")
@@ -10718,6 +11220,12 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_probe_specs(args)
     if args.command == "oracle-plan":
         return cmd_oracle_plan(args)
+    if args.command == "cloakbrowser-manager-plan":
+        return cmd_cloakbrowser_manager_plan(args)
+    if args.command == "cloakbrowser-preflight":
+        return cmd_cloakbrowser_preflight(args)
+    if args.command == "cloakbrowser-profile-plan":
+        return cmd_cloakbrowser_profile_plan(args)
     if args.command == "models":
         return cmd_models(args)
     if args.command == "matrix":
@@ -10784,6 +11292,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_workflow_plan(args)
     if args.command == "workflow-run":
         return cmd_workflow_run(args)
+    if args.command == "oracle-e2e-smoke":
+        return cmd_oracle_e2e_smoke(args)
     if args.command == "workflow-live-run":
         return cmd_workflow_live_run(args)
     if args.command == "browser-cdp-recover":

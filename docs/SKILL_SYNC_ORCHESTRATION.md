@@ -157,6 +157,21 @@ The generated files are review artifacts, not live config:
 - `codex/skills-index.json`
 - `gemini/gemini-extension.preview.json`
 
+For local machines that already have multiple agent skill roots, use the
+`cross-agent-skill-sync` skill to project reviewed skills additively:
+
+```bash
+node skills/software-development/cross-agent-skill-sync/scripts/cross_agent_skill_sync.mjs \
+  --target all \
+  --strategy symlink
+```
+
+It plans first, redacts the home directory in reports, skips existing
+destinations, and installs only when `--execute` is provided. Use
+`--include-skill /path/to/skill-folder` for local bridge skills that live
+outside this repository, and `--require-skill <name>` to prove a required
+bridge was found before continuing.
+
 ## Browser Automation Routing
 
 Use a routing policy instead of hardcoding one browser workflow:

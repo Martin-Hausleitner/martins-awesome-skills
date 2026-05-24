@@ -43,6 +43,7 @@ This repo is intentionally **not** a dump of a private OpenClaw/Hermes setup. It
 - Human approval gates for external messages
 - Dry-run-first Telegram publishing helpers
 - Planning, review, debugging, subagent, and TDD playbooks for coding agents
+- Cross-agent skill sync for Hermes, Codex, OpenClaw, Gemini, OpenCode, and Claude-adjacent local roots
 - GitHub review workflows
 - Creative skills for ASCII, Excalidraw, p5.js, songwriting, and AI music workflows
 - Research helpers for arXiv, Polymarket, Blogwatcher, Songsee, and YouTube content
@@ -66,6 +67,7 @@ This repo is intentionally **not** a dump of a private OpenClaw/Hermes setup. It
 | 📍 Local discovery | `find-nearby` | Nearby place lookup workflow templates |
 | 🔌 MCP | `native-mcp` | Native Model Context Protocol server setup patterns |
 | ⚙️ DevOps | `webhook-subscriptions` | Event-driven agent activation with signature and dry-run safety |
+| 🔁 Skill sync | `cross-agent-skill-sync` | Share `SKILL.md` packages across local agent roots with dry-run plans |
 
 ## 🌟 Skill Cards
 
@@ -75,6 +77,7 @@ This repo is intentionally **not** a dump of a private OpenClaw/Hermes setup. It
 - 🎨 **Visual creation**: ASCII, Excalidraw, and p5.js workflows for fast diagrams and explainers.
 - 🔬 **Research workflows**: arXiv, Polymarket, and YouTube content helpers.
 - 🔌 **Tool plumbing**: MCP setup patterns and multi-search utilities.
+- 🔁 **Skill sharing**: additive, dry-run-first projection into local Hermes/Codex/agent skill roots.
 - 🐙 **GitHub operating loop**: auth, issues, PRs, and review workflows in one public-safe set.
 - ⚙️ **Event bridges**: webhook subscriptions with HMAC-first thinking.
 - 🧱 **Reusable templates**: start new skills from `templates/SKILL_TEMPLATE.md`.
@@ -200,12 +203,19 @@ Then fill the copied private file with your own values. Do not commit it.
 - `.github/workflows/public-safety.yml`: CI guardrail for audit and Telegram tests.
 - `docs/SKILL_SYNC_ORCHESTRATION.md`: public-safe plan for syncing skills, MCP servers, prompts, and agent configs across tools.
 - `scripts/skill-sync-doctor.mjs`: prototype inventory/doctor for public-safe skill sync manifests.
+- `cross-agent-skill-sync`: local projector that can install reviewed skills into discovered agent roots without overwrites.
 
 Run the skill sync prototype:
 
 ```bash
 node scripts/skill-sync-doctor.mjs --root skills --root docs --out /tmp/skill-sync-manifest.json
 node scripts/skill-sync-doctor.mjs --root skills --emit codex --emit gemini --emit-dir /tmp/skill-sync-generated
+```
+
+Plan a local additive projection into known agent roots:
+
+```bash
+node skills/software-development/cross-agent-skill-sync/scripts/cross_agent_skill_sync.mjs --target all
 ```
 
 ## 🗂️ Skill Layout
@@ -246,6 +256,7 @@ skills/
     multi-search-engine/
   software-development/
     ai-research-browser/
+    cross-agent-skill-sync/
     oracle-ai-research-e2e/
     plan/
     requesting-code-review/
@@ -268,6 +279,7 @@ python3 skills/telegram-approval-gate/tests/test_telegram_approval_gate.py
 (cd skills/telegram-channel-poster && python3 scripts/test_telegram_channel_post.py)
 python3 -m unittest discover -s skills/software-development/ai-research-browser/tests -p 'test_ai_research_browser.py'
 python3 -m unittest discover -s skills/software-development/oracle-ai-research-e2e/tests -p 'test_*.py'
+node --test skills/software-development/cross-agent-skill-sync/tests/cross_agent_skill_sync.test.mjs
 ```
 
 Run the public safety scan:

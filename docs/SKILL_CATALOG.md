@@ -10,6 +10,7 @@
 | `plan` | Software development | Plan-oriented implementation guidance |
 | `requesting-code-review` | Software development | Request and structure focused code review |
 | `subagent-driven-development` | Software development | Coordinate independent implementation tasks with subagents |
+| `cross-agent-skill-sync` | Software development | Share `SKILL.md` packages across local Hermes, Codex, OpenClaw, Gemini, OpenCode, and Claude-adjacent skill roots |
 | `github-auth` | GitHub | Diagnose and configure GitHub auth without committing secrets |
 | `github-code-review` | GitHub | Review local diffs and PRs with structured findings |
 | `github-issues` | GitHub | Create, triage, label, and close GitHub issues |

@@ -1,0 +1,30 @@
+{
+  "job_id": "example-batch-001",
+  "title": "Agent research digest",
+  "results": [
+    {
+      "title": "Obsidian AI Plugins",
+      "provider": "gemini",
+      "mode": "deep-research",
+      "status": "completed",
+      "deep_research_url": "https://example.com/research/obsidian-ai-plugins",
+      "pspin_url": "https://example.com/pspin/obsidian-ai-plugins",
+      "summary": "The strongest Obsidian AI setups combine local-first notes, retrieval over Markdown, team review workflows, and explicit export boundaries.",
+      "text": "Full public-safe example report about Obsidian AI plugin patterns, team collaboration, and Notion-like workflows.",
+      "research_duration_seconds": 600,
+      "total_duration_seconds": 780
+    },
+    {
+      "title": "Agent Skill Sync",
+      "provider": "chatgpt",
+      "mode": "deep-research",
+      "status": "completed",
+      "deep_research_url": "https://example.com/research/agent-skill-sync",
+      "pspin_url": "https://example.com/pspin/agent-skill-sync",
+      "summary": "A shared manifest, local adapters, no-overwrite sync, and redacted reports make skills portable across multiple agents.",
+      "text": "Full public-safe example report about synchronizing agent skills across local tools.",
+      "research_duration_seconds": 720,
+      "total_duration_seconds": 900
+    }
+  ]
+}

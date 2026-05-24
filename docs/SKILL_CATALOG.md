@@ -26,6 +26,7 @@
 | `polymarket` | Research | Work with Polymarket market data workflows |
 | `songsee` | Media | Song and music discovery workflows |
 | `youtube-content` | Media | Fetch and structure YouTube transcript/content workflows |
+| `ai-research-output-publisher` | Productivity | Format completed research results with links, copy-ready summaries, timing metrics, and optional Notion page payloads |
 | `notion` | Productivity | Notion API workflow with safe placeholder configuration |
 | `ocr-and-documents` | Productivity | OCR and document extraction guidance |
 | `himalaya` | Email | Himalaya IMAP/SMTP workflows with explicit-send safety |

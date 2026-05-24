@@ -63,7 +63,7 @@ This repo is intentionally **not** a dump of a private OpenClaw/Hermes setup. It
 | 🐙 GitHub | `github-auth`, `github-code-review`, `github-issues`, `github-pr-workflow` | Auth setup, issue triage, structured review, and pull request lifecycle |
 | 🎨 Creative tools | `ascii-art`, `excalidraw`, `p5js`, `songwriting-and-ai-music` | Visual explanations, sketches, animations, songs, and terminal-friendly art |
 | 🔎 Research | `arxiv`, `blogwatcher`, `polymarket`, `songsee`, `youtube-content` | Paper search, market research, blog/video/music discovery workflows |
-| 📄 Productivity | `notion`, `ocr-and-documents` | Notion API patterns and OCR/document extraction workflow guidance |
+| 📄 Productivity | `notion`, `ocr-and-documents`, `ai-research-output-publisher` | Notion API patterns, research-result publishing, and OCR/document extraction |
 | 📬 Email tooling | `himalaya` | IMAP/SMTP CLI workflows with explicit-send safety |
 | 🧭 Search & analysis | `multi-search-engine`, `tool-comparison-heatmap` | Multi-engine search and comparison visuals |
 | 📍 Local discovery | `find-nearby` | Nearby place lookup workflow templates |
@@ -291,6 +291,7 @@ Then fill the copied private file with your own values. Do not commit it.
 - `github-auth`: diagnose and configure GitHub access without leaking tokens.
 - `github-issues`: create, triage, label, and close issues with clean public summaries.
 - `github-pr-workflow`: branch, commit, test, push, and open pull requests.
+- `ai-research-output-publisher`: render finished research jobs as polished chat messages, copy buttons, metrics, and optional Notion pages.
 - `webhook-subscriptions`: design event-driven agent triggers with explicit signature checks.
 - `notion`: use the Notion API with placeholder-only examples and narrow permissions.
 - `templates/SKILL_TEMPLATE.md`: a safe starting point for new skills.
@@ -310,6 +311,15 @@ Plan a local additive projection into known agent roots:
 
 ```bash
 node skills/software-development/cross-agent-skill-sync/scripts/cross_agent_skill_sync.mjs --target all
+```
+
+Render a finished research batch into a chat-ready message and Notion payload:
+
+```bash
+python3 skills/productivity/ai-research-output-publisher/scripts/ai_research_output_publisher.py render \
+  --input /tmp/research-results.json \
+  --message-output /tmp/research-message.md \
+  --payload-output /tmp/research-notion-payload.json
 ```
 
 ## 🗂️ Skill Layout
@@ -340,6 +350,7 @@ skills/
     songsee/
     youtube-content/
   productivity/
+    ai-research-output-publisher/
     notion/
     ocr-and-documents/
   research/
@@ -373,6 +384,7 @@ python3 skills/telegram-approval-gate/tests/test_telegram_approval_gate.py
 (cd skills/telegram-channel-poster && python3 scripts/test_telegram_channel_post.py)
 python3 -m unittest discover -s skills/software-development/ai-research-browser/tests -p 'test_ai_research_browser.py'
 python3 -m unittest discover -s skills/software-development/oracle-ai-research-e2e/tests -p 'test_*.py'
+python3 -m unittest discover -s skills/productivity/ai-research-output-publisher/tests -p 'test_*.py'
 node --test skills/software-development/cross-agent-skill-sync/tests/cross_agent_skill_sync.test.mjs
 ```
 

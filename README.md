@@ -30,6 +30,7 @@ This repo is intentionally **not** a dump of a private OpenClaw/Hermes setup. It
 - [What's Inside](#-whats-inside)
 - [Skill Cards](#-skill-cards)
 - [Quick Start](#-quick-start)
+- [How It Works](#-how-it-works)
 - [Featured: Cross-Agent Skill Sync](#-featured-cross-agent-skill-sync)
 - [Featured: AI Research Browser + Oracle](#-featured-ai-research-browser--oracle)
 - [Featured: Telegram Approval Gate](#-featured-telegram-approval-gate)
@@ -106,6 +107,46 @@ mkdir -p ~/.openclaw/workspace/skills
 cp -R skills/telegram-channel-poster ~/.openclaw/workspace/skills/
 ```
 
+## 🧭 How It Works
+
+No private screenshots are needed. The repo uses public-safe diagrams and generated visuals to show the architecture without exposing accounts, browser tabs, local machine paths, prompts, or personal data.
+
+<p align="center">
+  <img src="assets/skill-lifecycle.svg" alt="Skill lifecycle from creation through validation, install, and improvement" width="920">
+</p>
+
+```mermaid
+flowchart LR
+  A["Portable SKILL.md folder"] --> B["Public-safe scanner"]
+  B --> C["Manifest + hashes"]
+  C --> D["Target adapters"]
+  D --> E["Hermes"]
+  D --> F["Codex"]
+  D --> G["OpenClaw"]
+  D --> H["Gemini / OpenCode"]
+  D --> I["Claude-adjacent bridge"]
+```
+
+```mermaid
+sequenceDiagram
+  participant User
+  participant CLI as cross-agent-skill-sync
+  participant Audit as Safety Audit
+  participant Roots as Local Agent Roots
+
+  User->>CLI: plan sync
+  CLI->>CLI: discover SKILL.md folders
+  CLI->>Audit: redact and classify report
+  Audit-->>CLI: safe plan
+  User->>CLI: execute after review
+  CLI->>Roots: add missing symlinks only
+  Roots-->>User: skills available after agent refresh
+```
+
+<p align="center">
+  <img src="assets/public-safety-pipeline.svg" alt="Public-safe publish pipeline from scan to publish" width="920">
+</p>
+
 ## 🔁 Featured: Cross-Agent Skill Sync
 
 `cross-agent-skill-sync` shares reviewed `SKILL.md` packages across local agent ecosystems without copying private state. It is built for Hermes, Codex, OpenClaw-style workspaces, Gemini CLI, OpenCode, Claude-adjacent roots, and other local skill-compatible agents.
@@ -121,6 +162,16 @@ Safe defaults:
 - **Private-path redaction:** reports hide the home directory by default.
 - **Bridge-friendly:** local skills outside this repo can be included with `--include-skill`.
 - **Public-safe:** the repo ships deterministic tests and an audit script before publish.
+
+```mermaid
+flowchart TD
+  Start["Run dry-run plan"] --> Check{"Warnings or conflicts?"}
+  Check -- yes --> Review["Manual review; no writes"]
+  Check -- no --> Execute["Run with --execute"]
+  Execute --> Link["Create missing symlinks/copies"]
+  Link --> Verify["Run plan again"]
+  Verify --> Done["All destinations exist"]
+```
 
 Plan a local projection:
 
@@ -159,6 +210,15 @@ Why it matters:
 - **Cost safety:** ChatGPT Pro/Extended Pro/GPT-5.5 Pro are blocked before typing in automated tests; non-Pro Thinking, Agent, and Deep Research paths are preferred.
 - **Evidence-first:** runs write `status.json`, screenshot paths, target ids, redacted command logs, and Oracle reattach instructions.
 - **Hermes-testable:** `oracle-ai-research-e2e` installs as a local Hermes skill and ships a deterministic checker for the combined GitHub/local workflow.
+
+```mermaid
+flowchart LR
+  Preflight["Live CDP + account guards"] --> Target["Isolated automation target"]
+  Target --> Provider["ChatGPT / Gemini workflow"]
+  Provider --> Oracle["Oracle status + reattach"]
+  Oracle --> Evidence["Redacted status artifacts"]
+  Evidence --> Audit["Public-safe proof"]
+```
 
 Try a public-safe Oracle plan:
 

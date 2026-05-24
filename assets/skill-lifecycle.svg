@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1104" height="320" viewBox="0 0 1104 320" role="img" aria-labelledby="title desc">
+  <title id="title">Skill lifecycle</title>
+  <desc id="desc">A circular lifecycle for creating, validating, installing, using, and improving agent skills.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f8fafc"/>
+      <stop offset="1" stop-color="#ecfeff"/>
+    </linearGradient>
+    <linearGradient id="center" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0ea5e9"/>
+      <stop offset="1" stop-color="#22c55e"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#0f172a" flood-opacity="0.12"/>
+    </filter>
+    <style>
+      .text{font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#0f172a}
+      .title{font-size:28px;font-weight:760}
+      .node-title{font-size:17px;font-weight:740}
+      .small{font-size:13px;fill:#475569}
+      .node{fill:#fff;stroke:#bae6fd;stroke-width:1.4;rx:8;filter:url(#shadow)}
+      .line{stroke:#93c5fd;stroke-width:2.2;fill:none;stroke-linecap:round;stroke-dasharray:6 8}
+    </style>
+  </defs>
+  <rect width="920" height="320" fill="url(#bg)"/>
+  <text x="552" y="42" text-anchor="middle" class="text title">How a Skill Moves Through the System</text>
+
+  <path class="line" d="M302 108 C392 62 712 62 802 108"/>
+  <path class="line" d="M820 158 C820 226 720 266 632 252"/>
+  <path class="line" d="M472 252 C384 266 284 226 284 158"/>
+
+  <g filter="url(#shadow)">
+    <circle cx="552" cy="166" r="70" fill="url(#center)"/>
+    <text x="552" y="154" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui" font-size="22" font-weight="780" fill="#ffffff">SKILL.md</text>
+    <text x="552" y="181" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui" font-size="14" fill="#e0f2fe">portable instructions</text>
+    <text x="552" y="202" text-anchor="middle" font-family="Inter,ui-sans-serif,system-ui" font-size="14" fill="#e0f2fe">scripts + tests</text>
+  </g>
+
+  <g>
+    <rect x="160" y="82" width="190" height="72" class="node"/>
+    <text x="255" y="112" text-anchor="middle" class="text node-title">1. Create</text>
+    <text x="255" y="136" text-anchor="middle" class="text small">frontmatter + workflow</text>
+
+    <rect x="754" y="82" width="190" height="72" class="node"/>
+    <text x="849" y="112" text-anchor="middle" class="text node-title">2. Validate</text>
+    <text x="849" y="136" text-anchor="middle" class="text small">tests + safety audit</text>
+
+    <rect x="754" y="214" width="190" height="72" class="node"/>
+    <text x="849" y="244" text-anchor="middle" class="text node-title">3. Install</text>
+    <text x="849" y="268" text-anchor="middle" class="text small">copy or symlink</text>
+
+    <rect x="160" y="214" width="190" height="72" class="node"/>
+    <text x="255" y="244" text-anchor="middle" class="text node-title">4. Improve</text>
+    <text x="255" y="268" text-anchor="middle" class="text small">evidence-driven updates</text>
+  </g>
+</svg>

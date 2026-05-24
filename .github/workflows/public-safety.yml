@@ -21,6 +21,8 @@ jobs:
         run: node --test skills/software-development/cross-agent-skill-sync/tests/cross_agent_skill_sync.test.mjs
       - name: Run AI research output publisher tests
         run: python3 -m unittest discover -s skills/productivity/ai-research-output-publisher/tests -p 'test_*.py'
+      - name: Run comparison deep research prompt tests
+        run: python3 -m unittest discover -s skills/research/comparison-deep-research/tests -p 'test_*.py'
       - name: Run Oracle AI Research E2E skill tests
         run: python3 -m unittest discover -s skills/software-development/oracle-ai-research-e2e/tests -p 'test_*.py'
       - name: Run Oracle AI Research E2E checker

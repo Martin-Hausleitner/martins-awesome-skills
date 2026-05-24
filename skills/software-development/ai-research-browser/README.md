@@ -144,7 +144,7 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
   --artifact-root /tmp/hermes-ai-research-agent-browser-live
 ```
 
-This is the "truth" path for Agent Browser. The target browser must already be running with `--remote-debugging-port=<port>` against the intended profile. Brave Work defaults to port `9223`; do not assume `9222` is Brave unless `real-session-preflight` verifies the port owner. If Agent Browser auto-connects to a signed-out clone or a different Chromium instance, the live suite records `signed-out-or-wall` and exits non-zero instead of treating the capture as usable.
+This is the "truth" path for Agent Browser. The target browser must already be running with `--remote-debugging-port=<port>` against the intended profile. The examples use a Brave work profile on port `9223`; do not assume any port belongs to Brave unless `real-session-preflight` verifies the port owner. If Agent Browser auto-connects to a signed-out clone or a different Chromium instance, the live suite records `signed-out-or-wall` and exits non-zero instead of treating the capture as usable.
 
 Before starting Gemini Deep Research or any paid workflow that must reuse the real account, run the real-session preflight:
 
@@ -221,7 +221,7 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 
 `sibling-profile-init` intentionally opens the automation profile visibly so the provider can bind its session to that persistent browser profile/device state. After manual login, future `workflow-sibling-run` calls can reuse the same `--sibling-user-data` offscreen. This avoids relying on copied cookies alone, which modern providers can reject through device-bound session credentials or server-side anomaly checks.
 
-The profile alias `work` resolves by exact directory/name/account first, then by Work/Arbeit labels, and finally to the only discovered profile when a browser has exactly one local profile. This keeps Comet/Komet setups such as a single `Neptune` profile usable through `--profile work` without hard-coding a machine-specific directory name.
+The profile alias `work` resolves by exact directory/name/account first, then by Work/Arbeit labels, and finally to the only discovered profile when a browser has exactly one local profile. This keeps single-profile Comet/Komet setups usable through `--profile work` without hard-coding a machine-specific directory name.
 
 Fill a provider composer and export the visible transcript/output through the same real CDP session:
 

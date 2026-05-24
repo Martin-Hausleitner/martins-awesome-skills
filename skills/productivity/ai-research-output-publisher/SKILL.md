@@ -21,6 +21,7 @@ It does not run the browser workflow itself. It consumes a result JSON file from
 - average research duration and total duration metrics;
 - a Notion page payload where the summary appears above the full text;
 - optional live Notion page creation only when explicitly allowed.
+- optional live chat/webhook delivery only when explicitly allowed.
 
 ## Safe Default
 
@@ -34,6 +35,7 @@ python3 skills/productivity/ai-research-output-publisher/scripts/ai_research_out
 ```
 
 The chat message includes summary text by default. Add `--chat-summary off` when only links and metrics should be shown.
+Secret-like values are redacted by default (`--privacy redacted`), including emails, obvious API tokens, bearer headers, proxy credentials, and URL query strings. Use `--privacy full` only for private/local artifacts that must preserve exact text.
 
 Try the bundled public-safe example:
 
@@ -82,6 +84,30 @@ python3 skills/productivity/ai-research-output-publisher/scripts/ai_research_out
 ```
 
 Without `--allow-external-write`, the command writes only the planned Notion payload.
+Live writes still use redacted mode by default; pass `--privacy full` only when the destination workspace is allowed to receive the exact captured text.
+
+## Send Chat Notification
+
+Prepare a chat/webhook notification without sending:
+
+```bash
+python3 skills/productivity/ai-research-output-publisher/scripts/ai_research_output_publisher.py send-chat \
+  --input /tmp/research-results.json \
+  --channel webhook \
+  --webhook-url "https://example.invalid/research-webhook"
+```
+
+Live delivery requires explicit opt-in:
+
+```bash
+python3 skills/productivity/ai-research-output-publisher/scripts/ai_research_output_publisher.py send-chat \
+  --input /tmp/research-results.json \
+  --channel discord \
+  --webhook-url "<discord-webhook-url>" \
+  --allow-external-write
+```
+
+Supported channels are `webhook`, `discord`, and `telegram`. Tokens and destinations must come from local environment variables or CLI arguments and must never be committed.
 
 ## Output Contract
 
@@ -93,6 +119,7 @@ Each notification includes:
 - average research duration and average total duration;
 - copy-ready summary text;
 - button metadata for copy, Deep Research, PSPin, and Notion page actions.
+- optional `chat_delivery` status when sent through the gated `send-chat` command.
 
 ## Verification
 

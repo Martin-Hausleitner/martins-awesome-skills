@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for improving Martin's Awesome Skills.
+Thanks for improving Public Agent Skills.
 
 ## Good Contributions
 

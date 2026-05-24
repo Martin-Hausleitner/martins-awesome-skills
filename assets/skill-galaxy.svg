@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="980" height="250" viewBox="0 0 980 250" role="img" aria-labelledby="title desc">
   <title id="title">Skill Galaxy</title>
-  <desc id="desc">Animated category cards for Martin's Awesome Skills.</desc>
+  <desc id="desc">Animated category cards for Public Agent Skills.</desc>
   <defs>
     <linearGradient id="line" x1="0" x2="1">
       <stop offset="0%" stop-color="#38bdf8"/>

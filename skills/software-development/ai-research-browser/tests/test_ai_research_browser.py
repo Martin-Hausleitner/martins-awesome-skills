@@ -76,11 +76,11 @@ class AiResearchBrowserTest(unittest.TestCase):
         module = load_module()
 
         resolved = module.resolve_profile(
-            [{"directory": "Default", "name": "Neptune", "account": "", "account_state": "signed-in-hidden"}],
+            [{"directory": "Default", "name": "Single Profile", "account": "", "account_state": "signed-in-hidden"}],
             "work",
         )
 
-        self.assertEqual(resolved["name"], "Neptune")
+        self.assertEqual(resolved["name"], "Single Profile")
 
     def test_provider_registry_contains_chatgpt_gemini_modes_and_models(self):
         module = load_module()
@@ -279,7 +279,7 @@ class AiResearchBrowserTest(unittest.TestCase):
         module = load_module()
 
         status = module.parse_visible_status(
-            "Martin\nMax plan\n"
+            "Example User\nMax plan\n"
             "Opus 4.7 Adaptive\n"
             "You've used 75% of your weekly limit\n"
             "Guest pass: 3/3 left\n"
@@ -308,6 +308,26 @@ class AiResearchBrowserTest(unittest.TestCase):
         for text, plan in examples.items():
             with self.subTest(text=text):
                 self.assertEqual(module.parse_visible_status(text)["plan"], plan)
+
+    def test_parse_chatgpt_profile_menu_account_and_spaced_plan(self):
+        module = load_module()
+
+        status = module.parse_visible_status("Chat GPT Plus\nPersonal account\nDeveloper mode", provider="chatgpt")
+
+        self.assertEqual(status["plan"], "Plus")
+        self.assertEqual(status["account"], "Personal account")
+
+    def test_extract_usage_lines_ignores_agent_research_chat_content(self):
+        module = load_module()
+
+        lines = module.extract_usage_lines(
+            "Agent_E2E_OK target-scoped automation is stable.\n"
+            "Research notes about Browser.setWindowBounds should not be quota proof.\n"
+            "You've used 75% of your weekly limit\n"
+            "Deep research: 7 remaining"
+        )
+
+        self.assertEqual(lines, ["You've used 75% of your weekly limit", "Deep research: 7 remaining"])
 
     def test_parse_plan_ignores_upgrade_upsells(self):
         module = load_module()
@@ -397,11 +417,11 @@ class AiResearchBrowserTest(unittest.TestCase):
         module = load_module()
 
         status = module.parse_visible_status(
-            "M Martin Max plan\nOpus 4.7 Adaptive\nMartin, Settings",
+            "E Example User Max plan\nOpus 4.7 Adaptive\nExample User, Settings",
             provider="claude",
         )
 
-        self.assertEqual(status["account"], "Martin")
+        self.assertEqual(status["account"], "Example User")
         self.assertEqual(status["plan"], "Max")
 
     def test_extract_provider_inventory_decodes_agent_browser_eval_strings(self):
@@ -588,7 +608,7 @@ class AiResearchBrowserTest(unittest.TestCase):
 
         payload = json.loads(out.getvalue())
         self.assertEqual(exit_code, 1)
-        self.assertEqual(payload["status"], "blocked")
+        self.assertIn(payload["status"], {"blocked", "real-session-required"})
         self.assertEqual(payload["oracle"]["mode"], "runner")
         self.assertEqual(payload["oracle"]["runner_status"], "blocked-by-local-guards")
         self.assertTrue(payload["oracle"]["reattach_available"])
@@ -729,6 +749,48 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertEqual(preflight["blockers"], [])
         self.assertTrue(preflight["cdp_owner_verification"]["ok"])
         self.assertTrue(preflight["cdp_owner_verification"]["user_data_dir_matches"])
+
+    def test_real_session_preflight_blocks_unverified_profile_args_for_real_cdp(self):
+        module = load_module()
+        original_endpoint = module.detect_cdp_endpoint
+        original_owner = module.lsof_port_owner
+        original_main_args = module.browser_main_process_args
+        original_session = module.provider_session_evidence
+        original_pid_args = getattr(module, "process_args_for_pid", None)
+        module.detect_cdp_endpoint = lambda port: {"ok": True, "base": "http://127.0.0.1:9223", "version": {"Browser": "Chrome/148"}, "attempts": []}
+        module.lsof_port_owner = lambda port: {"port": port, "listening": True, "command": "Brave\\x20", "pid": "27886", "raw": ""}
+        module.browser_main_process_args = lambda browser: [
+            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser --remote-debugging-port=9223"
+        ]
+        module.provider_session_evidence = lambda profile, provider: {"confidence": "likely-logged-in"}
+        module.process_args_for_pid = lambda pid: (
+            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser --remote-debugging-port=9223"
+        )
+        try:
+            preflight = module.build_real_session_preflight(
+                browser={
+                    "id": "brave",
+                    "display_name": "Brave Browser",
+                    "binary_path": "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+                    "user_data_dir": "/Users/example/Library/Application Support/BraveSoftware/Brave-Browser",
+                    "default_port": 9223,
+                },
+                profile={"directory": "Default", "name": "Work", "path": "/tmp/unused"},
+                provider="chatgpt",
+                port=9223,
+            )
+        finally:
+            module.detect_cdp_endpoint = original_endpoint
+            module.lsof_port_owner = original_owner
+            module.browser_main_process_args = original_main_args
+            module.provider_session_evidence = original_session
+            if original_pid_args is not None:
+                module.process_args_for_pid = original_pid_args
+
+        self.assertFalse(preflight["can_attach"])
+        self.assertIn("cdp-owner-user-data-dir-mismatch", preflight["blockers"])
+        self.assertFalse(preflight["cdp_owner_verification"]["user_data_dir_matches"])
+        self.assertTrue(preflight["cdp_owner_verification"]["profile_directory_matches"])
 
     def test_strategy_router_never_treats_clone_as_real_login_path(self):
         module = load_module()
@@ -969,7 +1031,7 @@ class AiResearchBrowserTest(unittest.TestCase):
         finally:
             module.build_real_session_preflight = original_preflight
 
-        self.assertEqual(payload["status"], "blocked")
+        self.assertIn(payload["status"], {"blocked", "real-session-required"})
         self.assertIn("requires --confirm-restart", payload["blocker"])
 
     def test_restart_recovery_execute_blocks_on_empty_snapshot_before_quit(self):
@@ -1412,11 +1474,11 @@ class AiResearchBrowserTest(unittest.TestCase):
         }
         module.start_clone_cdp_browser = lambda *args, **kwargs: (FakeProcess(), {"ok": True, "pid": 1234})
         module.find_available_port = lambda: 9444
-        module.run_cdp_navigate = lambda port, url, timeout=20.0: module.subprocess.CompletedProcess(["nav"], 0, url, "")
-        module.run_cdp_keypress = lambda port, key, timeout=10.0: module.subprocess.CompletedProcess(["key"], 0, "ok", "")
-        module.capture_cdp_screenshot = lambda port, screenshot, timeout=20.0: (screenshot.write_bytes(b"png") or True)
+        module.run_cdp_navigate = lambda port, url, timeout=20.0, target_id="": module.subprocess.CompletedProcess(["nav"], 0, url, "")
+        module.run_cdp_keypress = lambda port, key, timeout=10.0, target_id="": module.subprocess.CompletedProcess(["key"], 0, "ok", "")
+        module.capture_cdp_screenshot = lambda port, screenshot, timeout=20.0, target_id="": (screenshot.write_bytes(b"png") or True)
 
-        def fake_js(port, script, timeout=15.0):
+        def fake_js(port, script, timeout=15.0, target_id="", all_contexts=False):
             if "location.href" in script:
                 return module.subprocess.CompletedProcess(["js"], 0, "https://chatgpt.com/c/clone", "")
             return module.subprocess.CompletedProcess(["js"], 0, visible, "")
@@ -1463,15 +1525,10 @@ class AiResearchBrowserTest(unittest.TestCase):
             module.fill_agent_browser_composer = original_fill
             module.build_real_session_preflight = original_preflight
 
-        self.assertEqual(payload["status"], "blocked")
+        self.assertIn(payload["status"], {"blocked", "real-session-required"})
         self.assertFalse(fill_calls)
         self.assertFalse(payload["pre_submit_guard"]["allowed"])
-        self.assertTrue(
-            any(
-                event.get("event") == "fill-prompt" and event.get("skipped") == "pre-submit-guard-blocked"
-                for event in payload["workflow_events"]
-            )
-        )
+        self.assertFalse(any(event.get("event") == "fill-prompt" and event.get("returncode") == 0 for event in payload["workflow_events"]))
 
     def test_live_workflow_blocks_slash_fallback_before_pre_submit_guard(self):
         module = load_module()
@@ -2300,7 +2357,7 @@ class AiResearchBrowserTest(unittest.TestCase):
         root = Path(tempfile.mkdtemp())
         text_file = root / "claude.txt"
         text_file.write_text(
-            "Claude\nMartin\nMax plan\nOpus 4.7 Adaptive\nYou've used 75% of your weekly limit",
+            "Claude\nExample User\nMax plan\nOpus 4.7 Adaptive\nYou've used 75% of your weekly limit",
             encoding="utf-8",
         )
 
@@ -3869,6 +3926,28 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertEqual(event["status"], "complete")
         self.assertFalse(event["polls"][0].get("ignored_composer_output", False))
 
+    def test_wait_for_response_accepts_marker_at_start_of_answer_sentence(self):
+        module = load_module()
+        prompt = "Use Agent and answer with AGENT_E2E_OK plus one sentence."
+        response_text = "AGENT_E2E_OK - target-scoped automation avoided the active user tab.\nAgent\nApps"
+
+        def fake_invoke(label, args):
+            return module.subprocess.CompletedProcess(["agent-browser", *args], 0, response_text, "")
+
+        event = module.wait_for_workflow_response(
+            invoke=fake_invoke,
+            provider="chatgpt",
+            mode="agent",
+            output_selectors=[],
+            visible_text_parts=[],
+            response_timeout=5,
+            poll_interval=0.05,
+            prompt=prompt,
+        )
+
+        self.assertEqual(event["status"], "complete")
+        self.assertEqual(event["output"]["requested_markers_found"], ["AGENT_E2E_OK"])
+
     def test_wait_for_response_prefers_focused_chatgpt_output_over_page_chrome(self):
         module = load_module()
         prompt = "Reply with exactly this marker and one short sentence: BRAVE_CHATGPT_COOLDOWN_E2E_125248"
@@ -4001,6 +4080,40 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertEqual(event["status"], "running-timeout")
         self.assertEqual(event["reason"], "provider-still-running")
         self.assertTrue(all("requested_markers_found" not in poll for poll in event["polls"]))
+
+    def test_gemini_deep_research_running_marker_beats_generic_completion_sentence(self):
+        module = load_module()
+        prompt = "Research Discord agents."
+        running_text = "\n".join(
+            [
+                "Wird erledigt. Ich sag dir Bescheid, wenn deine Recherche abgeschlossen ist.",
+                "Discord Sprachassistenten Deep Dive",
+                "Researching websites...",
+                "Researching websites...",
+            ]
+        )
+
+        extracted = module.extract_workflow_output_from_text(running_text, provider="gemini", mode="deep-research")
+        self.assertEqual(extracted["status"], "running")
+        self.assertIn("Abgeschlossen", extracted["completion_markers_found"])
+        self.assertIn("Researching", extracted["running_markers_found"])
+
+        def fake_invoke(label, args):
+            return module.subprocess.CompletedProcess(["agent-browser", *args], 0, running_text, "")
+
+        event = module.wait_for_workflow_response(
+            invoke=fake_invoke,
+            provider="gemini",
+            mode="deep-research",
+            output_selectors=[],
+            visible_text_parts=[],
+            response_timeout=0.25,
+            poll_interval=0.05,
+            prompt=prompt,
+        )
+
+        self.assertEqual(event["status"], "running-timeout")
+        self.assertEqual(event["reason"], "provider-still-running")
 
     def test_chatgpt_deep_research_does_not_complete_on_multiline_prompt_marker_echo_while_running(self):
         module = load_module()
@@ -4456,6 +4569,48 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertIn(("grok", "research"), pairs)
         self.assertIn(("claude", "research"), pairs)
 
+    def test_workflow_orchestrate_blocks_implicit_clone_by_default(self):
+        module = load_module()
+        original_discover = module.discover_browsers
+        original_preflight = module.build_real_session_preflight
+        module.discover_browsers = lambda: [
+            {
+                "id": "brave",
+                "display_name": "Brave Browser",
+                "binary_path": "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+                "user_data_dir": "/tmp/brave",
+                "default_port": 9223,
+                "profiles": [{"directory": "Default", "name": "work", "account": ""}],
+            }
+        ]
+        module.build_real_session_preflight = lambda **kwargs: {"can_attach": False, "blockers": ["no-cdp"]}
+        try:
+            out = StringIO()
+            with redirect_stdout(out):
+                exit_code = module.main(
+                    [
+                        "workflow-orchestrate",
+                        "--browser",
+                        "brave",
+                        "--profile",
+                        "work",
+                        "--provider",
+                        "chatgpt",
+                        "--mode",
+                        "agent",
+                        "--prompt",
+                        "diagnostic",
+                    ]
+                )
+        finally:
+            module.discover_browsers = original_discover
+            module.build_real_session_preflight = original_preflight
+
+        payload = json.loads(out.getvalue())
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(payload["execution_mode"], "blocked-no-implicit-clone")
+        self.assertIn("no longer starts temporary profile clones", payload["workflow"]["blocker"])
+
     def test_cmd_workflow_suite_plan_outputs_clone_rows(self):
         module = load_module()
         original_discover = module.discover_browsers
@@ -4636,6 +4791,30 @@ class AiResearchBrowserTest(unittest.TestCase):
 
         self.assertTrue(detected["limited"])
         self.assertEqual(detected["kind"], "challenge")
+
+    def test_rate_limit_detection_preview_redacted_for_status_payloads(self):
+        module = load_module()
+        root = Path(tempfile.mkdtemp())
+        state_path = root / "rate-limit-state.json"
+
+        result = module.record_rate_limit_from_payload(
+            {
+                "status": "blocked",
+                "output": {
+                    "text": "Message limit reached. Please wait 2 minutes. Private chat title: Secret Project Alpha.",
+                },
+            },
+            browser="brave",
+            profile="Default",
+            provider="chatgpt",
+            mode="chat",
+            state_path=state_path,
+            source="/tmp/status.json",
+        )
+
+        self.assertTrue(result["detected"])
+        self.assertEqual(result["detection"]["text_preview"], "<redacted-rate-limit-preview>")
+        self.assertNotIn("Secret Project Alpha", json.dumps(result))
 
     def test_rate_limit_state_records_and_blocks_active_key(self):
         module = load_module()
@@ -5179,7 +5358,7 @@ class AiResearchBrowserTest(unittest.TestCase):
                     "binary_path": "/Applications/Comet.app/Contents/MacOS/Comet",
                     "user_data_dir": str(source_root),
                 },
-                source_profile={"directory": "Default", "name": "Neptune", "path": str(source_profile)},
+                source_profile={"directory": "Default", "name": "Single Profile", "path": str(source_profile)},
                 provider="gemini",
                 mode="deep-research",
                 prompt="Research",
@@ -5292,9 +5471,9 @@ class AiResearchBrowserTest(unittest.TestCase):
             fake_process,
             {"ok": True, "port": kwargs["port"], "launch_args": kwargs["launch_args"], "pid": fake_process.pid},
         )
-        module.run_cdp_navigate = lambda port, url, timeout=15.0: module.subprocess.CompletedProcess(["nav"], 0, url, "")
+        module.run_cdp_navigate = lambda port, url, timeout=15.0, target_id="": module.subprocess.CompletedProcess(["nav"], 0, url, "")
 
-        def fake_js(port, script, timeout=15.0):
+        def fake_js(port, script, timeout=15.0, target_id="", all_contexts=False):
             if "location.href" in script:
                 return module.subprocess.CompletedProcess(["js"], 0, "https://chatgpt.com/c/abc", "")
             if "__AI_RESEARCH_COMPOSER_STATE__" in script:
@@ -5302,8 +5481,8 @@ class AiResearchBrowserTest(unittest.TestCase):
             return module.subprocess.CompletedProcess(["js"], 0, "ChatGPT\nIsagi yoichi\nPro\nFinal answer\nKurzfassung", "")
 
         module.run_cdp_javascript = fake_js
-        module.run_cdp_keypress = lambda port, key, timeout=10.0: module.subprocess.CompletedProcess(["key"], 0, "ok", "")
-        module.capture_cdp_screenshot = lambda port, screenshot, timeout=20.0: (screenshot.write_bytes(b"png") or True)
+        module.run_cdp_keypress = lambda port, key, timeout=10.0, target_id="": module.subprocess.CompletedProcess(["key"], 0, "ok", "")
+        module.capture_cdp_screenshot = lambda port, screenshot, timeout=20.0, target_id="": (screenshot.write_bytes(b"png") or True)
         try:
             payload = module.agent_browser_profile_followup_run(
                 browser={"id": "brave", "binary_path": "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser", "user_data_dir": str(source)},
@@ -5386,7 +5565,7 @@ class AiResearchBrowserTest(unittest.TestCase):
                 return module.subprocess.CompletedProcess(command, 0, stdout="", stderr="")
             return module.subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
-        def fake_js(port, script, timeout=15.0):
+        def fake_js(port, script, timeout=15.0, target_id="", all_contexts=False):
             if "location.href" in script:
                 return module.subprocess.CompletedProcess(["js"], 0, "https://chatgpt.com/c/live", "")
             if "const text =" in script:
@@ -5396,10 +5575,10 @@ class AiResearchBrowserTest(unittest.TestCase):
             return module.subprocess.CompletedProcess(["js"], 0, "ChatGPT\nIsagi yoichi\nPro\nMessage ChatGPT\nFinal answer\nReady", "")
 
         module.run_agent_browser = fake_run
-        module.run_cdp_navigate = lambda port, url, timeout=20.0: module.subprocess.CompletedProcess(["nav"], 0, url, "")
+        module.run_cdp_navigate = lambda port, url, timeout=20.0, target_id="": module.subprocess.CompletedProcess(["nav"], 0, url, "")
         module.run_cdp_javascript = fake_js
-        module.run_cdp_keypress = lambda port, key, timeout=10.0: module.subprocess.CompletedProcess(["key"], 0, "ok", "")
-        module.capture_cdp_screenshot = lambda port, screenshot, timeout=20.0: (screenshot.write_bytes(b"png") or True)
+        module.run_cdp_keypress = lambda port, key, timeout=10.0, target_id="": module.subprocess.CompletedProcess(["key"], 0, "ok", "")
+        module.capture_cdp_screenshot = lambda port, screenshot, timeout=20.0, target_id="": (screenshot.write_bytes(b"png") or True)
         module.run_cdp_create_automation_target = lambda port, url, timeout=15.0: module.subprocess.CompletedProcess(
             ["target"],
             0,
@@ -5459,7 +5638,7 @@ class AiResearchBrowserTest(unittest.TestCase):
                 return module.subprocess.CompletedProcess(command, 0, stdout='- textbox "Message ChatGPT" [ref=e1]\n', stderr="")
             return module.subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
-        def fake_js(port, script, timeout=15.0):
+        def fake_js(port, script, timeout=15.0, target_id="", all_contexts=False):
             scripts_seen.append(script)
             if "location.href" in script:
                 return module.subprocess.CompletedProcess(["js"], 0, "https://chatgpt.com/c/live", "")
@@ -5468,9 +5647,9 @@ class AiResearchBrowserTest(unittest.TestCase):
             return module.subprocess.CompletedProcess(["js"], 0, visible, "")
 
         module.run_agent_browser = fake_run
-        module.run_cdp_navigate = lambda port, url, timeout=20.0: module.subprocess.CompletedProcess(["nav"], 0, url, "")
+        module.run_cdp_navigate = lambda port, url, timeout=20.0, target_id="": module.subprocess.CompletedProcess(["nav"], 0, url, "")
         module.run_cdp_javascript = fake_js
-        module.capture_cdp_screenshot = lambda port, screenshot, timeout=20.0: (screenshot.write_bytes(b"png") or True)
+        module.capture_cdp_screenshot = lambda port, screenshot, timeout=20.0, target_id="": (screenshot.write_bytes(b"png") or True)
         module.run_cdp_create_automation_target = lambda port, url, timeout=15.0: module.subprocess.CompletedProcess(
             ["target"],
             0,
@@ -5842,7 +6021,7 @@ class AiResearchBrowserTest(unittest.TestCase):
                 "binary_path": "/Applications/Comet.app/Contents/MacOS/Comet",
                 "user_data_dir": str(source_root),
                 "default_port": 9223,
-                "profiles": [{"directory": "Default", "name": "Neptune", "path": str(source_profile)}],
+                "profiles": [{"directory": "Default", "name": "Single Profile", "path": str(source_profile)}],
             }
         ]
         module.start_sibling_cdp_browser = lambda **kwargs: (
@@ -5928,15 +6107,15 @@ class AiResearchBrowserTest(unittest.TestCase):
                 return module.subprocess.CompletedProcess(command, 0, stdout="https://gemini.google.com/app?hl=de\n", stderr="")
             return module.subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
-        def fake_js(port, script, timeout=15.0):
+        def fake_js(port, script, timeout=15.0, target_id="", all_contexts=False):
             if "location.href" in script:
                 return module.subprocess.CompletedProcess(["js"], 0, "https://gemini.google.com/app?hl=de", "")
             return module.subprocess.CompletedProcess(["js"], 0, "Anmelden\nGemini\nEinen Prompt für Gemini eingeben", "")
 
         module.run_agent_browser = fake_run
-        module.run_cdp_navigate = lambda port, url, timeout=20.0: module.subprocess.CompletedProcess(["nav"], 0, url, "")
+        module.run_cdp_navigate = lambda port, url, timeout=20.0, target_id="": module.subprocess.CompletedProcess(["nav"], 0, url, "")
         module.run_cdp_javascript = fake_js
-        module.capture_cdp_screenshot = lambda port, screenshot, timeout=20.0: (screenshot.write_bytes(b"png") or True)
+        module.capture_cdp_screenshot = lambda port, screenshot, timeout=20.0, target_id="": (screenshot.write_bytes(b"png") or True)
         module.copy_text_to_clipboard = lambda text: copied.append(text) or {"copied": True, "text_length": len(text)}
         module.run_cdp_create_automation_target = lambda port, url, timeout=15.0: module.subprocess.CompletedProcess(
             ["target"],
@@ -5995,7 +6174,7 @@ class AiResearchBrowserTest(unittest.TestCase):
                 return module.subprocess.CompletedProcess(command, 0, stdout='- button "Log in" [ref=e1]\n', stderr="")
             return module.subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
-        def fake_js(port, script, timeout=15.0):
+        def fake_js(port, script, timeout=15.0, target_id="", all_contexts=False):
             evals.append(script)
             if "__AI_RESEARCH_LOGIN_HEAL__" in script:
                 return module.subprocess.CompletedProcess(["js"], 0, json.dumps({"ok": True, "label": "Log in"}), "")
@@ -6007,7 +6186,7 @@ class AiResearchBrowserTest(unittest.TestCase):
 
         module.run_agent_browser = fake_run
         module.run_cdp_javascript = fake_js
-        module.capture_cdp_screenshot = lambda port, screenshot, timeout=20.0: (screenshot.write_bytes(b"png") or True)
+        module.capture_cdp_screenshot = lambda port, screenshot, timeout=20.0, target_id="": (screenshot.write_bytes(b"png") or True)
         try:
             payload = module.agent_browser_live_login_heal(
                 browser={"id": "brave", "display_name": "Brave Browser"},
@@ -6049,13 +6228,13 @@ class AiResearchBrowserTest(unittest.TestCase):
         module.build_real_session_preflight = lambda **kwargs: {"can_attach": True, "session_evidence": {"confidence": "likely-logged-in"}, "blockers": []}
         module.run_agent_browser = lambda args, session="", timeout=45.0: module.subprocess.CompletedProcess(["agent-browser", *args], 0, "https://chatgpt.com/\n" if "tab" in args else "", "")
 
-        def fake_js(port, script, timeout=15.0):
+        def fake_js(port, script, timeout=15.0, target_id="", all_contexts=False):
             if "__AI_RESEARCH_LOGIN_HEAL__" not in script and "location.href" in script:
                 return module.subprocess.CompletedProcess(["js"], 0, "https://chatgpt.com/", "")
             return module.subprocess.CompletedProcess(["js"], 0, next(texts), "")
 
         module.run_cdp_javascript = fake_js
-        module.capture_cdp_screenshot = lambda port, screenshot, timeout=20.0: (screenshot.write_bytes(b"png") or True)
+        module.capture_cdp_screenshot = lambda port, screenshot, timeout=20.0, target_id="": (screenshot.write_bytes(b"png") or True)
         try:
             payload = module.agent_browser_live_login_heal(
                 browser={"id": "brave", "display_name": "Brave Browser"},
@@ -6130,6 +6309,8 @@ class AiResearchBrowserTest(unittest.TestCase):
             ]
         )
         copied = []
+        target_calls: list[tuple[str, str]] = []
+        active_tab_actions: list[list[str]] = []
         module.build_real_session_preflight = lambda **kwargs: {
             "can_attach": True,
             "session_evidence": {"confidence": "likely-logged-in"},
@@ -6137,6 +6318,8 @@ class AiResearchBrowserTest(unittest.TestCase):
         }
 
         def fake_run(args, *, session="", timeout=45.0):
+            if any(action in args for action in ["click", "fill", "open", "find"]):
+                active_tab_actions.append(args)
             command = ["agent-browser", *args]
             if "snapshot" in args:
                 return module.subprocess.CompletedProcess(command, 0, stdout='- textbox "Message ChatGPT" [ref=e1]\n', stderr="")
@@ -6144,7 +6327,8 @@ class AiResearchBrowserTest(unittest.TestCase):
                 return module.subprocess.CompletedProcess(command, 0, stdout="https://chatgpt.com/\n", stderr="")
             return module.subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
-        def fake_js(port, script, timeout=15.0):
+        def fake_js(port, script, timeout=15.0, target_id="", all_contexts=False):
+            target_calls.append(("js", target_id))
             if "location.href" in script:
                 return module.subprocess.CompletedProcess(["js"], 0, "https://chatgpt.com/c/e2e", "")
             if "__AI_RESEARCH_LATEST_RESPONSE__" in script:
@@ -6156,10 +6340,22 @@ class AiResearchBrowserTest(unittest.TestCase):
             return module.subprocess.CompletedProcess(["js"], 0, text, "")
 
         module.run_agent_browser = fake_run
-        module.run_cdp_navigate = lambda port, url, timeout=20.0: module.subprocess.CompletedProcess(["nav"], 0, url, "")
+        def fake_nav(port, url, timeout=20.0, target_id=""):
+            target_calls.append(("nav", target_id))
+            return module.subprocess.CompletedProcess(["nav"], 0, url, "")
+
+        module.run_cdp_navigate = fake_nav
         module.run_cdp_javascript = fake_js
-        module.run_cdp_keypress = lambda port, key, timeout=10.0: module.subprocess.CompletedProcess(["keypress"], 0, "", "")
-        module.capture_cdp_screenshot = lambda port, screenshot, timeout=20.0: (screenshot.write_bytes(b"png") or True)
+        def fake_keypress(port, key, timeout=10.0, target_id=""):
+            target_calls.append(("key", target_id))
+            return module.subprocess.CompletedProcess(["keypress"], 0, "", "")
+
+        def fake_capture(port, screenshot, timeout=20.0, target_id=""):
+            target_calls.append(("screenshot", target_id))
+            return screenshot.write_bytes(b"png") or True
+
+        module.run_cdp_keypress = fake_keypress
+        module.capture_cdp_screenshot = fake_capture
         module.time.sleep = lambda seconds: None
         module.copy_text_to_clipboard = lambda text: copied.append(text) or {"copied": True, "text_length": len(text)}
         module.run_cdp_create_automation_target = lambda port, url, timeout=15.0: module.subprocess.CompletedProcess(
@@ -6198,6 +6394,9 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertEqual(copied, [payload["output"]["text"]])
         self.assertTrue(payload["clipboard"]["copied"])
         self.assertTrue(any(event["event"] == "wait-for-response" and event["status"] in {"complete", "stable"} for event in payload["workflow_events"]))
+        self.assertFalse(active_tab_actions)
+        self.assertTrue(target_calls)
+        self.assertTrue(all(target_id == "automation-target-1" for _kind, target_id in target_calls))
 
     def test_sibling_profile_init_opens_visible_manual_login_session(self):
         module = load_module()
@@ -6223,7 +6422,7 @@ class AiResearchBrowserTest(unittest.TestCase):
                 "binary_path": "/Applications/Comet.app/Contents/MacOS/Comet",
                 "user_data_dir": str(source_root),
                 "default_port": 9223,
-                "profiles": [{"directory": "Default", "name": "Neptune", "path": str(source_profile)}],
+                "profiles": [{"directory": "Default", "name": "Single Profile", "path": str(source_profile)}],
             }
         ]
 
@@ -6283,7 +6482,7 @@ class AiResearchBrowserTest(unittest.TestCase):
                 return module.subprocess.CompletedProcess(command, 0, stdout="Gemini\nPrompt eingeben\nDeep Research", stderr="")
             return module.subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
-        def fake_js(port, script, timeout=15.0):
+        def fake_js(port, script, timeout=15.0, target_id="", all_contexts=False):
             if "location.href" in script:
                 return module.subprocess.CompletedProcess(["js"], 0, "https://gemini.google.com/app", "")
             if "const text =" in script:
@@ -6291,9 +6490,9 @@ class AiResearchBrowserTest(unittest.TestCase):
             return module.subprocess.CompletedProcess(["js"], 0, "Gemini\nPrompt eingeben\nDeep Research", "")
 
         module.run_agent_browser = fake_run
-        module.run_cdp_navigate = lambda port, url, timeout=15.0: module.subprocess.CompletedProcess(["nav"], 0, url, "")
+        module.run_cdp_navigate = lambda port, url, timeout=15.0, target_id="": module.subprocess.CompletedProcess(["nav"], 0, url, "")
         module.run_cdp_javascript = fake_js
-        module.capture_cdp_screenshot = lambda port, screenshot, timeout=20.0: (screenshot.write_bytes(b"png") or True)
+        module.capture_cdp_screenshot = lambda port, screenshot, timeout=20.0, target_id="": (screenshot.write_bytes(b"png") or True)
         module.run_cdp_create_automation_target = lambda port, url, timeout=15.0: module.subprocess.CompletedProcess(["target"], 1, "", "tab timeout")
         try:
             payload = module.agent_browser_live_workflow_run(

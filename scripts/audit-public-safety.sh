@@ -13,6 +13,10 @@ patterns=(
   '-----BEGIN'
   '[0-9]{8,}:[A-Za-z0-9_-]{20,}'
   '/Users/mh'
+  'Martin-Hausleitner'
+  'Martin Hausleitner'
+  "Martin's"
+  'Martin Workspace'
   'Buchhaltung'
   'AKTE'
   'auth\.json'
@@ -25,7 +29,6 @@ for pattern in "${patterns[@]}"; do
     -g '!.git/**' \
     -g '!.gitignore' \
     -g '!docs/SECURITY.md' \
-    -g '!README.md' \
     -g '!scripts/audit-public-safety.sh'; then
     status=1
   fi

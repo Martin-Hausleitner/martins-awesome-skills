@@ -34,6 +34,24 @@ class OracleAiResearchE2ECheckTests(unittest.TestCase):
         self.assertEqual(module.parse_json_stdout({"stdout": '["not", "dict"]'}), {})
         self.assertEqual(module.parse_json_stdout({"stdout": "not-json"}), {})
 
+    def test_sanitizes_local_paths_from_public_json(self):
+        module = load_module()
+
+        text = '/Users/example/Documents/Playground/x --user-data-dir=/Users/example/Library/Application Support/BraveSoftware'
+        sanitized = module.sanitize_text(text)
+
+        self.assertNotIn("/Users/example", sanitized)
+        self.assertIn("<user-path>", sanitized)
+        self.assertIn("--user-data-dir=<redacted>", sanitized)
+
+    def test_sanitizes_payload_recursively(self):
+        module = load_module()
+
+        payload = module.sanitize_payload({"repo_root": "/Users/example/private", "steps": [{"stdout": "/Users/example/log"}]})
+
+        self.assertEqual(payload["repo_root"], "<user-path>")
+        self.assertEqual(payload["steps"][0]["stdout"], "<user-path>")
+
     def test_repo_root_points_to_repository(self):
         module = load_module()
 

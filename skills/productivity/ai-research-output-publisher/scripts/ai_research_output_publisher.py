@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import textwrap
 import time
@@ -41,6 +42,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_render(args)
     if args.command == "publish-notion":
         return cmd_publish_notion(args)
+    if args.command == "send-chat":
+        return cmd_send_chat(args)
     parser.print_help()
     return 2
 
@@ -55,6 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
     render.add_argument("--status-output", default="", help="Write normalized status JSON to this path.")
     render.add_argument("--payload-output", default="", help="Write Notion payload JSON to this path.")
     render.add_argument("--chat-summary", choices=["on", "off"], default="on")
+    render.add_argument("--privacy", choices=["redacted", "full"], default="redacted", help="Redact secret-like values before rendering by default.")
     render.add_argument("--json", action="store_true", help="Print normalized status JSON instead of message text.")
 
     publish = sub.add_parser("publish-notion", help="Create a Notion page or produce the planned payload.")
@@ -65,7 +69,21 @@ def build_parser() -> argparse.ArgumentParser:
     publish.add_argument("--allow-external-write", action="store_true")
     publish.add_argument("--payload-output", default="")
     publish.add_argument("--status-output", default="")
+    publish.add_argument("--privacy", choices=["redacted", "full"], default="redacted", help="Redact secret-like values before rendering/publishing by default.")
     publish.add_argument("--json", action="store_true")
+
+    send_chat = sub.add_parser("send-chat", help="Send or dry-run a finished research notification to a chat/webhook destination.")
+    add_common_input_args(send_chat)
+    send_chat.add_argument("--channel", choices=["webhook", "discord", "telegram"], required=True)
+    send_chat.add_argument("--webhook-url", default=os.environ.get("AI_RESEARCH_WEBHOOK_URL", ""))
+    send_chat.add_argument("--telegram-api-url", default=os.environ.get("TELEGRAM_API_URL", "https://api.telegram.org"))
+    send_chat.add_argument("--telegram-token", default=os.environ.get("TELEGRAM_BOT_TOKEN", ""))
+    send_chat.add_argument("--telegram-chat-id", default=os.environ.get("TELEGRAM_CHAT_ID", ""))
+    send_chat.add_argument("--allow-external-write", action="store_true")
+    send_chat.add_argument("--chat-summary", choices=["on", "off"], default="on")
+    send_chat.add_argument("--privacy", choices=["redacted", "full"], default="redacted", help="Redact secret-like values before sending by default.")
+    send_chat.add_argument("--status-output", default="")
+    send_chat.add_argument("--json", action="store_true")
     return parser
 
 
@@ -77,9 +95,10 @@ def add_common_input_args(parser: argparse.ArgumentParser) -> None:
 
 def cmd_render(args: argparse.Namespace) -> int:
     batch = load_batch(Path(args.input), title_override=args.title)
+    batch = apply_privacy(batch, mode=args.privacy)
     message = render_chat_message(batch, icon=args.icon, include_summary=args.chat_summary == "on")
     notion_payload = build_notion_payload(batch)
-    status = build_status(batch, message=message, notion_payload=notion_payload, notion_result=None)
+    status = build_status(batch, message=message, notion_payload=notion_payload, notion_result=None, privacy=args.privacy)
 
     write_optional(args.message_output, message)
     write_optional(args.payload_output, json.dumps(notion_payload, indent=2, ensure_ascii=False) + "\n")
@@ -94,6 +113,7 @@ def cmd_render(args: argparse.Namespace) -> int:
 
 def cmd_publish_notion(args: argparse.Namespace) -> int:
     batch = load_batch(Path(args.input), title_override=args.title)
+    batch = apply_privacy(batch, mode=args.privacy)
     payload = build_notion_payload(batch, parent_page_id=args.parent_page_id)
     notion_result: dict[str, Any]
 
@@ -115,7 +135,7 @@ def cmd_publish_notion(args: argparse.Namespace) -> int:
         )
 
     message = render_chat_message(batch, icon=args.icon, include_summary=True, notion_url=notion_result.get("url", ""))
-    status = build_status(batch, message=message, notion_payload=payload, notion_result=notion_result)
+    status = build_status(batch, message=message, notion_payload=payload, notion_result=notion_result, privacy=args.privacy)
     write_optional(args.payload_output, json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
     write_optional(args.status_output, json.dumps(status, indent=2, ensure_ascii=False) + "\n")
     if args.json:
@@ -123,6 +143,32 @@ def cmd_publish_notion(args: argparse.Namespace) -> int:
     else:
         print(message)
     return 0
+
+
+def cmd_send_chat(args: argparse.Namespace) -> int:
+    batch = apply_privacy(load_batch(Path(args.input), title_override=args.title), mode=args.privacy)
+    message = render_chat_message(batch, icon=args.icon, include_summary=args.chat_summary == "on")
+    status_base = build_status(batch, message=message, notion_payload=build_notion_payload(batch), notion_result=None, privacy=args.privacy)
+    if not args.allow_external_write:
+        result = {
+            "status": "planned",
+            "external_write": False,
+            "reason": "missing --allow-external-write",
+            "channel": args.channel,
+        }
+    else:
+        result = send_chat_message(args, message)
+    status = {
+        **status_base,
+        "status": result.get("status", "planned"),
+        "chat_delivery": redact_delivery_result(result),
+    }
+    write_optional(args.status_output, json.dumps(status, indent=2, ensure_ascii=False) + "\n")
+    if args.json:
+        print(json.dumps(status, indent=2, ensure_ascii=False))
+    else:
+        print(message)
+    return 0 if result.get("status") in {"planned", "sent"} else 1
 
 
 def load_batch(path: Path, *, title_override: str = "") -> dict[str, Any]:
@@ -229,6 +275,60 @@ def format_seconds(seconds: float | None) -> str:
     return f"{sec}s"
 
 
+SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"), "<redacted-email>"),
+    (re.compile(r"\b(?:sk|rk|pk|ghp|github_pat|xox[baprs])-[-A-Za-z0-9_]{12,}\b", re.I), "<redacted-token>"),
+    (re.compile(r"\b(api[_-]?key|token|secret|password|passwd|pwd)\s*[:=]\s*['\"]?[^'\"\s,;]{6,}", re.I), r"\1=<redacted-secret>"),
+    (re.compile(r"\b(?:bearer|basic)\s+[-A-Za-z0-9._~+/]+=*\b", re.I), "<redacted-auth-header>"),
+    (re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}:\d{2,5}:[A-Za-z0-9_-]{2,}:[A-Za-z0-9_-]{2,}\b"), "<redacted-proxy>"),
+]
+
+
+def redact_text(text: str) -> str:
+    redacted = str(text or "")
+    for pattern, replacement in SECRET_PATTERNS:
+        redacted = pattern.sub(replacement, redacted)
+    return redacted
+
+
+def redact_url(url: str) -> str:
+    text = redact_text(url)
+    if not text:
+        return ""
+    if "?" not in text and "#" not in text:
+        return text
+    base = re.split(r"[?#]", text, maxsplit=1)[0]
+    return f"{base}?<redacted-query>"
+
+
+def apply_privacy(batch: dict[str, Any], *, mode: str) -> dict[str, Any]:
+    if mode == "full":
+        return batch
+    redacted_results: list[ResearchResult] = []
+    for result in batch["results"]:
+        redacted_results.append(
+            ResearchResult(
+                title=redact_text(result.title),
+                provider=redact_text(result.provider),
+                mode=redact_text(result.mode),
+                status=redact_text(result.status),
+                summary=redact_text(result.summary),
+                text=redact_text(result.text),
+                research_url=redact_url(result.research_url),
+                pspin_url=redact_url(result.pspin_url),
+                notion_url=redact_url(result.notion_url),
+                research_duration_seconds=result.research_duration_seconds,
+                total_duration_seconds=result.total_duration_seconds,
+            )
+        )
+    return {
+        **batch,
+        "title": redact_text(batch["title"]),
+        "job_id": redact_text(batch["job_id"]),
+        "results": redacted_results,
+    }
+
+
 def render_chat_message(
     batch: dict[str, Any],
     *,
@@ -295,6 +395,7 @@ def build_status(
     message: str,
     notion_payload: dict[str, Any],
     notion_result: dict[str, Any] | None,
+    privacy: str = "redacted",
 ) -> dict[str, Any]:
     buttons = []
     for result in batch["results"]:
@@ -309,6 +410,7 @@ def build_status(
         "status": "rendered" if not notion_result else notion_result.get("status", "notion-planned"),
         "job_id": batch["job_id"],
         "title": batch["title"],
+        "privacy": {"mode": privacy, "secret_like_values_redacted": privacy == "redacted"},
         "metrics": batch["metrics"],
         "message": message,
         "buttons": buttons,
@@ -410,6 +512,63 @@ def create_notion_page(*, api_url: str, token: str, payload: dict[str, Any]) -> 
         "id": data.get("id", ""),
         "url": data.get("url", ""),
     }
+
+
+def send_chat_message(args: argparse.Namespace, message: str) -> dict[str, Any]:
+    if args.channel == "webhook":
+        if not args.webhook_url:
+            raise SystemExit("--webhook-url or AI_RESEARCH_WEBHOOK_URL is required")
+        return post_json(args.webhook_url, {"text": message, "message": message, "source": "ai-research-output-publisher"}, channel="webhook")
+    if args.channel == "discord":
+        if not args.webhook_url:
+            raise SystemExit("--webhook-url or AI_RESEARCH_WEBHOOK_URL is required for Discord webhooks")
+        return post_json(args.webhook_url, {"content": message[:1900], "allowed_mentions": {"parse": []}}, channel="discord")
+    if args.channel == "telegram":
+        if not args.telegram_token:
+            raise SystemExit("--telegram-token or TELEGRAM_BOT_TOKEN is required")
+        if not args.telegram_chat_id:
+            raise SystemExit("--telegram-chat-id or TELEGRAM_CHAT_ID is required")
+        api_url = args.telegram_api_url.rstrip("/") + f"/bot{args.telegram_token}/sendMessage"
+        return post_json(
+            api_url,
+            {
+                "chat_id": args.telegram_chat_id,
+                "text": message[:3900],
+                "disable_web_page_preview": True,
+            },
+            channel="telegram",
+        )
+    raise SystemExit(f"Unsupported channel: {args.channel}")
+
+
+def post_json(url: str, payload: dict[str, Any], *, channel: str) -> dict[str, Any]:
+    body = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(url, data=body, method="POST", headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+            try:
+                data = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                data = {"raw": raw[:800]}
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode("utf-8", errors="replace")
+        return {"status": "failed", "external_write": True, "channel": channel, "http_status": error.code, "error": detail[:800]}
+    return {"status": "sent", "external_write": True, "channel": channel, "http_status": getattr(response, "status", 0), "response": data}
+
+
+def redact_delivery_result(result: dict[str, Any]) -> dict[str, Any]:
+    return redact_json_value(result)
+
+
+def redact_json_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): redact_json_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [redact_json_value(item) for item in value]
+    if isinstance(value, str):
+        return redact_url(value) if value.startswith(("http://", "https://")) else redact_text(value)
+    return value
 
 
 def write_optional(path: str, content: str) -> None:

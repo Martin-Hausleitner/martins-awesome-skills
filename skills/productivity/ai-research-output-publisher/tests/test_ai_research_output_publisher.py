@@ -32,6 +32,24 @@ class FakeNotionHandler(BaseHTTPRequestHandler):
         return
 
 
+class FakeChatHandler(BaseHTTPRequestHandler):
+    received = None
+
+    def do_POST(self):  # noqa: N802
+        length = int(self.headers.get("content-length", "0"))
+        FakeChatHandler.received = {
+            "path": self.path,
+            "body": json.loads(self.rfile.read(length).decode("utf-8")),
+        }
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps({"ok": True, "url": "https://chat.example/sent?token=secret"}).encode("utf-8"))
+
+    def log_message(self, *_args):
+        return
+
+
 class ResearchOutputPublisherTests(unittest.TestCase):
     def test_render_multiple_results_with_links_metrics_and_copy_button(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -98,6 +116,125 @@ class ResearchOutputPublisherTests(unittest.TestCase):
             status = json.loads(status_path.read_text(encoding="utf-8"))
             self.assertEqual(status["notion"]["status"], "planned")
             self.assertFalse(status["notion"]["external_write"])
+
+    def test_render_redacts_secret_like_values_by_default(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            input_path = root / "results.json"
+            message_path = root / "message.md"
+            payload_path = root / "payload.json"
+            status_path = root / "status.json"
+            input_path.write_text(
+                json.dumps(
+                    {
+                        "title": "Private report for martin@example.com",
+                        "results": [
+                            {
+                                "title": "Secret audit",
+                                "status": "completed",
+                                "summary": "Contact martin@example.com with token=supersecret123 and proxy 203.0.113.10:5432:user:pass.",
+                                "text": "Bearer abcdefghijklmnopqrstuvwxyz123456 should never be public.",
+                                "deep_research_url": "https://research.example/chat?token=supersecret123",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            code = run_cli([
+                "render",
+                "--input",
+                str(input_path),
+                "--message-output",
+                str(message_path),
+                "--payload-output",
+                str(payload_path),
+                "--status-output",
+                str(status_path),
+                "--json",
+            ])
+
+            self.assertEqual(code, 0)
+            rendered = "\n".join(
+                [
+                    message_path.read_text(encoding="utf-8"),
+                    payload_path.read_text(encoding="utf-8"),
+                    status_path.read_text(encoding="utf-8"),
+                ]
+            )
+            self.assertNotIn("martin@example.com", rendered)
+            self.assertNotIn("supersecret123", rendered)
+            self.assertNotIn("203.0.113.10:5432:user:pass", rendered)
+            self.assertNotIn("abcdefghijklmnopqrstuvwxyz123456", rendered)
+            self.assertIn("<redacted-email>", rendered)
+            self.assertIn("<redacted-secret>", rendered)
+            self.assertIn("<redacted-proxy>", rendered)
+            self.assertIn("<redacted-query>", rendered)
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            self.assertEqual(status["privacy"]["mode"], "redacted")
+
+    def test_send_chat_dry_run_does_not_call_external_endpoint(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            input_path = root / "results.json"
+            status_path = root / "status.json"
+            input_path.write_text(json.dumps(sample_batch()), encoding="utf-8")
+
+            code = run_cli([
+                "send-chat",
+                "--input",
+                str(input_path),
+                "--channel",
+                "webhook",
+                "--webhook-url",
+                "http://127.0.0.1:9/chat",
+                "--status-output",
+                str(status_path),
+                "--json",
+            ])
+
+            self.assertEqual(code, 0)
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            self.assertEqual(status["chat_delivery"]["status"], "planned")
+            self.assertFalse(status["chat_delivery"]["external_write"])
+
+    def test_send_chat_live_against_fake_webhook_endpoint(self):
+        server = HTTPServer(("127.0.0.1", 0), FakeChatHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                input_path = root / "results.json"
+                status_path = root / "status.json"
+                input_path.write_text(json.dumps(sample_batch()), encoding="utf-8")
+
+                code = run_cli([
+                    "send-chat",
+                    "--input",
+                    str(input_path),
+                    "--channel",
+                    "webhook",
+                    "--webhook-url",
+                    f"http://127.0.0.1:{server.server_port}/chat?token=secret",
+                    "--allow-external-write",
+                    "--status-output",
+                    str(status_path),
+                    "--json",
+                ])
+
+                self.assertEqual(code, 0)
+                self.assertEqual(FakeChatHandler.received["path"], "/chat?token=secret")
+                self.assertIn("Research fertig", FakeChatHandler.received["body"]["message"])
+                status = json.loads(status_path.read_text(encoding="utf-8"))
+                self.assertEqual(status["chat_delivery"]["status"], "sent")
+                status_json = json.dumps(status)
+                self.assertNotIn("token=secret", status_json)
+                self.assertIn("<redacted-query>", status_json)
+        finally:
+            server.shutdown()
+            server.server_close()
 
     def test_publish_notion_live_against_fake_endpoint(self):
         server = HTTPServer(("127.0.0.1", 0), FakeNotionHandler)

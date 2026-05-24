@@ -90,10 +90,10 @@ Expected success:
 - `user_data_dir_matches: true`
 - `profile_directory_matches: true`
 
-Common ports on this setup:
+Example ports used in the recipes:
 
-- Brave Work live CDP: `9223`
-- Comet live CDP: often `9334` when configured; the default registry may also use `9333`
+- Brave work-profile live CDP: `9223`
+- Comet live CDP: commonly `9333`, or another verified port if configured locally
 - Chrome: `9224`
 - Opera: `9226`
 

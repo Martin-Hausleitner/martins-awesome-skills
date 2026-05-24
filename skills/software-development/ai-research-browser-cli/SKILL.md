@@ -22,7 +22,7 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 
 ## Operating Rules
 
-- Prefer real live CDP sessions for true E2E: Brave Work usually uses port `9223`; Comet usually uses `9334` when already configured on this machine.
+- Prefer real live CDP sessions for true E2E. The examples use a Brave work profile on port `9223`; always verify the CDP owner/profile instead of trusting a port number.
 - Never claim a provider works until the status JSON proves login/account/plan, an automation `target_id`, screenshot evidence, output text, and no challenge/rate-limit wall.
 - Do not use temporary clone/sibling success as proof of a real account login. Clone/sibling runs are diagnostic or explicit fallback only.
 - Before typing or submitting, require provider inventory: signed-in state, visible account, plan, model/feature evidence, screenshot, and no CAPTCHA/rate-limit/challenge.

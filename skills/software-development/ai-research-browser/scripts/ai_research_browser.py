@@ -1352,16 +1352,25 @@ def parse_visible_status(text: str, *, provider: str = "") -> dict[str, Any]:
     standalone_plan = ""
     account_name = account_match.group(0) if account_match else ""
     if not plan_match:
+        chatgpt_spaced_plan = re.search(r"\bChat\s*GPT\s+(Free|Plus|Pro|Team|Enterprise)\b", text, flags=re.I)
+        if provider_id == "chatgpt" and chatgpt_spaced_plan:
+            standalone_plan = chatgpt_spaced_plan.group(1)
         plan_labels = {"free", "plus", "pro", "team", "enterprise", "max", "advanced", "ultra", "supergrok", "premium", "premium+"}
         generic_previous = {"chatgpt", "claude", "gemini", "grok", "perplexity", "recents", "more", "projects", "history"}
-        for index, line in enumerate(lines):
-            normalized = line.casefold()
-            if normalized in plan_labels:
-                standalone_plan = line
-                if not account_name and index > 0:
-                    previous = lines[index - 1].strip()
-                    if previous.casefold() not in generic_previous and not re.search(r"^(new chat|search|home|skip to content)$", previous, flags=re.I):
-                        account_name = previous
+        if not standalone_plan:
+            for index, line in enumerate(lines):
+                normalized = line.casefold()
+                if normalized in plan_labels:
+                    standalone_plan = line
+                    if not account_name and index > 0:
+                        previous = lines[index - 1].strip()
+                        if previous.casefold() not in generic_previous and not re.search(r"^(new chat|search|home|skip to content)$", previous, flags=re.I):
+                            account_name = previous
+                    break
+    if provider_id == "chatgpt" and not account_name:
+        for line in lines:
+            if re.fullmatch(r"(?:personal|team|workspace|enterprise)\s+account", line, flags=re.I):
+                account_name = line
                 break
     if provider_id == "grok" and not (plan_match or standalone_plan) and account_name:
         grok_free_markers = ("unlock extended capabilities", "try for $0.00", "get supergrok", "supergrok")
@@ -1445,13 +1454,15 @@ def normalized_contains(text: str, needle: str) -> bool:
 def extract_usage_lines(text: str) -> list[str]:
     patterns = re.compile(
         r"(plan|subscription|abo|tier|limit|quota|usage|remaining|left|used|reset|resets|"
-        r"verbleibend|übrig|genutzt|erneuert|weekly|daily|messages|queries|research|agent)",
+        r"verbleibend|übrig|genutzt|erneuert|weekly|daily|messages|queries)",
         flags=re.I,
     )
     lines = []
     for raw in (text or "").splitlines():
         line = raw.strip()
-        if line and patterns.search(line):
+        if line.endswith(".") and not re.search(r"(you(?:'|’)ve used|used\s+\d+%|remaining|left|reset|resets)", line, flags=re.I):
+            continue
+        if line and len(line) <= 220 and patterns.search(line):
             lines.append(line)
     return lines[:80]
 
@@ -2523,11 +2534,12 @@ def extract_workflow_output_from_text(text: str, *, provider: str, mode: str) ->
     running_markers = [str(marker) for marker in spec.get("running_markers", [])]
     completion_markers_found = completion_markers_in_response_text(expanded, markers)
     status = "empty"
+    running_markers_found = [marker for marker in running_markers if marker.lower() in expanded.lower()]
     if expanded.strip():
         status = "captured"
-    if any(marker.lower() in expanded.lower() for marker in running_markers):
+    if running_markers_found:
         status = "running"
-    if completion_markers_found:
+    if completion_markers_found and not running_markers_found:
         status = "complete"
     lines = [line.rstrip() for line in expanded.splitlines()]
     collapsed = "\n".join(line for line in lines if line.strip())
@@ -2536,7 +2548,7 @@ def extract_workflow_output_from_text(text: str, *, provider: str, mode: str) ->
         "mode": spec["mode"],
         "status": status,
         "completion_markers_found": completion_markers_found,
-        "running_markers_found": [marker for marker in running_markers if marker.lower() in expanded.lower()],
+        "running_markers_found": running_markers_found,
         "text": collapsed,
         "text_length": len(collapsed),
     }
@@ -2901,6 +2913,15 @@ def detect_rate_limit_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return detect_rate_limit_from_text("\n".join(fragments))
 
 
+def redact_rate_limit_detection(detection: dict[str, Any], *, privacy: str = "redacted") -> dict[str, Any]:
+    if privacy == "full":
+        return detection
+    safe = dict(detection)
+    preview = str(safe.get("text_preview") or "")
+    safe["text_preview"] = "<redacted-rate-limit-preview>" if preview and safe.get("limited") else ""
+    return safe
+
+
 def record_rate_limit_from_payload(
     payload: dict[str, Any],
     *,
@@ -2910,12 +2931,14 @@ def record_rate_limit_from_payload(
     mode: str,
     state_path: Path | None = None,
     source: str = "workflow-live-run",
+    artifact_privacy: str = "redacted",
 ) -> dict[str, Any]:
     """Persist a conservative cooldown when a live workflow hits a provider wall."""
     detection = detect_rate_limit_from_payload(payload)
+    safe_detection = redact_rate_limit_detection(detection, privacy=artifact_privacy)
     result: dict[str, Any] = {
         "detected": bool(detection.get("limited")),
-        "detection": detection,
+        "detection": safe_detection,
         "state_path": str((state_path or default_rate_limit_state_path()).expanduser()),
     }
     if not detection.get("limited"):
@@ -3424,7 +3447,12 @@ def requested_completion_markers_in_response(text: str, *, provider: str, prompt
     for marker in extract_requested_completion_markers(prompt):
         for line in response_lines:
             line_lower = line.lower()
-            if line == marker or (line.endswith(marker) and not any(term in line_lower for term in instruction_terms)):
+            marker_match = (
+                line == marker
+                or line.endswith(marker)
+                or re.match(rf"^{re.escape(marker)}(?:\s|[.,:;!?—–-])", line)
+            )
+            if marker_match and not any(term in line_lower for term in instruction_terms):
                 markers.append(marker)
                 break
     return markers
@@ -3831,6 +3859,27 @@ def click_text_js_script(label: str) -> str:
         "    return {ok:true, text:item.text, tag:item.tag, role:item.role, exact: item.lower === wanted || item.aria.toLowerCase() === wanted};"
         "}"
         "return {ok:false, reason:'not-found', label:wanted};"
+        "})()"
+    )
+
+
+def chatgpt_open_profile_menu_js_script() -> str:
+    return (
+        "(() => {"
+        "const visible = (el) => {"
+        "  if (!el) return false;"
+        "  const rect = el.getBoundingClientRect();"
+        "  const style = window.getComputedStyle(el);"
+        "  return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';"
+        "};"
+        "const candidates = Array.from(document.querySelectorAll('[data-testid=\"accounts-profile-button\"], [aria-label=\"Open profile menu\"], button, [role=\"button\"]'));"
+        "const target = candidates.find((el) => {"
+        "  const label = String(el.getAttribute('aria-label') || el.getAttribute('data-testid') || el.innerText || el.textContent || '').toLowerCase();"
+        "  return visible(el) && (label.includes('accounts-profile-button') || label.includes('open profile menu') || label.includes('profile menu'));"
+        "});"
+        "if (!target) return {ok:false, reason:'profile-menu-button-not-found'};"
+        "target.click();"
+        "return {ok:true, label: target.getAttribute('aria-label') || target.getAttribute('data-testid') || ''};"
         "})()"
     )
 
@@ -5248,6 +5297,10 @@ def click_first_agent_browser_text(
             attempts.append({"label": label, "ref": ref, "returncode": result.returncode})
             if result.returncode == 0:
                 return {"clicked": True, "label": label, "ref": ref, "attempts": attempts}
+            result = invoke(f"{command_log_label}:{label}:js-click-after-ref", ["eval", click_text_js_script(str(label))])
+            attempts.append({"label": label, "returncode": result.returncode, "method": "js-after-ref"})
+            if cdp_js_click_succeeded(result):
+                return {"clicked": True, "label": label, "attempts": attempts}
             continue
         if str(label).lower() in {"start", "confirm", "allow", "begin"}:
             attempts.append({"label": label, "returncode": 1, "skipped": "generic-label-without-exact-ref"})
@@ -5484,41 +5537,34 @@ def agent_browser_profile_workflow_run(
 
     def cdp_eval_scoped(expression: str, *, label: str, extra_args: list[str]) -> subprocess.CompletedProcess[str]:
         target_id = current_target_id()
+        command = ["cdp-eval", str(cdp_port), "<expression>"]
+        if not target_id:
+            return subprocess.CompletedProcess(command, 1, "", "missing automation target_id for live CDP eval")
         all_contexts = (
             provider_id == "chatgpt"
             and spec["mode"] == "deep-research"
             and ("__AI_RESEARCH_VISIBLE_TEXT__" in expression or "__AI_RESEARCH_LATEST_RESPONSE__" in expression)
         )
-        try:
-            if target_id:
-                return run_cdp_javascript(
-                    cdp_port,
-                    expression,
-                    timeout=command_timeout(label, extra_args),
-                    target_id=target_id,
-                    all_contexts=all_contexts,
-                )
-            return run_cdp_javascript(cdp_port, expression, timeout=command_timeout(label, extra_args), all_contexts=all_contexts)
-        except TypeError:
-            return run_cdp_javascript(cdp_port, expression, timeout=command_timeout(label, extra_args))
+        return run_cdp_javascript(
+            cdp_port,
+            expression,
+            timeout=command_timeout(label, extra_args),
+            target_id=target_id,
+            all_contexts=all_contexts,
+        )
 
     def cdp_keypress_scoped(key: str, *, label: str, extra_args: list[str]) -> subprocess.CompletedProcess[str]:
         target_id = current_target_id()
-        try:
-            if target_id:
-                return run_cdp_keypress(cdp_port, key, timeout=command_timeout(label, extra_args), target_id=target_id)
-            return run_cdp_keypress(cdp_port, key, timeout=command_timeout(label, extra_args))
-        except TypeError:
-            return run_cdp_keypress(cdp_port, key, timeout=command_timeout(label, extra_args))
+        command = ["cdp-keypress", str(cdp_port), key]
+        if not target_id:
+            return subprocess.CompletedProcess(command, 1, "", "missing automation target_id for live CDP keypress")
+        return run_cdp_keypress(cdp_port, key, timeout=command_timeout(label, extra_args), target_id=target_id)
 
     def cdp_screenshot_scoped(path: Path) -> bool:
         target_id = current_target_id()
-        try:
-            if target_id:
-                return capture_cdp_screenshot(cdp_port, path, timeout=min(timeout, 20.0), target_id=target_id)
-            return capture_cdp_screenshot(cdp_port, path, timeout=min(timeout, 20.0))
-        except TypeError:
-            return capture_cdp_screenshot(cdp_port, path, timeout=min(timeout, 20.0))
+        if not target_id:
+            return False
+        return capture_cdp_screenshot(cdp_port, path, timeout=min(timeout, 20.0), target_id=target_id)
 
     def invoke(label: str, extra_args: list[str]) -> subprocess.CompletedProcess[str]:
         if extra_args[:1] == ["open"] and len(extra_args) > 1:
@@ -6106,13 +6152,15 @@ def agent_browser_live_workflow_run(
             result = subprocess.CompletedProcess(["sleep", str(milliseconds)], 0, f"waited {milliseconds}ms", "")
         elif extra_args[:2] == ["tab", "new"] and len(extra_args) > 2:
             target_id = current_target_id()
-            try:
-                if target_id:
-                    result = run_cdp_navigate(cdp_port, str(extra_args[2]), timeout=command_timeout(label, extra_args), target_id=target_id)
-                else:
-                    result = run_cdp_navigate(cdp_port, str(extra_args[2]), timeout=command_timeout(label, extra_args))
-            except TypeError:
-                result = run_cdp_navigate(cdp_port, str(extra_args[2]), timeout=command_timeout(label, extra_args))
+            if target_id:
+                result = run_cdp_navigate(cdp_port, str(extra_args[2]), timeout=command_timeout(label, extra_args), target_id=target_id)
+            else:
+                result = subprocess.CompletedProcess(
+                    ["cdp-navigate", str(cdp_port), str(extra_args[2])],
+                    1,
+                    "",
+                    "missing automation target_id for live CDP navigation",
+                )
         elif extra_args[:1] == ["eval"] and len(extra_args) > 1:
             result = cdp_eval_scoped(extra_args[1], label=label, extra_args=extra_args)
         elif extra_args[:1] == ["snapshot"]:
@@ -6126,6 +6174,13 @@ def agent_browser_live_workflow_run(
             result = subprocess.CompletedProcess(["cdp-screenshot", str(cdp_port), extra_args[1]], 0 if ok else 1, str(extra_args[1]) if ok else "", "")
         elif extra_args[:1] == ["close"]:
             result = subprocess.CompletedProcess(["skip-close-live-tab"], 0, "skipped: live automation tab is left open", "")
+        elif extra_args[:1] and extra_args[0] in {"click", "fill", "open", "find"}:
+            result = subprocess.CompletedProcess(
+                ["blocked-agent-browser-live-action", *extra_args],
+                1,
+                "",
+                "live CDP workflow requires target-scoped CDP actions; agent-browser active-tab action blocked",
+            )
         else:
             result = run_agent_browser(["--cdp", str(cdp_port), *extra_args], session=session, timeout=command_timeout(label, extra_args))
         commands.append(
@@ -6224,8 +6279,40 @@ def agent_browser_live_workflow_run(
         write_json(paths["status_json"], payload)
         return {**payload, "status_json": str(paths["status_json"])}
 
+    navigate_result = invoke("navigate-automation-target", ["tab", "new", spec["url"]])
+    workflow_events.append(
+        {
+            "event": "navigate-automation-target",
+            "returncode": navigate_result.returncode,
+            "target_id": current_target_id(),
+            "url": spec["url"],
+        }
+    )
+    if navigate_result.returncode != 0:
+        payload = {
+            **plan,
+            "status": "blocked",
+            "blocker": "CDP automation target navigation failed",
+            "real_session_preflight": real_session_preflight,
+            "target_id": current_target_id(),
+            "target_verification": {
+                "target_id": current_target_id(),
+                "automation_target_created": bool(current_target_id()),
+                "active_tab_navigation_fallback_allowed": bool(allow_active_tab_navigation_fallback),
+            },
+            "automation_target": automation_target,
+            "workflow_events": workflow_events,
+            "commands": commands,
+            "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        }
+        write_json(paths["status_json"], payload)
+        return {**payload, "status_json": str(paths["status_json"])}
+
     invoke("wait-initial", ["wait", "4000"])
     before_eval = invoke("eval-before-text", ["eval", browser_eval_visible_text_script()])
+    if not before_eval.stdout.strip():
+        invoke("wait-initial-empty-retry", ["wait", "4000"])
+        before_eval = invoke("eval-before-text-retry", ["eval", browser_eval_visible_text_script()])
     visible_text_parts.append(before_eval.stdout)
     eval_inventory = extract_provider_inventory(provider_id, before_eval.stdout)
     current_snapshot_text = ""
@@ -6320,6 +6407,26 @@ def agent_browser_live_workflow_run(
                 snapshot=current_snapshot_text,
             )
             workflow_events.append({"event": "select-feature", **feature_result})
+        if provider_id == "chatgpt":
+            profile_menu_result = invoke("chatgpt-open-profile-menu", ["eval", chatgpt_open_profile_menu_js_script()])
+            profile_menu_payload = parse_json_stdout(profile_menu_result.stdout)
+            workflow_events.append(
+                {
+                    "event": "chatgpt-open-profile-menu",
+                    "returncode": profile_menu_result.returncode,
+                    "opened": bool(profile_menu_result.returncode == 0 and profile_menu_payload.get("ok")),
+                    "reason": profile_menu_payload.get("reason", ""),
+                }
+            )
+            if profile_menu_result.returncode == 0 and profile_menu_payload.get("ok"):
+                invoke("wait-after-chatgpt-profile-menu", ["wait", "750"])
+                profile_eval = invoke("eval-after-chatgpt-profile-menu", ["eval", browser_eval_visible_text_script()])
+                if profile_eval.stdout:
+                    visible_text_parts.append(profile_eval.stdout)
+                profile_snapshot = invoke("snapshot-after-chatgpt-profile-menu", ["snapshot", "-i", "-c"])
+                current_snapshot_text = profile_snapshot.stdout or current_snapshot_text
+                if current_snapshot_text:
+                    visible_text_parts.append(current_snapshot_text)
         pre_submit_eval = invoke("eval-before-pre-submit-guard", ["eval", browser_eval_visible_text_script()])
         if pre_submit_eval.stdout:
             visible_text_parts.append(pre_submit_eval.stdout)
@@ -7503,8 +7610,8 @@ def verify_cdp_port_owner(
         actual_user_data = expected_user_data
     expected_profile = str(profile.get("directory", "") or "Default")
     actual_profile = extract_chromium_arg(owner_args, "--profile-directory")
-    user_data_matches = not actual_user_data or not expected_user_data or actual_user_data == expected_user_data
-    profile_matches = not actual_profile or actual_profile == expected_profile
+    user_data_matches = bool(not expected_user_data or (actual_user_data and actual_user_data == expected_user_data))
+    profile_matches = bool(actual_profile == expected_profile if actual_profile else expected_profile == "Default")
     return {
         "ok": bool(owner_matches_browser and user_data_matches and profile_matches),
         "owner_matches_browser": bool(owner_matches_browser),
@@ -9200,7 +9307,11 @@ def cmd_workflow_run(args: argparse.Namespace) -> int:
             artifact_privacy=artifact_privacy,
             oracle_mode=oracle_mode,
         )
-        if oracle_mode == "runner" and payload.get("status") not in {"opened", "submitted", "started", "verified", "captured"}:
+        pre_submit_guard = payload.get("pre_submit_guard") if isinstance(payload.get("pre_submit_guard"), dict) else {}
+        runner_guard_blocked = bool(pre_submit_guard) and not bool(pre_submit_guard.get("allowed"))
+        if oracle_mode == "runner" and (
+            payload.get("status") not in {"opened", "submitted", "started", "verified", "captured"} or runner_guard_blocked
+        ):
             oracle_payload["runner_status"] = "blocked-by-local-guards"
             oracle_payload["runner_blocker"] = "Oracle runner requires successful local login/account/plan/feature/screenshot guards first."
         payload["oracle"] = oracle_payload
@@ -9259,6 +9370,7 @@ def cmd_workflow_live_run(args: argparse.Namespace) -> int:
         mode=args.mode,
         state_path=Path(args.rate_limit_state).expanduser(),
         source=args.output or "workflow-live-run",
+        artifact_privacy=str(getattr(args, "artifact_privacy", "redacted")),
     )
     if payload["rate_limit"].get("detected"):
         payload.setdefault("pause_required", True)
@@ -9909,6 +10021,8 @@ def compact_workflow_run_payload(payload: dict[str, Any]) -> dict[str, Any]:
     clone = payload.get("clone") or {}
     return {
         "status": payload.get("status", ""),
+        "blocker": payload.get("blocker", ""),
+        "execution_mode": payload.get("execution_mode", ""),
         "strategy": payload.get("strategy", {}),
         "target_id": payload.get("target_id", ""),
         "account_baseline": payload.get("account_baseline", {}),
@@ -10146,7 +10260,7 @@ def build_notion_export_plan(
     ai_exporter_capabilities: dict[str, Any],
     workflow_payload: dict[str, Any] | None,
     followup_payload: dict[str, Any] | None,
-    workspace_hint: str = "Martin Workspace",
+    workspace_hint: str = "Research Workspace",
 ) -> dict[str, Any]:
     rows = [
         row
@@ -10560,6 +10674,16 @@ def cmd_workflow_orchestrate(args: argparse.Namespace) -> int:
             refresh_cache=not args.no_refresh_cache,
             attachments=[Path(item).expanduser() for item in args.attachment],
         )
+    elif not getattr(args, "allow_diagnostic_clone", False):
+        workflow_payload = {
+            "status": "blocked",
+            "blocker": "workflow-orchestrate no longer starts temporary profile clones by default. Use --live-cdp for real-session E2E or --allow-diagnostic-clone for explicit clone diagnostics.",
+            "provider": provider_id,
+            "mode": args.mode,
+            "browser": browser.get("id", ""),
+            "profile": profile.get("directory", profile.get("name", "")) if isinstance(profile, dict) else str(profile),
+            "execution_mode": "blocked-no-implicit-clone",
+        }
     else:
         workflow_payload = agent_browser_profile_workflow_run(
             browser=browser,
@@ -10612,7 +10736,13 @@ def cmd_workflow_orchestrate(args: argparse.Namespace) -> int:
         "mode": args.mode,
         "browser": browser.get("id", ""),
         "profile": profile,
-        "execution_mode": "live-cdp-background-tab" if args.live_cdp else "temporary-profile-clone-cdp",
+        "execution_mode": (
+            "live-cdp-background-tab"
+            if args.live_cdp
+            else "temporary-profile-clone-cdp"
+            if getattr(args, "allow_diagnostic_clone", False)
+            else "blocked-no-implicit-clone"
+        ),
         "real_session_preflight": preflight,
         "unbrowser": compact_unbrowser_payload(unbrowser_payload),
         "unbrowser_session": compact_unbrowser_payload(unbrowser_session_payload),
@@ -11140,6 +11270,7 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_orchestrate.add_argument("--timeout", type=float, default=90.0)
     workflow_orchestrate.add_argument("--port", type=int, help="Real browser CDP port to preflight.")
     workflow_orchestrate.add_argument("--live-cdp", action="store_true", help="Use the real CDP session and open a new background tab instead of a disposable clone.")
+    workflow_orchestrate.add_argument("--allow-diagnostic-clone", action="store_true", help="Explicitly permit the legacy temporary-profile clone path for diagnostics only.")
     workflow_orchestrate.add_argument("--cache", action="store_true")
     workflow_orchestrate.add_argument("--cache-root", default=str(default_chat_cache_root()))
     workflow_orchestrate.add_argument("--no-refresh-cache", action="store_true")
@@ -11166,7 +11297,7 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_orchestrate.add_argument("--unbrowser-session-profile", default="default")
     workflow_orchestrate.add_argument("--notion-sync", action="store_true", help="Plan AI Exporter Save to Notion after local export.")
     workflow_orchestrate.add_argument("--allow-external-write", action="store_true", help="Allow the orchestrator to mark external Notion write as eligible.")
-    workflow_orchestrate.add_argument("--notion-workspace", default="Martin Workspace")
+    workflow_orchestrate.add_argument("--notion-workspace", default="Research Workspace")
     workflow_orchestrate.add_argument("--output", default="")
     save_chat = sub.add_parser("save-chat")
     save_chat.add_argument("--cache-root", default=str(default_chat_cache_root()))

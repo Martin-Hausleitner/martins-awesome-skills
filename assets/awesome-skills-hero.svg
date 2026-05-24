@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="420" viewBox="0 0 1200 420" role="img" aria-labelledby="title desc">
-  <title id="title">Martin's Awesome Skills</title>
+  <title id="title">Public Agent Skills</title>
   <desc id="desc">Animated gradient hero for a public agent skills repository.</desc>
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
@@ -52,7 +52,7 @@
     <text x="924" y="121" text-anchor="middle" class="pill">Human OK</text>
   </g>
   <text x="90" y="132" class="tiny">Reusable agent workflows</text>
-  <text x="90" y="215" class="title">Martin's Awesome Skills</text>
+  <text x="90" y="215" class="title">Public Agent Skills</text>
   <text x="94" y="260" class="subtitle">Sanitized Hermes + OpenClaw skills for safer, sharper automation</text>
   <g transform="translate(94 322)">
     <rect width="210" height="42" rx="21" fill="#0f172a" opacity=".72"/>

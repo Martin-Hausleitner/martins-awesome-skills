@@ -1,7 +1,7 @@
-# Martin's Awesome Skills
+# Public Agent Skills
 
 <p align="center">
-  <img src="assets/awesome-skills-hero.svg" alt="Martin's Awesome Skills animated hero" width="920">
+  <img src="assets/awesome-skills-hero.svg" alt="Public Agent Skills animated hero" width="920">
 </p>
 
 <p align="center">
@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Martin-Hausleitner/martins-awesome-skills"><img alt="GitHub" src="https://img.shields.io/badge/GitHub-Martin's%20Awesome%20Skills-181717?logo=github"></a>
+  <a href="https://github.com/example/public-agent-skills"><img alt="GitHub" src="https://img.shields.io/badge/GitHub-Public%20Agent%20Skills-181717?logo=github"></a>
   <img alt="Status" src="https://img.shields.io/badge/status-sanitized%20public%20skills-2ea44f">
   <img alt="Agent Skills" src="https://img.shields.io/badge/agent--skills-Hermes%20%2B%20OpenClaw-6f42c1">
   <img alt="Human in the Loop" src="https://img.shields.io/badge/human--in--the--loop-Telegram%20approval-229ED9?logo=telegram">
@@ -28,6 +28,7 @@ This repo is intentionally **not** a dump of a private OpenClaw/Hermes setup. It
 
 - [Highlights](#-highlights)
 - [What's Inside](#-whats-inside)
+- [Complete Skill Table](#-complete-skill-table)
 - [Skill Cards](#-skill-cards)
 - [Quick Start](#-quick-start)
 - [How It Works](#-how-it-works)
@@ -62,14 +63,57 @@ This repo is intentionally **not** a dump of a private OpenClaw/Hermes setup. It
 | 🛠️ Software craft | `plan`, `writing-plans`, `requesting-code-review`, `subagent-driven-development`, `test-driven-development`, `systematic-debugging` | Planning, review, delegation, implementation loops, and debugging |
 | 🐙 GitHub | `github-auth`, `github-code-review`, `github-issues`, `github-pr-workflow` | Auth setup, issue triage, structured review, and pull request lifecycle |
 | 🎨 Creative tools | `ascii-art`, `excalidraw`, `p5js`, `songwriting-and-ai-music` | Visual explanations, sketches, animations, songs, and terminal-friendly art |
-| 🔎 Research | `arxiv`, `blogwatcher`, `polymarket`, `songsee`, `youtube-content` | Paper search, market research, blog/video/music discovery workflows |
-| 📄 Productivity | `notion`, `ocr-and-documents`, `ai-research-output-publisher` | Notion API patterns, research-result publishing, and OCR/document extraction |
+| 🔎 Research | `arxiv`, `blogwatcher`, `comparison-deep-research`, `polymarket`, `songsee`, `youtube-content` | Paper search, market research, comparison scorecards, and blog/video/music discovery workflows |
+| 📄 Productivity | `notion`, `ocr-and-documents`, `ai-research-output-publisher` | Notion API patterns, research-result publishing, chat notifications, and OCR/document extraction |
 | 📬 Email tooling | `himalaya` | IMAP/SMTP CLI workflows with explicit-send safety |
 | 🧭 Search & analysis | `multi-search-engine`, `tool-comparison-heatmap` | Multi-engine search and comparison visuals |
 | 📍 Local discovery | `find-nearby` | Nearby place lookup workflow templates |
 | 🔌 MCP | `native-mcp` | Native Model Context Protocol server setup patterns |
 | ⚙️ DevOps | `webhook-subscriptions` | Event-driven agent activation with signature and dry-run safety |
 | 🔁 Skill sync | `cross-agent-skill-sync` | Share `SKILL.md` packages across local agent roots with dry-run plans |
+| 🧪 AI browser E2E | `ai-research-browser-cli`, `ai-research-browser`, `oracle-ai-research-e2e` | Guarded live-CDP provider checks, Oracle reattach evidence, and browser workflow verification |
+
+## 📚 Complete Skill Table
+
+| Skill | Category | What It Helps With |
+|---|---|---|
+| `telegram-approval-gate` | Messaging | Approval cards before external sends |
+| `telegram-channel-poster` | Messaging | Dry-run-first Telegram channel posts |
+| `test-driven-development` | Software development | Red/green/refactor discipline for agent work |
+| `systematic-debugging` | Software development | Root-cause-first debugging |
+| `writing-plans` | Software development | Executable implementation plans |
+| `plan` | Software development | Plan-oriented implementation guidance |
+| `requesting-code-review` | Software development | Structured code review requests |
+| `subagent-driven-development` | Software development | Parallel subagent implementation workflows |
+| `cross-agent-skill-sync` | Software development | Sync `SKILL.md` packages across Hermes, Codex, OpenClaw, Gemini, OpenCode, and Claude-adjacent roots |
+| `ai-research-browser` | Software development | Guarded browser automation for AI provider research workflows |
+| `ai-research-browser-cli` | Software development | Live-CDP workflow operation, restart recovery, screenshots, clipboard output, and status JSON |
+| `oracle-ai-research-e2e` | Software development | Oracle 0.13 assist/reattach validation with local safety guards |
+| `github-auth` | GitHub | GitHub auth diagnostics without committing secrets |
+| `github-code-review` | GitHub | Structured local diff and PR review |
+| `github-issues` | GitHub | Issue creation, triage, labels, and closure |
+| `github-pr-workflow` | GitHub | Branch, test, commit, push, and PR lifecycle |
+| `native-mcp` | MCP | Native Model Context Protocol server setup patterns |
+| `webhook-subscriptions` | DevOps | Event-driven agent triggers with signature and dry-run safety |
+| `ascii-art` | Creative | Terminal-friendly visual output |
+| `excalidraw` | Creative | Hand-drawn style diagrams and visual explanations |
+| `p5js` | Creative | Interactive sketches, animations, and exports |
+| `songwriting-and-ai-music` | Creative | Songwriting and AI music workflow prompts |
+| `arxiv` | Research | Search and summarize arXiv papers |
+| `blogwatcher` | Research | Watch and process blog/research updates |
+| `comparison-deep-research` | Research | Strict comparison prompts with GitHub links, five weighted categories, diagrams, and `/100` scorecards |
+| `polymarket` | Research | Polymarket market data workflows |
+| `songsee` | Media | Song and music discovery workflows |
+| `youtube-content` | Media | YouTube transcript and content workflows |
+| `ai-research-output-publisher` | Productivity | Format completed research results, links, summaries, timing metrics, and optional Notion payloads |
+| `notion` | Productivity | Notion API workflow patterns with safe placeholders |
+| `ocr-and-documents` | Productivity | OCR and document extraction guidance |
+| `himalaya` | Email | Himalaya IMAP/SMTP workflows with explicit-send safety |
+| `find-nearby` | Local discovery | Nearby-place lookup workflow templates |
+| `multi-search-engine` | Search | Multi-engine search strategy and international search hints |
+| `tool-comparison-heatmap` | Analysis | Tool comparison heatmaps and scoring frameworks |
+
+See [docs/SKILL_CATALOG.md](docs/SKILL_CATALOG.md) for the longer catalog notes and public asset list.
 
 ## 🌟 Skill Cards
 
@@ -89,8 +133,8 @@ This repo is intentionally **not** a dump of a private OpenClaw/Hermes setup. It
 Clone the repo:
 
 ```bash
-git clone https://github.com/Martin-Hausleitner/martins-awesome-skills.git
-cd martins-awesome-skills
+git clone https://github.com/example/public-agent-skills.git
+cd public-agent-skills
 ```
 
 Copy a skill into your local agent skill directory:
@@ -103,9 +147,14 @@ cp -R skills/telegram-approval-gate ~/.hermes/skills/messaging/
 For Codex/OpenClaw-style workspaces, copy into the workspace skill folder:
 
 ```bash
+mkdir -p ~/.codex/skills
+cp -R skills/software-development/ai-research-browser-cli ~/.codex/skills/
+
 mkdir -p ~/.openclaw/workspace/skills
 cp -R skills/telegram-channel-poster ~/.openclaw/workspace/skills/
 ```
+
+See [docs/INSTALL.md](docs/INSTALL.md) for Codex, Claude, Gemini, OpenCode, Hermes, and cross-agent sync installs.
 
 ## 🧭 How It Works
 
@@ -291,7 +340,9 @@ Then fill the copied private file with your own values. Do not commit it.
 - `github-auth`: diagnose and configure GitHub access without leaking tokens.
 - `github-issues`: create, triage, label, and close issues with clean public summaries.
 - `github-pr-workflow`: branch, commit, test, push, and open pull requests.
+- `ai-research-browser-cli`: operate the guarded `ai_research_browser.py` CLI for Brave/Comet live-CDP checks, restart recovery, screenshots, clipboard output, and E2E evidence.
 - `ai-research-output-publisher`: render finished research jobs as polished chat messages, copy buttons, metrics, and optional Notion pages.
+- `comparison-deep-research`: turn broad product/package/repo comparisons into strict Deep Research prompts with linked candidates, five weighted categories, and `/100` scorecards.
 - `webhook-subscriptions`: design event-driven agent triggers with explicit signature checks.
 - `notion`: use the Notion API with placeholder-only examples and narrow permissions.
 - `templates/SKILL_TEMPLATE.md`: a safe starting point for new skills.
@@ -320,6 +371,15 @@ python3 skills/productivity/ai-research-output-publisher/scripts/ai_research_out
   --input /tmp/research-results.json \
   --message-output /tmp/research-message.md \
   --payload-output /tmp/research-notion-payload.json
+```
+
+Generate a reusable comparison Deep Research prompt:
+
+```bash
+python3 skills/research/comparison-deep-research/scripts/comparison_deep_research_prompt.py \
+  --topic "Best Obsidian AI plugins" \
+  --use-case "Notion-like team knowledge workflows" \
+  --candidate-count 50
 ```
 
 ## 🗂️ Skill Layout
@@ -356,11 +416,13 @@ skills/
   research/
     arxiv/
     blogwatcher/
+    comparison-deep-research/
     polymarket/
   search/
     multi-search-engine/
   software-development/
     ai-research-browser/
+    ai-research-browser-cli/
     cross-agent-skill-sync/
     oracle-ai-research-e2e/
     plan/
@@ -384,7 +446,10 @@ python3 skills/telegram-approval-gate/tests/test_telegram_approval_gate.py
 (cd skills/telegram-channel-poster && python3 scripts/test_telegram_channel_post.py)
 python3 -m unittest discover -s skills/software-development/ai-research-browser/tests -p 'test_ai_research_browser.py'
 python3 -m unittest discover -s skills/software-development/oracle-ai-research-e2e/tests -p 'test_*.py'
+python3 skills/software-development/oracle-ai-research-e2e/scripts/oracle_ai_research_e2e_check.py --quick --json
 python3 -m unittest discover -s skills/productivity/ai-research-output-publisher/tests -p 'test_*.py'
+python3 -m unittest discover -s skills/research/comparison-deep-research/tests -p 'test_*.py'
+node --test tests/skill-sync-doctor.test.mjs
 node --test skills/software-development/cross-agent-skill-sync/tests/cross_agent_skill_sync.test.mjs
 ```
 

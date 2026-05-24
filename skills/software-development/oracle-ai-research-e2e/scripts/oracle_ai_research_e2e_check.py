@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -35,9 +36,30 @@ def run_command(command: list[str], *, cwd: Path, expect: set[int] | None = None
         "returncode": result.returncode,
         "expected_returncodes": sorted(expected),
         "command": redact_command(command),
-        "stdout": result.stdout[-6000:],
-        "stderr": result.stderr[-6000:],
+        "stdout": sanitize_text(result.stdout[-6000:]),
+        "stderr": sanitize_text(result.stderr[-6000:]),
     }
+
+
+def sanitize_text(text: str) -> str:
+    home = str(Path.home())
+    sanitized = text or ""
+    if home:
+        sanitized = sanitized.replace(home, "<user-path>")
+    sanitized = re.sub(r"(--user-data-dir=)([^\s\"']+)", r"\1<redacted>", sanitized)
+    sanitized = re.sub(r"/Users/[^\s\"']+", "<user-path>", sanitized)
+    sanitized = re.sub(r"(\"(?:path|profile_path|user_data_dir|repo_root)\"\s*:\s*\")([^\"]+)(\")", r"\1<redacted>\3", sanitized)
+    return sanitized
+
+
+def sanitize_payload(value: Any) -> Any:
+    if isinstance(value, str):
+        return sanitize_text(value)
+    if isinstance(value, list):
+        return [sanitize_payload(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): sanitize_payload(item) for key, item in value.items()}
+    return value
 
 
 def redact_command(command: list[str]) -> list[str]:
@@ -245,11 +267,12 @@ def main(argv: list[str] | None = None) -> int:
 
     payload = {
         "ok": not failures,
-        "repo_root": str(root),
+        "repo_root": "<redacted>",
         "live": bool(args.live),
         "failures": failures,
         "steps": steps,
     }
+    payload = sanitize_payload(payload)
     if args.json:
         print(json.dumps(payload, indent=2, ensure_ascii=False))
     else:

@@ -228,7 +228,7 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 
 `real-session-preflight` reports `can_attach`, CDP endpoint attempts, port owner, running-browser blockers, and provider session evidence. If a disposable clone lands on a sign-in page while the real profile still has local provider session evidence, workflow runs are marked `real-session-required`. Do not claim Gemini Deep Research, ChatGPT Agent, or ChatGPT Deep Research started until a real CDP-enabled browser session or a dedicated minimized browser window confirms the provider UI state.
 
-The profile alias `work` resolves by exact directory/name/account first, then by Work/Arbeit labels, and finally to the only discovered profile when a browser has exactly one local profile. This lets Comet/Komet single-profile setups such as `Neptune` run through `--profile work` without hard-coding a local-only directory name.
+The profile alias `work` resolves by exact directory/name/account first, then by Work/Arbeit labels, and finally to the only discovered profile when a browser has exactly one local profile. This lets single-profile Comet/Komet setups run through `--profile work` without hard-coding a machine-specific directory name.
 
 Run fixed provider workflows from a temporary profile clone:
 

@@ -30,6 +30,7 @@ This repo is intentionally **not** a dump of a private OpenClaw/Hermes setup. It
 - [What's Inside](#-whats-inside)
 - [Skill Cards](#-skill-cards)
 - [Quick Start](#-quick-start)
+- [Featured: Cross-Agent Skill Sync](#-featured-cross-agent-skill-sync)
 - [Featured: AI Research Browser + Oracle](#-featured-ai-research-browser--oracle)
 - [Featured: Telegram Approval Gate](#-featured-telegram-approval-gate)
 - [New Public-Safe Additions](#-new-public-safe-additions)
@@ -103,6 +104,39 @@ For Codex/OpenClaw-style workspaces, copy into the workspace skill folder:
 ```bash
 mkdir -p ~/.openclaw/workspace/skills
 cp -R skills/telegram-channel-poster ~/.openclaw/workspace/skills/
+```
+
+## 🔁 Featured: Cross-Agent Skill Sync
+
+`cross-agent-skill-sync` shares reviewed `SKILL.md` packages across local agent ecosystems without copying private state. It is built for Hermes, Codex, OpenClaw-style workspaces, Gemini CLI, OpenCode, Claude-adjacent roots, and other local skill-compatible agents.
+
+<p align="center">
+  <img src="assets/cross-agent-skill-sync.svg" alt="Cross-agent skill sync architecture" width="920">
+</p>
+
+Safe defaults:
+
+- **Plan first:** no filesystem writes unless `--execute` is passed.
+- **No overwrites:** existing skill folders are reported as `exists` or `conflict`, not replaced.
+- **Private-path redaction:** reports hide the home directory by default.
+- **Bridge-friendly:** local skills outside this repo can be included with `--include-skill`.
+- **Public-safe:** the repo ships deterministic tests and an audit script before publish.
+
+Plan a local projection:
+
+```bash
+node skills/software-development/cross-agent-skill-sync/scripts/cross_agent_skill_sync.mjs \
+  --target all \
+  --require-skill cross-agent-skill-sync
+```
+
+Execute an additive same-machine sync after review:
+
+```bash
+node skills/software-development/cross-agent-skill-sync/scripts/cross_agent_skill_sync.mjs \
+  --target all \
+  --strategy symlink \
+  --execute
 ```
 
 ## 🧠 Featured: AI Research Browser + Oracle

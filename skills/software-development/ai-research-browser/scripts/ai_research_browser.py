@@ -2343,7 +2343,13 @@ def provider_workflow_specs() -> dict[str, dict[str, dict[str, Any]]]:
 
 def provider_workflow_spec(provider: str, mode: str) -> dict[str, Any]:
     provider_id = normalize_provider_name(provider)
-    mode_id = "research" if provider_id in {"perplexity", "grok", "claude"} and mode == "deep-research" else mode
+    requested_mode = slug(mode or "chat")
+    if provider_id == "chatgpt" and requested_mode == "thinking":
+        mode_id = "chat"
+    elif provider_id in {"perplexity", "grok", "claude"} and requested_mode == "deep-research":
+        mode_id = "research"
+    else:
+        mode_id = requested_mode
     specs = provider_workflow_specs()
     provider_specs = specs.get(provider_id, {})
     if mode_id not in provider_specs:

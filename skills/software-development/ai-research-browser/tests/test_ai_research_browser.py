@@ -2149,6 +2149,15 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertIn("deep", agent["consult_dry_run"])
         self.assertEqual(gemini["execution_policy"], "assist-only")
 
+    def test_provider_workflow_spec_maps_chatgpt_thinking_to_chat_flow(self):
+        module = load_module()
+
+        spec = module.provider_workflow_spec("chatgpt", "thinking")
+
+        self.assertEqual(spec["provider"], "chatgpt")
+        self.assertEqual(spec["mode"], "chat")
+        self.assertEqual(spec["url"], "https://chatgpt.com/")
+
     def test_oracle_assist_payload_redacts_prompt_and_exposes_commands(self):
         module = load_module()
         plan = module.build_oracle_assist_payload(

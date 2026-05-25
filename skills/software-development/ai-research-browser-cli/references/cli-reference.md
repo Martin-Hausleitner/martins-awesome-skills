@@ -99,6 +99,16 @@ Example ports used in the recipes:
 
 Never assume port `9222` belongs to Brave/Chrome without owner verification.
 
+Ambiguous Deep Research intent:
+
+- If the user says only "Starte Deep Research" / "start Deep Research", route to
+  Comet + Gemini Deep Research first.
+- Use `--browser comet --profile work --provider google --mode deep-research
+  --cdp-port 9333`.
+- Run `real-session-preflight` before `workflow-run`.
+- Do not submit until the user has supplied the real research prompt and
+  `--allow-paid-quota-use` / confirmation are appropriate.
+
 ## Restart Recovery
 
 Use restart recovery when the real browser/profile is running but no verified CDP is available.

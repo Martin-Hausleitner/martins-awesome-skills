@@ -97,12 +97,25 @@ It is intentionally written as an operator-facing map, not just an install log.
 
 | User intent | Skill to use first | Why |
 |---|---|---|
+| "Starte Deep Research" with no browser/provider | `ai-research-browser-cli` | It now routes the ambiguous intent to Comet + Gemini Deep Research preflight first, with no submit until account, plan, feature, screenshot, and quota permission are verified |
 | "Run or debug ChatGPT/Gemini/Comet browser automation" | `ai-research-browser-cli` | It has the shortest operational command recipes and safety rules |
 | "Understand or extend the whole browser automation stack" | `ai-research-browser` | It documents the capabilities, strategy router, provider guards, and E2E evidence model |
 | "Prove Oracle is integrated with the browser stack" | `oracle-ai-research-e2e` | It focuses on Oracle 0.13 commands, runner blocking, and reattach evidence |
 | "Format/publish a finished research result" | `ai-research-output-publisher` | It handles output cards, links, summaries, local export plans, and safe external-write boundaries |
 | "Compare many tools, repos, packages, or products" | `comparison-deep-research` | It produces linked comparison prompts with five weighted categories and `/100` scoring |
 | "Make every local agent see the same skills" | `cross-agent-skill-sync` | It is the dry-run-first installer/verifier across Hermes, Codex, OpenClaw, Gemini, OpenCode, Claude, and generic roots |
+
+## Isolated Intent Smoke
+
+Latest public-safe routing check for the minimal German prompt
+`Starte Deep Research`:
+
+| Check | Result | Interpretation |
+|---|---|---|
+| Three isolated agents before the clarification | Chose Brave-first or the older Google specialist fallback | The intent was ambiguous and did not reliably pick the requested Comet/Gemini route |
+| Skill docs and local specialist hint updated | Comet + Gemini Deep Research is the documented default for unnamed Deep Research | Future agents have a single target route to follow |
+| Fresh isolated agent after the update | Reported Comet/Gemini ready and requested the concrete research prompt | The default intent now resolves to the requested Comet/Gemini path without submitting quota work |
+| Local dry preflight | Comet CDP owner/profile verified on port `9333`; no blockers; Gemini session evidence likely logged in | The route is attachable before any paid Deep Research submit |
 
 ## Skill Content Improvement Checklist
 

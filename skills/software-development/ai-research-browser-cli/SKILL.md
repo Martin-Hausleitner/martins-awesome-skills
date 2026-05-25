@@ -23,6 +23,7 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 ## Operating Rules
 
 - Prefer real live CDP sessions for true E2E. The examples use a Brave work profile on port `9223`; always verify the CDP owner/profile instead of trusting a port number.
+- If the user only says "Starte Deep Research" / "start Deep Research" and does not name a browser or provider, default to Comet + Gemini Deep Research: `--browser comet --profile work --provider google --mode deep-research --cdp-port 9333`, with preflight first and no `--submit` until the actual research prompt and quota permission are explicit.
 - Never claim a provider works until the status JSON proves login/account/plan, an automation `target_id`, screenshot evidence, output text, and no challenge/rate-limit wall.
 - Do not use temporary clone/sibling success as proof of a real account login. Clone/sibling runs are diagnostic or explicit fallback only.
 - Before typing or submitting, require provider inventory: signed-in state, visible account, plan, model/feature evidence, screenshot, and no CAPTCHA/rate-limit/challenge.
@@ -33,6 +34,21 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 - After implementation or changes, run syntax, lint, unit tests, and at least one low-cost real provider smoke before saying the CLI is stable.
 
 ## Fast Workflow
+
+For the ambiguous one-line prompt "Starte Deep Research", do not route to a
+Brave-first fallback or a broad matrix. Start with the Comet/Gemini preflight:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py real-session-preflight \
+  --browser comet \
+  --profile work \
+  --provider google \
+  --port 9333 \
+  --output /tmp/arb-preflight-comet-gemini.json
+```
+
+Only after the preflight proves the real account, plan, feature, screenshot, and
+CDP target should a paid Deep Research run be planned or submitted.
 
 1. Discover browsers/profiles:
 

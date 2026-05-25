@@ -20,6 +20,32 @@ The helper CLI is:
 python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py
 ```
 
+## Default Intent Routing
+
+If the user only says "Starte Deep Research", "start Deep Research", or asks
+for Deep Research without naming a provider/browser, route the plan to Gemini
+Deep Research in Comet first:
+
+- browser: `comet`
+- profile: `work`
+- provider: `google` / `gemini`
+- mode: `deep-research`
+- standard Comet live-CDP port: `9333`, but still verify the owner/profile
+- first action: `real-session-preflight` or `workflow-run` without `--submit`
+
+Do not choose Brave, ChatGPT, sibling, clone, or a broad provider suite for this
+ambiguous prompt unless the user explicitly names that target or Comet/Gemini is
+blocked and an explicit fallback is allowed. A safe first command is:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py real-session-preflight \
+  --browser comet \
+  --profile work \
+  --provider google \
+  --port 9333 \
+  --output /tmp/hermes-comet-gemini-preflight.json
+```
+
 ## What It Does
 
 - Discovers installed Chromium-family browsers: Brave, Comet/Komet, Google Chrome, Microsoft Edge, Opera, and ChatGPT Atlas.
@@ -216,14 +242,15 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 
 Use `--plan-only` to inspect the queue first, `--max-runs 1` for a smoke test, and `--timeout 15` when a cloned browser is flaky. Treat `signed-out-or-wall` and `timeout` as real failed-login/automation-wall findings, not as success. For final account, plan, model, and quota proof, verify with a real running browser through Computer Use or a hidden CDP launch.
 
-Before starting Gemini Deep Research or any paid workflow that must reuse the real account, run the real-session preflight:
+Before starting Gemini Deep Research or any paid workflow that must reuse the real account, run the real-session preflight. For an ambiguous "Starte Deep Research" request, prefer Comet/Gemini first:
 
 ```bash
 python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py real-session-preflight \
-  --browser brave \
+  --browser comet \
   --profile work \
   --provider google \
-  --output /tmp/hermes-real-session-preflight-brave-gemini.json
+  --port 9333 \
+  --output /tmp/hermes-real-session-preflight-comet-gemini.json
 ```
 
 `real-session-preflight` reports `can_attach`, CDP endpoint attempts, port owner, running-browser blockers, and provider session evidence. If a disposable clone lands on a sign-in page while the real profile still has local provider session evidence, workflow runs are marked `real-session-required`. Do not claim Gemini Deep Research, ChatGPT Agent, or ChatGPT Deep Research started until a real CDP-enabled browser session or a dedicated minimized browser window confirms the provider UI state.
@@ -245,7 +272,7 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 
 ```bash
 python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py workflow-run \
-  --browser brave \
+  --browser comet \
   --profile work \
   --provider google \
   --mode deep-research \

@@ -501,15 +501,17 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
   --output /tmp/chatgpt-deep-research-workflow.json
 ```
 
-Start Gemini Deep Research:
+Start Gemini Deep Research. If the user only says "Starte Deep Research" and
+does not name a browser/provider, default to Comet + Gemini first:
 
 ```bash
 python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py workflow-run \
-  --browser brave \
+  --browser comet \
   --profile work \
   --provider google \
   --mode deep-research \
   --prompt "Use Deep Research to compare current browser automation options for logged-in AI accounts." \
+  --cdp-port 9333 \
   --submit \
   --confirm-start \
   --output /tmp/gemini-deep-research-workflow.json

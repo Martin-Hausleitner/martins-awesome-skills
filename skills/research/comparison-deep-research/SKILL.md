@@ -17,6 +17,7 @@ Use this skill before starting Gemini/ChatGPT/Oracle Deep Research when the user
 The skill's job is to convert a vague comparison request into a strict Deep Research prompt that always asks for:
 
 - at least 10 candidates and ideally 50 when the domain is broad;
+- an exhaustive market mode when the user asks to "reize den Markt aus", "as many as possible", "vollständig", "alle relevanten", or similar;
 - verified GitHub repo links and official website/docs links;
 - a comparison table where names are clickable and link columns are explicit;
 - five major categories tailored to the use case;
@@ -32,7 +33,10 @@ Generate a prompt:
 python3 skills/research/comparison-deep-research/scripts/comparison_deep_research_prompt.py \
   --topic "Discord voice agents and private assistants" \
   --use-case "private OpenClaw/Hermes-style Discord assistant that can speak live, run tasks, and post research results" \
-  --candidate-count 50
+  --candidate-count 50 \
+  --market-depth exhaustive \
+  --context-file /absolute/path/context-notes.md \
+  --context-file /absolute/path/known-candidates.csv
 ```
 
 Then pass the generated prompt into `ai-research-browser` or Oracle-assisted Deep Research.
@@ -49,6 +53,21 @@ Ideal prompts stay at or below `6,000` characters. Default automated UI submits
 should stay at or below `12,000` characters. If the prompt is longer, compress it
 or move source material into files/links. Above `24,000` characters, do not paste
 it into Deep Research.
+
+## Market Exhaustive Mode
+
+Use `--market-depth exhaustive` when the user wants the market "ausgereizt" or
+as many candidates as possible. In this mode, the prompt asks Deep Research to:
+
+- discover as many verifiable candidates as reasonable;
+- include long-tail and adjacent-category options;
+- build a longlist first, then a ranked shortlist;
+- state discovery queries and excluded-but-notable candidates;
+- still score the shortlist rigorously instead of producing an unreviewable dump.
+
+Large context should be passed as files with `--context-file` and as
+`workflow-run --attachment ...` later. Do not paste full notes, exports, or large
+candidate lists into the prompt body if they push the prompt over the budget.
 
 ## Required Deep Research Output
 
@@ -88,6 +107,7 @@ Tell the model to produce this structure:
 - Use `ai-research-browser` or `ai-research-browser-cli` for the browser run.
 - Use `docs/DEEP_RESEARCH_PROMPT_BUDGETS.md` and the prompt-budget script before submitting any paid Deep Research run.
 - Use `--allow-paid-quota-use` only when the user explicitly asked for Deep Research or a paid mode.
+- Attach large context files with `--attachment /absolute/path/file` when the target provider exposes a file input; keep the initial prompt as a compact brief.
 - Use `ai-research-output-publisher` after the report finishes to create a polished message, duration metrics, PSPin/deep-research links, and optional Notion payload.
 - Use `tool-comparison-heatmap` after the research if the user wants an interactive visual matrix from the final data.
 

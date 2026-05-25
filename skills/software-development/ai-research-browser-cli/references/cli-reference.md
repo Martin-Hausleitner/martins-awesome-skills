@@ -65,6 +65,23 @@ Long source material belongs in files, link lists, vector stores, connectors, or
 staged follow-up runs. The initial Deep Research prompt should be a compact
 brief with goal, scope, criteria, output format, constraints, and source links.
 
+For market-exhaustive comparisons, generate a compact prompt and attach context
+files:
+
+```bash
+python3 skills/research/comparison-deep-research/scripts/comparison_deep_research_prompt.py \
+  --topic "Best Discord voice agents and private assistants" \
+  --use-case "private assistant that can speak live, run tasks, and post research results" \
+  --candidate-count 100 \
+  --market-depth exhaustive \
+  --context-file /absolute/path/known-candidates.csv \
+  --output /tmp/deep-research-prompt.md
+```
+
+Then use `--prompt-file /tmp/deep-research-prompt.md` and repeat
+`--attachment /absolute/path/file` for the context files if the provider exposes
+a file input.
+
 ## Discovery And Catalogs
 
 Discover browsers and profiles:

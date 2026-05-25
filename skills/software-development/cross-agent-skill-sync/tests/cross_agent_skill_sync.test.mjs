@@ -165,6 +165,43 @@ description: Old local copy.
   assert.match(readFileSync(join(destination, "SKILL.md"), "utf8"), /Use this in tests/);
 });
 
+test("update-existing detects stale referenced files, not only SKILL markdown", () => {
+  const fixture = mkdtempSync(join(tmpdir(), "cross-agent-skill-sync-"));
+  const sourceRoot = join(fixture, "repo", "skills");
+  const skillDir = join(sourceRoot, "software-development", "demo-skill");
+  const targetRoot = join(fixture, ".hermes", "skills");
+  const destination = join(targetRoot, "software-development", "demo-skill");
+  const outFile = join(fixture, "report.json");
+
+  mkdirSync(join(skillDir, "references"), { recursive: true });
+  mkdirSync(join(destination, "references"), { recursive: true });
+  writeSkill(skillDir, "demo-skill");
+  writeSkill(destination, "demo-skill");
+  writeFileSync(join(skillDir, "references", "guide.md"), "new guide\n");
+  writeFileSync(join(destination, "references", "guide.md"), "old guide\n");
+
+  execFileSync(process.execPath, [
+    script,
+    "--source-root",
+    sourceRoot,
+    "--target-root",
+    `hermes=${targetRoot}:preserve`,
+    "--target",
+    "hermes",
+    "--strategy",
+    "symlink",
+    "--update-existing",
+    "--execute",
+    "--out",
+    outFile,
+  ], { cwd: repoRoot, stdio: "pipe", env: { ...process.env, HOME: fixture } });
+
+  const report = JSON.parse(readFileSync(outFile, "utf8"));
+  assert.equal(report.actions[0].status, "installed");
+  assert.equal(report.actions[0].reason, "update-existing-copy");
+  assert.equal(readFileSync(join(destination, "references", "guide.md"), "utf8"), "new guide\n");
+});
+
 test("required missing skill is reported and can fail the run", () => {
   const fixture = mkdtempSync(join(tmpdir(), "cross-agent-skill-sync-"));
   const sourceRoot = join(fixture, "skills");

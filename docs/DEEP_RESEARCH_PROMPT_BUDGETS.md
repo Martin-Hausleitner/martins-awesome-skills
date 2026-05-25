@@ -39,6 +39,23 @@ For comparison research, request discovery of `10-50` candidates, but do not
 paste long descriptions for all candidates. If you already have many sources,
 attach a file or provide a concise link list.
 
+## Market Exhaustive Research
+
+When the user wants the market fully explored, use an exhaustive brief instead
+of a huge prompt:
+
+- Ask for as many verifiable candidates as reasonable.
+- Require a longlist, then a scored shortlist.
+- Include adjacent categories and long-tail tools.
+- Ask the model to report search queries, source types, excluded candidates, and
+  market gaps.
+- Put large user context in attached files: known candidates, prior notes,
+  constraints, CSV exports, screenshots, PDFs, or link lists.
+
+Even in exhaustive mode, keep the prompt body within the `standard_max` budget
+when possible. The extra breadth should come from Deep Research discovery and
+attached context files, not from pasting a massive prebuilt market dump.
+
 ## Provider Notes From Current Public Docs
 
 - OpenAI documents file-upload limits for ChatGPT: `512 MB` per file, `2M`
@@ -72,4 +89,3 @@ Sources:
   prompts. Use official docs, local prompt measurement, and conservative
   budgets.
 - Record the prompt-budget status in the run artifact/status when possible.
-

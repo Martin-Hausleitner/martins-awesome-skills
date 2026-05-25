@@ -38,3 +38,17 @@ test("Deep Research prompt budget is documented for agents", () => {
   assert.match(budgets, /do not paste into provider UI/i);
   assert.match(cliSkill, /deep_research_prompt_budget\.py/);
 });
+
+test("market exhaustive Deep Research with file context is documented", () => {
+  const budgets = read("docs/DEEP_RESEARCH_PROMPT_BUDGETS.md");
+  const cliRef = read("skills/software-development/ai-research-browser-cli/references/cli-reference.md");
+  const comparisonSkill = read("skills/research/comparison-deep-research/SKILL.md");
+
+  for (const text of [budgets, cliRef, comparisonSkill]) {
+    assert.match(text, /market.*exhaustive|Market Exhaustive|ausgereizt/i);
+    assert.match(text, /context files|Kontextdateien|attached files|attachment/i);
+  }
+
+  assert.match(comparisonSkill, /--market-depth exhaustive/);
+  assert.match(cliRef, /--context-file/);
+});

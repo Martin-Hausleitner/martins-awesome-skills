@@ -288,7 +288,7 @@ function skillSource(path, root) {
     name,
     path: resolve(path),
     categoryPath,
-    hash: sha256(content),
+    hash: directoryHash(path),
   };
 }
 
@@ -338,7 +338,7 @@ function planAction(source, target, strategy) {
   }
 
   if (destStat.isDirectory() && existsSync(join(destination, "SKILL.md"))) {
-    const destHash = sha256(readFileSync(join(destination, "SKILL.md"), "utf8"));
+    const destHash = directoryHash(destination);
     if (destHash === source.hash) {
       return { ...action, status: "exists", reason: "same-skill-hash" };
     }
@@ -414,6 +414,39 @@ function countBy(items, key) {
 
 function sha256(content) {
   return createHash("sha256").update(content).digest("hex");
+}
+
+function directoryHash(path) {
+  const hash = createHash("sha256");
+  for (const file of listHashableFiles(path, path)) {
+    hash.update(file.relative);
+    hash.update("\0");
+    hash.update(readFileSync(file.absolute));
+    hash.update("\0");
+  }
+  return hash.digest("hex");
+}
+
+function listHashableFiles(path, root) {
+  const stat = lstatSync(path);
+  if (!stat.isDirectory()) return [];
+  const results = [];
+  for (const entry of readdirSync(path).sort()) {
+    if ([".git", "node_modules", "__pycache__", ".pytest_cache", ".DS_Store"].includes(entry)) {
+      continue;
+    }
+    const absolute = join(path, entry);
+    const childStat = lstatSync(absolute);
+    if (childStat.isDirectory()) {
+      results.push(...listHashableFiles(absolute, root));
+    } else if (childStat.isFile()) {
+      results.push({
+        absolute,
+        relative: relative(root, absolute).split("\\").join("/"),
+      });
+    }
+  }
+  return results;
 }
 
 function printableAction(action) {

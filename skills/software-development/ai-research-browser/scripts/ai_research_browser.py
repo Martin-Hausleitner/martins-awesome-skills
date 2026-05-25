@@ -2968,6 +2968,34 @@ def record_rate_limit_from_payload(
     return result
 
 
+def attach_rate_limit_status(
+    payload: dict[str, Any],
+    *,
+    browser: str,
+    profile: str,
+    provider: str,
+    mode: str,
+    state_path: Path,
+    source: str,
+    artifact_privacy: str = "redacted",
+) -> dict[str, Any]:
+    rate_limit_payload = record_rate_limit_from_payload(
+        payload,
+        browser=browser,
+        profile=profile,
+        provider=provider,
+        mode=mode,
+        state_path=state_path,
+        source=source,
+        artifact_privacy=artifact_privacy,
+    )
+    payload["rate_limit"] = rate_limit_payload
+    if rate_limit_payload.get("detected"):
+        payload.setdefault("pause_required", True)
+        payload.setdefault("resume_after", rate_limit_payload.get("entry", {}).get("cooldown_until"))
+    return payload
+
+
 def session_baseline_key(*, browser: str, profile: str, provider: str) -> str:
     return "|".join([normalize_browser_name(browser), slug(profile or "Default"), normalize_provider_name(provider)])
 
@@ -9295,6 +9323,16 @@ def cmd_workflow_run(args: argparse.Namespace) -> int:
             "allow_paid_quota_use": bool(getattr(args, "allow_paid_quota_use", False)),
         },
     )
+    payload = attach_rate_limit_status(
+        payload,
+        browser=str(browser.get("id") or args.browser),
+        profile=str(profile.get("directory") or args.profile),
+        provider=args.provider,
+        mode=args.mode,
+        state_path=Path(args.rate_limit_state).expanduser(),
+        source=args.output or "workflow-run",
+        artifact_privacy=artifact_privacy,
+    )
     oracle_mode = str(getattr(args, "oracle_mode", "assist") or "off")
     if getattr(args, "oracle_assist", False) and oracle_mode == "off":
         oracle_mode = "assist"
@@ -9362,7 +9400,7 @@ def cmd_workflow_live_run(args: argparse.Namespace) -> int:
         min_action_delay_ms=int(getattr(args, "min_action_delay_ms", 1500)),
         max_daily_paid_runs=int(getattr(args, "max_daily_paid_runs", 0)),
     )
-    payload["rate_limit"] = record_rate_limit_from_payload(
+    payload = attach_rate_limit_status(
         payload,
         browser=str(browser.get("id") or args.browser),
         profile=str(profile.get("directory") or args.profile),
@@ -9372,9 +9410,6 @@ def cmd_workflow_live_run(args: argparse.Namespace) -> int:
         source=args.output or "workflow-live-run",
         artifact_privacy=str(getattr(args, "artifact_privacy", "redacted")),
     )
-    if payload["rate_limit"].get("detected"):
-        payload.setdefault("pause_required", True)
-        payload.setdefault("resume_after", payload["rate_limit"].get("entry", {}).get("cooldown_until"))
     if args.output:
         write_json(Path(args.output).expanduser(), payload)
     print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -9603,6 +9638,16 @@ def cmd_workflow_sibling_run(args: argparse.Namespace) -> int:
             "launch": launch_status,
             "closed_after": False,
         }
+        payload = attach_rate_limit_status(
+            payload,
+            browser=str(browser.get("id") or args.browser),
+            profile=str(source_profile.get("directory") or args.profile),
+            provider=provider_id,
+            mode=args.mode,
+            state_path=Path(args.rate_limit_state).expanduser(),
+            source=args.output or "workflow-sibling-run",
+            artifact_privacy=str(getattr(args, "artifact_privacy", "redacted")),
+        )
     finally:
         if args.close_after:
             terminate_process(process)
@@ -11089,6 +11134,7 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_run.add_argument("--attachment", action="append", default=[], help="Local file/image path to attach through the provider file input when visible.")
     workflow_run.add_argument("--output", default="")
     add_hardening_cli_args(workflow_run)
+    workflow_run.add_argument("--rate-limit-state", default=str(default_rate_limit_state_path()), help="JSON state file for learned provider/browser/account cooldowns.")
     oracle_e2e_smoke = sub.add_parser("oracle-e2e-smoke")
     oracle_e2e_smoke.add_argument("--browser", default="brave")
     oracle_e2e_smoke.add_argument("--profile", default="work")
@@ -11172,6 +11218,7 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_sibling_run.add_argument("--attachment", action="append", default=[], help="Local file/image path to attach through the provider file input when visible.")
     workflow_sibling_run.add_argument("--output", default="")
     add_hardening_cli_args(workflow_sibling_run)
+    workflow_sibling_run.add_argument("--rate-limit-state", default=str(default_rate_limit_state_path()), help="JSON state file for learned provider/browser/account cooldowns.")
     sibling_profile_init = sub.add_parser("sibling-profile-init")
     sibling_profile_init.add_argument("--artifact-root", default="/tmp/hermes-ai-research-sibling-profile-init")
     sibling_profile_init.add_argument("--browser", default="brave")

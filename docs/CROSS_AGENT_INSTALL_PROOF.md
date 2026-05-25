@@ -78,6 +78,48 @@ Each listed destination has a `SKILL.md` for every core skill above.
 | OpenCode | `~/.config/opencode/skills/...` | flat | 6/6 |
 | Claude Code / Claude-adjacent | `~/.claude/skills/...` | flat | 6/6 |
 
+## Harness Usage Table
+
+This table explains how each harness is expected to find and use the skills.
+It is intentionally written as an operator-facing map, not just an install log.
+
+| Harness | Where the core skills were added | How a user/agent should find them | Best first skill to use | Practical use |
+|---|---|---|---|---|
+| Hermes | `~/.hermes/skills/software-development/...`, `~/.hermes/skills/productivity/...`, `~/.hermes/skills/research/...` | Hermes skill discovery should show category-preserved names such as `ai-research-browser` and `oracle-ai-research-e2e` | `ai-research-browser-cli` | Operate guarded Brave/Comet live-CDP checks, restart recovery, Deep Research/Agent status JSON, and local evidence |
+| Codex | `~/.codex/skills/<skill-name>/SKILL.md` | Restart Codex or refresh skill discovery, then ask for `ai-research-browser`, `oracle-ai-research-e2e`, or `cross-agent-skill-sync` | `ai-research-browser-cli` | Use the CLI recipes while keeping Computer Use/browser validation in the loop |
+| Generic Agents | `~/.agents/skills/<skill-name>/SKILL.md` | Agents that read `~/.agents/skills` can discover the flat skill names directly | `cross-agent-skill-sync` | Re-project or verify the shared skill set across other local roots |
+| OpenClaw workspace | `~/.openclaw/workspace/skills/<skill-name>/SKILL.md` | OpenClaw-style workspace skill discovery can load the flat skill folders | `ai-research-browser` | Run the browser workflow planning, preflight, and evidence-oriented automation helpers |
+| Gemini CLI | `~/.gemini/skills/<skill-name>/SKILL.md` | Gemini-compatible local skill discovery can load the flat folders | `comparison-deep-research` | Generate strict comparison prompts and scorecards before sending work to a research model |
+| OpenCode | `~/.config/opencode/skills/<skill-name>/SKILL.md` | OpenCode can discover flat skill folders from its config skill root | `ai-research-browser-cli` | Use reproducible CLI commands and local status artifacts while coding/debugging the harness |
+| Claude Code / Claude-adjacent | `~/.claude/skills/<skill-name>/SKILL.md` | Claude-compatible setups vary; this root acts as the default bridge and can be changed with `--target-root` | `oracle-ai-research-e2e` | Validate Oracle assist/reattach behavior and public-safe proof without bypassing local guards |
+
+## Which Skill Should An Agent Pick?
+
+| User intent | Skill to use first | Why |
+|---|---|---|
+| "Run or debug ChatGPT/Gemini/Comet browser automation" | `ai-research-browser-cli` | It has the shortest operational command recipes and safety rules |
+| "Understand or extend the whole browser automation stack" | `ai-research-browser` | It documents the capabilities, strategy router, provider guards, and E2E evidence model |
+| "Prove Oracle is integrated with the browser stack" | `oracle-ai-research-e2e` | It focuses on Oracle 0.13 commands, runner blocking, and reattach evidence |
+| "Format/publish a finished research result" | `ai-research-output-publisher` | It handles output cards, links, summaries, local export plans, and safe external-write boundaries |
+| "Compare many tools, repos, packages, or products" | `comparison-deep-research` | It produces linked comparison prompts with five weighted categories and `/100` scoring |
+| "Make every local agent see the same skills" | `cross-agent-skill-sync` | It is the dry-run-first installer/verifier across Hermes, Codex, OpenClaw, Gemini, OpenCode, Claude, and generic roots |
+
+## Skill Content Improvement Checklist
+
+These are the usability improvements that make the skills easier for different
+harnesses to apply consistently:
+
+| Improvement | Current status | Why it helps |
+|---|---|---|
+| Clear "when to use this skill" front matter | Present in all six core skills | Lets agents select the right skill without scanning the whole repo |
+| Short first command in each skill | Present | Gives operators a copyable entry point |
+| Safety rules before command recipes | Present for browser and Oracle skills | Prevents accidental provider submits, CAPTCHA bypass attempts, or private artifact commits |
+| Public-safe install proof | Present in this file | Shows the skill is installed without leaking local account/session data |
+| Harness-specific usage map | Present in this file | Helps Codex, Claude, Hermes, Gemini, OpenCode, OpenClaw, and generic agents pick the same workflow |
+| One-page "happy path" per harness | Future improvement | Could reduce onboarding friction further by adding a tiny Codex/Hermes/Claude example per target |
+| Machine-readable manifest of installed core skills | Future improvement | Would let agents verify install state without parsing Markdown |
+| More examples for non-browser skills | Future improvement | `comparison-deep-research` and publisher flows could include more sample outputs |
+
 ## Direct Verification
 
 To verify on a machine after install:

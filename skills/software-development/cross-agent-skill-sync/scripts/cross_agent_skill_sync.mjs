@@ -8,6 +8,7 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -38,14 +39,14 @@ for (const required of args.requireSkills) {
 const actions = [];
 for (const target of selectedTargets) {
   for (const source of selectedSources) {
-    actions.push(planAction(source, target, args.strategy));
+    actions.push(planAction(source, target, strategyForTarget(args.strategy, target)));
   }
 }
 
 if (args.execute) {
   for (const action of actions) {
     if (action.status === "install") {
-      executeAction(action, args.strategy);
+      executeAction(action, action.strategy);
       action.status = "installed";
     }
   }
@@ -323,6 +324,9 @@ function planAction(source, target, strategy) {
   const destStat = lstatSync(destination);
   if (destStat.isSymbolicLink()) {
     const real = realpathSync(destination);
+    if (strategy === "copy" && real === source.path) {
+      return { ...action, status: "install", reason: "replace-symlink-with-copy" };
+    }
     if (real === source.path) {
       return { ...action, status: "exists", reason: "already-linked" };
     }
@@ -340,6 +344,13 @@ function planAction(source, target, strategy) {
   return { ...action, status: "conflict", reason: "destination-not-skill-folder" };
 }
 
+function strategyForTarget(strategy, target) {
+  if (target.name === "hermes" && strategy === "symlink") {
+    return "copy";
+  }
+  return strategy;
+}
+
 function destinationFor(source, target) {
   if (target.layout === "preserve" && source.categoryPath) {
     return join(target.root, source.categoryPath, source.name);
@@ -352,6 +363,9 @@ function executeAction(action, strategy) {
   if (strategy === "symlink") {
     symlinkSync(action.source, action.destination, "dir");
     return;
+  }
+  if (existsSync(action.destination) && lstatSync(action.destination).isSymbolicLink()) {
+    rmSync(action.destination);
   }
   cpSync(action.source, action.destination, {
     recursive: true,

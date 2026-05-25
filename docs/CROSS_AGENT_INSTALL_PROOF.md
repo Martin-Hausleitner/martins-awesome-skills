@@ -70,7 +70,7 @@ Each listed destination has a `SKILL.md` for every core skill above.
 
 | Harness | Skill root | Projection | Verified core skills |
 |---|---|---:|---|
-| Hermes | `~/.hermes/skills/...` | preserve categories | 6/6 |
+| Hermes | `~/.hermes/skills/...` | preserve categories, copy projection | 6/6 |
 | Codex | `~/.codex/skills/...` | flat | 6/6 |
 | Generic Agents | `~/.agents/skills/...` | flat | 6/6 |
 | OpenClaw workspace | `~/.openclaw/workspace/skills/...` | flat | 6/6 |
@@ -85,7 +85,7 @@ It is intentionally written as an operator-facing map, not just an install log.
 
 | Harness | Where the core skills were added | How a user/agent should find them | Best first skill to use | Practical use |
 |---|---|---|---|---|
-| Hermes | `~/.hermes/skills/software-development/...`, `~/.hermes/skills/productivity/...`, `~/.hermes/skills/research/...` | Hermes skill discovery should show category-preserved names such as `ai-research-browser` and `oracle-ai-research-e2e` | `ai-research-browser-cli` | Operate guarded Brave/Comet live-CDP checks, restart recovery, Deep Research/Agent status JSON, and local evidence |
+| Hermes | `~/.hermes/skills/software-development/...`, `~/.hermes/skills/productivity/...`, `~/.hermes/skills/research/...` | Hermes skill discovery should show category-preserved names such as `ai-research-browser` and `oracle-ai-research-e2e`; this target uses copy projection because Hermes does not reliably list repo symlink skills | `ai-research-browser-cli` | Operate guarded Brave/Comet live-CDP checks, restart recovery, Deep Research/Agent status JSON, and local evidence |
 | Codex | `~/.codex/skills/<skill-name>/SKILL.md` | Restart Codex or refresh skill discovery, then ask for `ai-research-browser`, `oracle-ai-research-e2e`, or `cross-agent-skill-sync` | `ai-research-browser-cli` | Use the CLI recipes while keeping Computer Use/browser validation in the loop |
 | Generic Agents | `~/.agents/skills/<skill-name>/SKILL.md` | Agents that read `~/.agents/skills` can discover the flat skill names directly | `cross-agent-skill-sync` | Re-project or verify the shared skill set across other local roots |
 | OpenClaw workspace | `~/.openclaw/workspace/skills/<skill-name>/SKILL.md` | OpenClaw-style workspace skill discovery can load the flat skill folders | `ai-research-browser` | Run the browser workflow planning, preflight, and evidence-oriented automation helpers |

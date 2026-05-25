@@ -90,6 +90,40 @@ test("symlink strategy creates links and redacts home paths by default", () => {
   assert.ok(!reportText.includes(fixture));
 });
 
+test("hermes target uses copy projection even when symlink strategy is requested", () => {
+  const fixture = mkdtempSync(join(tmpdir(), "cross-agent-skill-sync-"));
+  const sourceRoot = join(fixture, "repo", "skills");
+  const skillDir = join(sourceRoot, "software-development", "demo-skill");
+  const targetRoot = join(fixture, ".hermes", "skills");
+  const outFile = join(fixture, "report.json");
+
+  mkdirSync(skillDir, { recursive: true });
+  mkdirSync(targetRoot, { recursive: true });
+  writeSkill(skillDir, "demo-skill");
+
+  execFileSync(process.execPath, [
+    script,
+    "--source-root",
+    sourceRoot,
+    "--target-root",
+    `hermes=${targetRoot}:preserve`,
+    "--target",
+    "hermes",
+    "--strategy",
+    "symlink",
+    "--execute",
+    "--out",
+    outFile,
+  ], { cwd: repoRoot, stdio: "pipe", env: { ...process.env, HOME: fixture } });
+
+  const destination = join(targetRoot, "software-development", "demo-skill");
+  assert.equal(lstatSync(destination).isSymbolicLink(), false);
+  assert.ok(existsSync(join(destination, "SKILL.md")));
+
+  const report = JSON.parse(readFileSync(outFile, "utf8"));
+  assert.equal(report.actions[0].strategy, "copy");
+});
+
 test("required missing skill is reported and can fail the run", () => {
   const fixture = mkdtempSync(join(tmpdir(), "cross-agent-skill-sync-"));
   const sourceRoot = join(fixture, "skills");

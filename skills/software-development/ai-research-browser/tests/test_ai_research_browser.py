@@ -5089,6 +5089,153 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertIn(key, stored_state["entries"])
         self.assertEqual(stored_state["entries"][key]["learned_wait_seconds"], 180)
 
+    def test_workflow_run_blocks_active_rate_limit_before_live_runner(self):
+        module = load_module()
+        root = Path(tempfile.mkdtemp())
+        state_path = root / "rate-limit-state.json"
+        state = {"version": 1, "entries": {}, "history": []}
+        key = module.rate_limit_key(
+            browser="brave",
+            profile="Default",
+            provider="chatgpt",
+            mode="chat",
+            account="work@example.test",
+        )
+        module.record_rate_limit(
+            state,
+            key,
+            wait_seconds=600,
+            browser="brave",
+            profile="Default",
+            provider="chatgpt",
+            mode="chat",
+            reason="rate-limit",
+            source="/tmp/status.json",
+        )
+        module.write_rate_limit_state(state_path, state)
+        calls = {"preflight": 0, "live": 0}
+        original_discover = module.discover_browsers
+        original_preflight = module.build_real_session_preflight
+        original_live = module.agent_browser_live_workflow_run
+        module.discover_browsers = lambda: [
+            {
+                "id": "brave",
+                "display_name": "Brave Browser",
+                "binary_path": "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+                "user_data_dir": str(root / "brave"),
+                "default_port": 9223,
+                "profiles": [{"directory": "Default", "name": "Work", "path": str(root / "brave" / "Default")}],
+            }
+        ]
+
+        def fake_preflight(**kwargs):
+            calls["preflight"] += 1
+            return {"can_attach": True, "blockers": []}
+
+        def fake_live(**kwargs):
+            calls["live"] += 1
+            return {"status": "verified"}
+
+        module.build_real_session_preflight = fake_preflight
+        module.agent_browser_live_workflow_run = fake_live
+        try:
+            out = StringIO()
+            with redirect_stdout(out):
+                exit_code = module.main(
+                    [
+                        "workflow-run",
+                        "--browser",
+                        "brave",
+                        "--profile",
+                        "Work",
+                        "--provider",
+                        "chatgpt",
+                        "--mode",
+                        "chat",
+                        "--prompt",
+                        "diagnostic",
+                        "--cdp-port",
+                        "9223",
+                        "--rate-limit-state",
+                        str(state_path),
+                    ]
+                )
+        finally:
+            module.discover_browsers = original_discover
+            module.build_real_session_preflight = original_preflight
+            module.agent_browser_live_workflow_run = original_live
+
+        payload = json.loads(out.getvalue())
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(payload["status"], "rate-limited")
+        self.assertTrue(payload["pause_required"])
+        self.assertEqual(payload["rate_limit"]["key"], key)
+        self.assertTrue(payload["rate_limit"]["active_before_start"])
+        self.assertEqual(calls, {"preflight": 0, "live": 0})
+
+    def test_workflow_live_run_blocks_active_rate_limit_before_ui_action(self):
+        module = load_module()
+        root = Path(tempfile.mkdtemp())
+        state_path = root / "rate-limit-state.json"
+        state = {"version": 1, "entries": {}, "history": []}
+        key = module.rate_limit_key(browser="brave", profile="Default", provider="chatgpt", mode="chat")
+        module.record_rate_limit(
+            state,
+            key,
+            wait_seconds=600,
+            browser="brave",
+            profile="Default",
+            provider="chatgpt",
+            mode="chat",
+            reason="rate-limit",
+            source="/tmp/status.json",
+        )
+        module.write_rate_limit_state(state_path, state)
+        calls = {"live": 0}
+        original_discover = module.discover_browsers
+        original_live = module.agent_browser_live_workflow_run
+        module.discover_browsers = lambda: [
+            {
+                "id": "brave",
+                "display_name": "Brave Browser",
+                "binary_path": "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+                "user_data_dir": str(root / "brave"),
+                "default_port": 9223,
+                "profiles": [{"directory": "Default", "name": "Work", "path": str(root / "brave" / "Default")}],
+            }
+        ]
+        module.agent_browser_live_workflow_run = lambda **kwargs: calls.__setitem__("live", calls["live"] + 1) or {"status": "verified"}
+        try:
+            out = StringIO()
+            with redirect_stdout(out):
+                exit_code = module.main(
+                    [
+                        "workflow-live-run",
+                        "--browser",
+                        "brave",
+                        "--profile",
+                        "Work",
+                        "--provider",
+                        "chatgpt",
+                        "--mode",
+                        "chat",
+                        "--prompt",
+                        "diagnostic",
+                        "--cdp-port",
+                        "9223",
+                        "--rate-limit-state",
+                        str(state_path),
+                    ]
+                )
+        finally:
+            module.discover_browsers = original_discover
+            module.agent_browser_live_workflow_run = original_live
+
+        payload = json.loads(out.getvalue())
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(payload["status"], "rate-limited")
+        self.assertEqual(calls["live"], 0)
+
     def test_workflow_suite_row_timeout_marks_timeout_and_continues(self):
         module = load_module()
         root = Path(tempfile.mkdtemp())
@@ -6228,6 +6375,81 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertEqual(payload["execution_mode"], "sibling-cdp-automation-profile")
         self.assertIn(key, stored_state["entries"])
         self.assertEqual(stored_state["entries"][key]["learned_wait_seconds"], 240)
+
+    def test_workflow_sibling_run_blocks_active_rate_limit_before_launch(self):
+        module = load_module()
+        root = Path(tempfile.mkdtemp())
+        state_path = root / "rate-limit-state.json"
+        state = {"version": 1, "entries": {}, "history": []}
+        key = module.rate_limit_key(browser="brave", profile="Default", provider="chatgpt", mode="chat")
+        module.record_rate_limit(
+            state,
+            key,
+            wait_seconds=600,
+            browser="brave",
+            profile="Default",
+            provider="chatgpt",
+            mode="chat",
+            reason="rate-limit",
+            source="/tmp/status.json",
+        )
+        module.write_rate_limit_state(state_path, state)
+        source_root = root / "source"
+        source_profile = source_root / "Default"
+        source_profile.mkdir(parents=True)
+        (source_root / "Local State").write_text("{}", encoding="utf-8")
+        (source_profile / "Preferences").write_text("{}", encoding="utf-8")
+        calls = {"start": 0, "live": 0}
+        original_discover = module.discover_browsers
+        original_start = module.start_sibling_cdp_browser
+        original_live = module.agent_browser_live_workflow_run
+        module.discover_browsers = lambda: [
+            {
+                "id": "brave",
+                "display_name": "Brave Browser",
+                "binary_path": "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+                "user_data_dir": str(source_root),
+                "default_port": 9223,
+                "profiles": [{"directory": "Default", "name": "Work", "path": str(source_profile)}],
+            }
+        ]
+        module.start_sibling_cdp_browser = lambda **kwargs: calls.__setitem__("start", calls["start"] + 1) or (None, {"ok": True})
+        module.agent_browser_live_workflow_run = lambda **kwargs: calls.__setitem__("live", calls["live"] + 1) or {"status": "verified"}
+        try:
+            out = StringIO()
+            with redirect_stdout(out):
+                exit_code = module.main(
+                    [
+                        "workflow-sibling-run",
+                        "--browser",
+                        "brave",
+                        "--profile",
+                        "Work",
+                        "--provider",
+                        "chatgpt",
+                        "--mode",
+                        "chat",
+                        "--prompt",
+                        "diagnostic",
+                        "--cdp-port",
+                        "9444",
+                        "--sibling-user-data",
+                        str(root / "sibling" / "user-data"),
+                        "--rate-limit-state",
+                        str(state_path),
+                    ]
+                )
+        finally:
+            module.discover_browsers = original_discover
+            module.start_sibling_cdp_browser = original_start
+            module.agent_browser_live_workflow_run = original_live
+
+        payload = json.loads(out.getvalue())
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(payload["status"], "rate-limited")
+        self.assertEqual(payload["execution_mode"], "sibling-cdp-automation-profile")
+        self.assertFalse(payload["closed_after"])
+        self.assertEqual(calls, {"start": 0, "live": 0})
 
     def test_sibling_workflow_escalates_cookie_evidence_wall_to_real_session_required(self):
         module = load_module()

@@ -276,7 +276,11 @@ Use:
 --rate-limit-state ~/.cache/ai-research-browser/rate-limit-state.json
 ```
 
-When a challenge is detected, a conservative cooldown is recorded. Use fallback only between verified accounts:
+When a challenge is detected, a conservative cooldown is recorded. `workflow-run`,
+`workflow-live-run`, `workflow-sibling-run`, and `workflow-suite` all check that
+state before starting provider UI work; active entries return `status=rate-limited`
+with `pause_required` and `resume_after`. Use fallback only between verified
+accounts:
 
 ```bash
 --rate-limit-fallback --allow-rate-limit-fallback

@@ -133,7 +133,7 @@ See [docs/SKILL_CATALOG.md](docs/SKILL_CATALOG.md) for the longer catalog notes 
 Clone the repo:
 
 ```bash
-git clone https://github.com/example/public-agent-skills.git
+git clone https://github.com/<owner>/<public-agent-skills>.git
 cd public-agent-skills
 ```
 

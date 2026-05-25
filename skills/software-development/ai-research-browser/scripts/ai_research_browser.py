@@ -2842,6 +2842,79 @@ def active_rate_limit(state: dict[str, Any], key: str, *, now: float | None = No
     return {**entry, "remaining_seconds": remaining}
 
 
+def active_rate_limit_for_scope(
+    state: dict[str, Any],
+    *,
+    browser: str,
+    profile: str,
+    provider: str,
+    mode: str,
+    now: float | None = None,
+) -> dict[str, Any] | None:
+    """Return the most conservative active cooldown for a workflow scope.
+
+    Account-specific entries cannot always be matched before opening provider UI,
+    so a single-command workflow must also honor any active account entry that
+    shares the same browser/profile/provider/mode prefix.
+    """
+    now = time.time() if now is None else now
+    base_key = rate_limit_key(browser=browser, profile=profile, provider=provider, mode=mode)
+    candidates: list[dict[str, Any]] = []
+    direct = active_rate_limit(state, base_key, now=now)
+    if direct:
+        candidates.append(direct)
+    for key, entry in (state.get("entries") or {}).items():
+        if key == base_key or not str(key).startswith(f"{base_key}|"):
+            continue
+        scoped = active_rate_limit(state, str(key), now=now)
+        if scoped:
+            candidates.append(scoped)
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: float(item.get("cooldown_until", 0) or 0))
+
+
+def active_rate_limit_block_payload(
+    *,
+    state_path: Path,
+    browser: str,
+    profile: str,
+    provider: str,
+    mode: str,
+    source: str,
+) -> dict[str, Any] | None:
+    state_file = state_path.expanduser()
+    state = load_rate_limit_state(state_file)
+    cleanup_expired_rate_limits(state)
+    cooldown = active_rate_limit_for_scope(
+        state,
+        browser=browser,
+        profile=profile,
+        provider=provider,
+        mode=mode,
+    )
+    if not cooldown:
+        if state_file.exists():
+            write_rate_limit_state(state_file, state)
+        return None
+    payload = {
+        "status": "rate-limited",
+        "blocker": "active provider/account cooldown; wait before retrying this workflow",
+        "pause_required": True,
+        "resume_after": cooldown.get("cooldown_until"),
+        "rate_limit": {
+            "detected": True,
+            "state_path": str(state_file),
+            "source": source,
+            "key": cooldown.get("key"),
+            "entry": cooldown,
+            "active_before_start": True,
+        },
+    }
+    write_rate_limit_state(state_file, state)
+    return payload
+
+
 def record_rate_limit(
     state: dict[str, Any],
     key: str,
@@ -9139,6 +9212,21 @@ def cmd_workflow_run(args: argparse.Namespace) -> int:
             write_json(Path(args.output).expanduser(), payload)
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 1
+    rate_limit_block = active_rate_limit_block_payload(
+        state_path=Path(args.rate_limit_state).expanduser(),
+        browser=str(browser.get("id") or args.browser),
+        profile=str(profile.get("directory") or args.profile),
+        provider=args.provider,
+        mode=args.mode,
+        source="workflow-run-preflight",
+    )
+    if rate_limit_block:
+        artifact_privacy = str(getattr(args, "artifact_privacy", "redacted"))
+        rate_limit_block.setdefault("privacy", {"artifact_privacy": artifact_privacy})
+        if args.output:
+            write_json(Path(args.output).expanduser(), rate_limit_block)
+        print(json.dumps(rate_limit_block, ensure_ascii=False, indent=2))
+        return 1
     cdp_port = int(args.cdp_port or browser.get("default_port") or 0)
     preflight = build_real_session_preflight(browser=browser, profile=profile, provider=args.provider, port=cdp_port, ignore_existing_non_cdp=False)
     strategy = choose_workflow_strategy(
@@ -9376,6 +9464,21 @@ def cmd_workflow_live_run(args: argparse.Namespace) -> int:
             write_json(Path(args.output).expanduser(), payload)
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return 1
+    rate_limit_block = active_rate_limit_block_payload(
+        state_path=Path(args.rate_limit_state).expanduser(),
+        browser=str(browser.get("id") or args.browser),
+        profile=str(profile.get("directory") or args.profile),
+        provider=args.provider,
+        mode=args.mode,
+        source="workflow-live-run-preflight",
+    )
+    if rate_limit_block:
+        artifact_privacy = str(getattr(args, "artifact_privacy", "redacted"))
+        rate_limit_block.setdefault("privacy", {"artifact_privacy": artifact_privacy})
+        if args.output:
+            write_json(Path(args.output).expanduser(), rate_limit_block)
+        print(json.dumps(rate_limit_block, ensure_ascii=False, indent=2))
+        return 1
     payload = agent_browser_live_workflow_run(
         browser=browser,
         profile=profile,
@@ -9540,6 +9643,21 @@ def cmd_workflow_sibling_run(args: argparse.Namespace) -> int:
         if args.output:
             write_json(Path(args.output).expanduser(), payload)
         print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 1
+    rate_limit_block = active_rate_limit_block_payload(
+        state_path=Path(args.rate_limit_state).expanduser(),
+        browser=str(browser.get("id") or args.browser),
+        profile=str(source_profile.get("directory") or args.profile),
+        provider=provider_id,
+        mode=args.mode,
+        source="workflow-sibling-run-preflight",
+    )
+    if rate_limit_block:
+        rate_limit_block["execution_mode"] = "sibling-cdp-automation-profile"
+        rate_limit_block["closed_after"] = False
+        if args.output:
+            write_json(Path(args.output).expanduser(), rate_limit_block)
+        print(json.dumps(rate_limit_block, ensure_ascii=False, indent=2))
         return 1
     extension_ids = requested_extension_ids(getattr(args, "include_extension", None), include_ai_exporter=getattr(args, "include_ai_exporter", False))
     sibling_user_data = Path(args.sibling_user_data).expanduser() if args.sibling_user_data else default_sibling_user_data_dir(

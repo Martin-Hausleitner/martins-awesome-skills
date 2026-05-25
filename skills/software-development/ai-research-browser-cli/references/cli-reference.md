@@ -132,7 +132,7 @@ Expected success:
 Example ports used in the recipes:
 
 - Brave work-profile live CDP: `9223`
-- Comet live CDP: commonly `9333`, or another verified port if configured locally
+- Comet live CDP: preferred `9333` only when owner/profile verification proves it is Comet, otherwise a recovery-selected free port
 - Chrome: `9224`
 - Opera: `9226`
 
@@ -142,9 +142,14 @@ Ambiguous Deep Research intent:
 
 - If the user says only "Starte Deep Research" / "start Deep Research", route to
   Comet + Gemini Deep Research first.
-- Use `--browser comet --profile work --provider google --mode deep-research
-  --cdp-port 9333`.
+- Use `--browser comet --profile work --provider google --mode deep-research`
+  with preferred port `9333` only after owner/profile verification.
 - Run `real-session-preflight` before `workflow-run`.
+- If `real-session-preflight` reports `port_collision.detected=true` because
+  `9333` belongs to VS Code, Code Helper, another browser, or a non-CDP listener,
+  first use the reported `attach_port` when `alternate_cdp.found=true`; otherwise
+  run `browser-cdp-recover --browser comet --profile work --provider google
+  --port 9333 --dry-run` and use the recovered free port for the actual workflow.
 - Do not submit until the user has supplied the real research prompt and
   `--allow-paid-quota-use` / confirmation are appropriate.
 

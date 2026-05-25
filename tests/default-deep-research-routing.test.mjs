@@ -20,7 +20,10 @@ test("ambiguous Deep Research intent routes to Comet Gemini preflight first", ()
   }
 
   assert.match(browserSkill, /--browser comet[\s\S]*--provider google[\s\S]*--port 9333/);
-  assert.match(cliSkill, /--browser comet --profile work --provider google --mode deep-research --cdp-port 9333/);
+  assert.match(browserSkill, /port_collision\.detected=true|occupied by VS Code|recovered free port/i);
+  assert.match(cliSkill, /--browser comet --profile work --provider google --mode deep-research/);
+  assert.match(cliSkill, /port `9333` is not proof of Comet/i);
+  assert.match(cliSkill, /browser-cdp-recover[\s\S]*--browser comet[\s\S]*--provider google[\s\S]*--port 9333[\s\S]*--dry-run/);
   assert.match(cliSkill, /do not route to a\s+Brave-first fallback/i);
 });
 

@@ -116,7 +116,8 @@ Latest public-safe routing check for the minimal German prompt
 | Three isolated agents before the clarification | Chose Brave-first or the older Google specialist fallback | The intent was ambiguous and did not reliably pick the requested Comet/Gemini route |
 | Skill docs and local specialist hint updated | Comet + Gemini Deep Research is the documented default for unnamed Deep Research | Future agents have a single target route to follow |
 | Fresh isolated agent after the update | Reported Comet/Gemini ready and requested the concrete research prompt | The default intent now resolves to the requested Comet/Gemini path without submitting quota work |
-| Local dry preflight | Comet CDP owner/profile verified on port `9333`; no blockers; Gemini session evidence likely logged in | The route is attachable before any paid Deep Research submit |
+| Local dry preflight | Comet/Gemini preflight is the required first step; port `9333` is preferred only when owner/profile verified | The route must prove attachability before any paid Deep Research submit |
+| Port collision handling | If `9333` belongs to VS Code, Code Helper, another browser, or a non-CDP listener, the preflight now discovers a real running Comet `attach_port` when possible; otherwise it requires `browser-cdp-recover --dry-run` so a free CDP port is selected | Future agents should not block on the occupied port or treat it as Comet |
 
 ## Skill Content Improvement Checklist
 

@@ -23,7 +23,7 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 ## Operating Rules
 
 - Prefer real live CDP sessions for true E2E. The examples use a Brave work profile on port `9223`; always verify the CDP owner/profile instead of trusting a port number.
-- If the user only says "Starte Deep Research" / "start Deep Research" and does not name a browser or provider, default to Comet + Gemini Deep Research: `--browser comet --profile work --provider google --mode deep-research --cdp-port 9333`, with preflight first and no `--submit` until the actual research prompt and quota permission are explicit.
+- If the user only says "Starte Deep Research" / "start Deep Research" and does not name a browser or provider, default to Comet + Gemini Deep Research: `--browser comet --profile work --provider google --mode deep-research`, with preferred port `9333` only after owner/profile verification. Preflight first, no `--submit` until the actual research prompt and quota permission are explicit.
 - Never claim a provider works until the status JSON proves login/account/plan, an automation `target_id`, screenshot evidence, output text, and no challenge/rate-limit wall.
 - Do not use temporary clone/sibling success as proof of a real account login. Clone/sibling runs are diagnostic or explicit fallback only.
 - Before typing or submitting, require provider inventory: signed-in state, visible account, plan, model/feature evidence, screenshot, and no CAPTCHA/rate-limit/challenge.
@@ -46,6 +46,23 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
   --provider google \
   --port 9333 \
   --output /tmp/arb-preflight-comet-gemini.json
+```
+
+Port `9333` is not proof of Comet. If preflight says `port_collision.detected=true`
+or shows VS Code/Code Helper/non-CDP ownership on that port, do not block on
+`9333` and do not ask the user to manually reuse it. If the preflight also shows
+`alternate_cdp.found=true`, use its `attach_port` directly. Otherwise produce a
+recovery dry-run that lets the CLI choose a free loopback CDP port for the real
+Comet profile:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py browser-cdp-recover \
+  --browser comet \
+  --profile work \
+  --provider google \
+  --port 9333 \
+  --dry-run \
+  --output /tmp/arb-recover-comet-gemini.json
 ```
 
 Only after the preflight proves the real account, plan, feature, screenshot, and

@@ -30,12 +30,15 @@ Deep Research in Comet first:
 - profile: `work`
 - provider: `google` / `gemini`
 - mode: `deep-research`
-- standard Comet live-CDP port: `9333`, but still verify the owner/profile
+- preferred Comet live-CDP port: `9333` only when owner/profile verification proves it is Comet
 - first action: `real-session-preflight` or `workflow-run` without `--submit`
 
 Do not choose Brave, ChatGPT, sibling, clone, or a broad provider suite for this
 ambiguous prompt unless the user explicitly names that target or Comet/Gemini is
-blocked and an explicit fallback is allowed. A safe first command is:
+blocked and an explicit fallback is allowed. If port `9333` is occupied by VS Code,
+Code Helper, another browser, or any non-CDP listener, do not treat that port as
+Comet and do not ask the user to use it; run restart recovery dry-run so the CLI
+can allocate a free CDP port for the real Comet profile. A safe first command is:
 
 ```bash
 python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py real-session-preflight \
@@ -44,6 +47,21 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
   --provider google \
   --port 9333 \
   --output /tmp/hermes-comet-gemini-preflight.json
+```
+
+If the preflight returns `port_collision.detected=true`, immediately produce a
+safe recovery plan instead of blocking on the occupied port. If the same preflight
+also reports an `attach_port` from `alternate_cdp.found=true`, use that port
+directly and skip restart recovery:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py browser-cdp-recover \
+  --browser comet \
+  --profile work \
+  --provider google \
+  --port 9333 \
+  --dry-run \
+  --output /tmp/hermes-comet-gemini-recover.json
 ```
 
 ## What It Does
@@ -253,7 +271,7 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
   --output /tmp/hermes-real-session-preflight-comet-gemini.json
 ```
 
-`real-session-preflight` reports `can_attach`, CDP endpoint attempts, port owner, running-browser blockers, and provider session evidence. If a disposable clone lands on a sign-in page while the real profile still has local provider session evidence, workflow runs are marked `real-session-required`. Do not claim Gemini Deep Research, ChatGPT Agent, or ChatGPT Deep Research started until a real CDP-enabled browser session or a dedicated minimized browser window confirms the provider UI state.
+`real-session-preflight` reports `can_attach`, `attach_port`, CDP endpoint attempts, port owner, running-browser blockers, `port_collision`, `alternate_cdp`, and provider session evidence. Port `9333` is only the preferred Comet port; if it belongs to VS Code, Code Helper, another browser, or any non-CDP listener, first use a discovered `attach_port` from the running Comet process if available, otherwise use `browser-cdp-recover --dry-run` and the recovered free port instead of treating the occupied port as Comet. If a disposable clone lands on a sign-in page while the real profile still has local provider session evidence, workflow runs are marked `real-session-required`. Do not claim Gemini Deep Research, ChatGPT Agent, or ChatGPT Deep Research started until a real CDP-enabled browser session or a dedicated minimized browser window confirms the provider UI state.
 
 The profile alias `work` resolves by exact directory/name/account first, then by Work/Arbeit labels, and finally to the only discovered profile when a browser has exactly one local profile. This lets single-profile Comet/Komet setups run through `--profile work` without hard-coding a machine-specific directory name.
 

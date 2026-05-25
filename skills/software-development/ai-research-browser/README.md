@@ -505,17 +505,31 @@ Start Gemini Deep Research. If the user only says "Starte Deep Research" and
 does not name a browser/provider, default to Comet + Gemini first:
 
 ```bash
-python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py workflow-run \
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py real-session-preflight \
   --browser comet \
   --profile work \
   --provider google \
-  --mode deep-research \
-  --prompt "Use Deep Research to compare current browser automation options for logged-in AI accounts." \
-  --cdp-port 9333 \
-  --submit \
-  --confirm-start \
-  --output /tmp/gemini-deep-research-workflow.json
+  --port 9333 \
+  --output /tmp/gemini-deep-research-preflight.json
 ```
+
+Port `9333` is only the preferred Comet CDP port. If the preflight reports
+`port_collision.detected=true` because VS Code, Code Helper, another browser, or
+a non-CDP listener owns that port, run a recovery dry-run and use the recovered
+free port for the actual workflow:
+
+```bash
+python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py browser-cdp-recover \
+  --browser comet \
+  --profile work \
+  --provider google \
+  --port 9333 \
+  --dry-run \
+  --output /tmp/gemini-deep-research-recover.json
+```
+
+Only after the real Comet/Gemini session is verified should a paid run use
+`workflow-run --allow-paid-quota-use --submit --confirm-start`.
 
 Attach an image or file to a provider composer when a visible file input exists:
 

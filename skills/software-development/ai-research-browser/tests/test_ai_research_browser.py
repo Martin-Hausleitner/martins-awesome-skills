@@ -676,6 +676,68 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertEqual(sibling_calls[0]["min_action_delay_ms"], 2500)
         self.assertEqual(sibling_calls[0]["max_daily_paid_runs"], 3)
 
+    def test_workflow_run_live_cdp_uses_preflight_attach_port(self):
+        module = load_module()
+        original_discover = module.discover_browsers
+        original_preflight = module.build_real_session_preflight
+        original_live = module.agent_browser_live_workflow_run
+        captured = {}
+        module.discover_browsers = lambda: [
+            {
+                "id": "comet",
+                "display_name": "Comet",
+                "default_port": 9333,
+                "profiles": [{"directory": "Default", "name": "Neptune", "path": "/tmp/comet/Default"}],
+            }
+        ]
+        module.build_real_session_preflight = lambda **kwargs: {
+            "can_attach": True,
+            "port": 9333,
+            "attach_port": 55780,
+            "blockers": [],
+            "primary_port_blockers": ["cdp-port-owned-by-unexpected-process"],
+            "alternate_cdp": {"found": True, "port": 55780, "cdp_owner_verification": {"ok": True}},
+            "session_evidence": {"confidence": "likely-logged-in"},
+        }
+
+        def fake_live(**kwargs):
+            captured.update(kwargs)
+            return {"status": "opened", "provider": kwargs["provider"], "mode": kwargs["mode"]}
+
+        module.agent_browser_live_workflow_run = fake_live
+        try:
+            out = StringIO()
+            with redirect_stdout(out):
+                exit_code = module.main(
+                    [
+                        "workflow-run",
+                        "--browser",
+                        "comet",
+                        "--profile",
+                        "work",
+                        "--provider",
+                        "google",
+                        "--mode",
+                        "chat",
+                        "--prompt",
+                        "diagnostic",
+                        "--cdp-port",
+                        "9333",
+                    ]
+                )
+        finally:
+            module.discover_browsers = original_discover
+            module.build_real_session_preflight = original_preflight
+            module.agent_browser_live_workflow_run = original_live
+
+        payload = json.loads(out.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(captured["cdp_port"], 55780)
+        self.assertEqual(payload["status"], "opened")
+        self.assertTrue(payload["cdp_owner_verification"]["ok"])
+        self.assertFalse(payload["requested_cdp_owner_verification"].get("ok", False))
+        self.assertEqual(payload["oracle"]["evidence"]["remote_chrome"], "127.0.0.1:55780")
+
     def test_real_session_preflight_blocks_wrong_cdp_port_owner_even_when_endpoint_answers(self):
         module = load_module()
         original_endpoint = module.detect_cdp_endpoint
@@ -3402,10 +3464,12 @@ class AiResearchBrowserTest(unittest.TestCase):
         original_owner = module.lsof_port_owner
         original_args = module.browser_main_process_args
         original_evidence = module.provider_session_evidence
+        original_find_port = module.find_available_port
         module.detect_cdp_endpoint = lambda port, hosts=None: {"ok": False, "base": "", "version": {}, "attempts": []}
         module.lsof_port_owner = lambda port: {"port": port, "listening": True, "command": "Code\\x20H", "pid": "123", "raw": ""}
         module.browser_main_process_args = lambda browser: ["/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"]
         module.provider_session_evidence = lambda profile, provider: {"provider": provider, "confidence": "likely-logged-in"}
+        module.find_available_port = lambda: 9523
         try:
             payload = module.build_real_session_preflight(
                 browser={"id": "brave", "display_name": "Brave Browser", "default_port": 9223, "binary_path": "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"},
@@ -3417,12 +3481,94 @@ class AiResearchBrowserTest(unittest.TestCase):
             module.lsof_port_owner = original_owner
             module.browser_main_process_args = original_args
             module.provider_session_evidence = original_evidence
+            module.find_available_port = original_find_port
 
         self.assertFalse(payload["can_attach"])
         self.assertIn("cdp-port-owned-by-unexpected-process", payload["blockers"])
         self.assertFalse(payload["cdp_owner_verification"]["ok"])
         self.assertIn("browser-running-without-remote-debugging", payload["blockers"])
         self.assertEqual(payload["session_evidence"]["confidence"], "likely-logged-in")
+        self.assertTrue(payload["port_collision"]["detected"])
+        self.assertEqual(payload["port_collision"]["requested_port"], 9223)
+        self.assertEqual(payload["port_collision"]["suggested_cdp_port"], 9523)
+        self.assertIn("browser-cdp-recover", payload["port_collision"]["recovery_command"])
+        self.assertTrue(any("occupied by" in step and "owner verification" in step for step in payload["safe_next_steps"]))
+
+    def test_real_session_preflight_uses_alternate_running_cdp_port_when_default_is_occupied(self):
+        module = load_module()
+        original_endpoint = module.detect_cdp_endpoint
+        original_owner = module.lsof_port_owner
+        original_process_args = module.process_args_for_pid
+        original_main_args = module.browser_main_process_args
+        original_evidence = module.provider_session_evidence
+        original_find_port = module.find_available_port
+        comet_args = (
+            "/Applications/Comet.app/Contents/MacOS/Comet "
+            "--remote-debugging-address=127.0.0.1 "
+            "--remote-debugging-port=55780 "
+            "--user-data-dir=/Users/mh/Library/Application Support/Comet "
+            "--profile-directory=Default"
+        )
+
+        module.detect_cdp_endpoint = lambda port, hosts=None: {
+            "ok": port == 55780,
+            "base": f"http://127.0.0.1:{port}" if port == 55780 else "",
+            "version": {"Browser": "Comet"} if port == 55780 else {},
+            "attempts": [],
+        }
+        module.lsof_port_owner = lambda port: (
+            {"port": port, "listening": True, "command": "Code\\x20H", "pid": "123", "raw": ""}
+            if port == 9333
+            else {"port": port, "listening": True, "command": "Comet", "pid": "456", "raw": ""}
+        )
+        module.process_args_for_pid = lambda pid: "" if str(pid) == "123" else comet_args
+        module.browser_main_process_args = lambda browser: [comet_args]
+        module.provider_session_evidence = lambda profile, provider: {"provider": provider, "confidence": "likely-logged-in"}
+        module.find_available_port = lambda: 58689
+        try:
+            payload = module.build_real_session_preflight(
+                browser={
+                    "id": "comet",
+                    "display_name": "Comet",
+                    "default_port": 9333,
+                    "binary_path": "/Applications/Comet.app/Contents/MacOS/Comet",
+                    "app_path": "/Applications/Comet.app",
+                    "user_data_dir": "/Users/mh/Library/Application Support/Comet",
+                },
+                profile={"directory": "Default", "name": "Neptune"},
+                provider="google",
+                port=9333,
+            )
+        finally:
+            module.detect_cdp_endpoint = original_endpoint
+            module.lsof_port_owner = original_owner
+            module.process_args_for_pid = original_process_args
+            module.browser_main_process_args = original_main_args
+            module.provider_session_evidence = original_evidence
+            module.find_available_port = original_find_port
+
+        self.assertTrue(payload["can_attach"])
+        self.assertEqual(payload["port"], 9333)
+        self.assertEqual(payload["attach_port"], 55780)
+        self.assertEqual(payload["blockers"], [])
+        self.assertIn("cdp-port-owned-by-unexpected-process", payload["primary_port_blockers"])
+        self.assertTrue(payload["port_collision"]["detected"])
+        self.assertTrue(payload["alternate_cdp"]["found"])
+        self.assertTrue(payload["alternate_cdp"]["cdp_owner_verification"]["ok"])
+        self.assertTrue(any("avoid restart recovery" in step for step in payload["safe_next_steps"]))
+
+    def test_extract_chromium_arg_keeps_unquoted_paths_with_spaces(self):
+        module = load_module()
+        args = (
+            "/Applications/Comet.app/Contents/MacOS/Comet "
+            "--remote-debugging-port=55780 "
+            "--user-data-dir=/Users/mh/Library/Application Support/Comet "
+            "--profile-directory=Default --restore-last-session"
+        )
+
+        self.assertEqual(module.extract_chromium_arg(args, "--remote-debugging-port"), "55780")
+        self.assertEqual(module.extract_chromium_arg(args, "--user-data-dir"), "/Users/mh/Library/Application Support/Comet")
+        self.assertEqual(module.extract_chromium_arg(args, "--profile-directory"), "Default")
 
     def test_real_session_requirement_preserves_login_wall_as_blocker(self):
         module = load_module()

@@ -7678,7 +7678,9 @@ def process_args_for_pid(pid: str | int) -> str:
 
 
 def extract_chromium_arg(command_line: str, name: str) -> str:
-    match = re.search(rf"(?:^|\s){re.escape(name)}=(\"[^\"]+\"|'[^']+'|[^\s]+)", command_line or "")
+    match = re.search(rf"(?:^|\s){re.escape(name)}=(\"[^\"]+\"|'[^']+')", command_line or "")
+    if not match:
+        match = re.search(rf"(?:^|\s){re.escape(name)}=(.*?)(?=\s--[\w-]+(?:=|\s|$)|$)", command_line or "")
     if not match:
         return ""
     return match.group(1).strip("\"'")
@@ -7758,6 +7760,131 @@ def browser_main_process_args(browser: dict[str, Any]) -> list[str]:
     return matches
 
 
+def remote_debugging_ports_from_process_args(process_args: list[str]) -> list[int]:
+    ports: list[int] = []
+    for line in process_args:
+        raw_port = extract_chromium_arg(line, "--remote-debugging-port")
+        if not raw_port:
+            continue
+        try:
+            port = int(raw_port)
+        except ValueError:
+            continue
+        if port > 0 and port not in ports:
+            ports.append(port)
+    return ports
+
+
+def discover_attachable_cdp_port(
+    *,
+    browser: dict[str, Any],
+    profile: dict[str, str],
+    requested_port: int,
+    main_args: list[str],
+) -> dict[str, Any]:
+    attempts: list[dict[str, Any]] = []
+    for candidate_port in remote_debugging_ports_from_process_args(main_args):
+        if candidate_port == int(requested_port):
+            continue
+        endpoint = detect_cdp_endpoint(candidate_port)
+        owner = lsof_port_owner(candidate_port)
+        owner_verification = verify_cdp_port_owner(browser=browser, profile=profile, owner=owner) if owner.get("listening") else {
+            "ok": False,
+            "owner_matches_browser": False,
+            "owner_command": "",
+            "owner_pid": "",
+            "owner_args": "",
+            "expected_browser": normalize_browser_name(str(browser.get("id", ""))),
+            "expected_user_data_dir": normalize_path_for_compare(str(browser.get("user_data_dir") or "")),
+            "actual_user_data_dir": "",
+            "user_data_dir_matches": False,
+            "expected_profile_directory": str(profile.get("directory", "") or "Default"),
+            "actual_profile_directory": "",
+            "profile_directory_matches": False,
+        }
+        attempt = {
+            "port": candidate_port,
+            "endpoint_ok": bool(endpoint.get("ok")),
+            "owner_listening": bool(owner.get("listening")),
+            "owner_command": str(owner.get("command", "")),
+            "owner_verified": bool(owner_verification.get("ok")),
+            "cdp_endpoint": endpoint,
+            "cdp_owner_verification": owner_verification,
+        }
+        attempts.append(attempt)
+        if endpoint.get("ok") and owner_verification.get("ok"):
+            return {
+                "found": True,
+                "port": candidate_port,
+                "source": "running-browser-process-args",
+                "attempts": attempts,
+                "cdp_endpoint": endpoint,
+                "cdp_owner_verification": owner_verification,
+            }
+    return {"found": False, "attempts": attempts}
+
+
+def cdp_port_collision_guidance(
+    *,
+    browser_id: str,
+    profile: dict[str, str],
+    provider_id: str,
+    cdp_port: int,
+    blockers: list[str],
+    owner: dict[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    collision_blockers = {
+        "port-listener-is-not-cdp",
+        "cdp-port-owned-by-unexpected-process",
+        "cdp-owner-user-data-dir-mismatch",
+        "cdp-owner-profile-directory-mismatch",
+    }
+    detected = bool(owner.get("listening")) and bool(collision_blockers & {str(item) for item in blockers})
+    if not detected:
+        return {"detected": False}, []
+
+    suggested_port: int | None = None
+    suggestion_error = ""
+    try:
+        suggested_port = find_available_port()
+    except RuntimeError as exc:
+        suggestion_error = str(exc)
+
+    profile_arg = str(profile.get("name") or profile.get("directory") or "work")
+    command = [
+        "python3",
+        "skills/software-development/ai-research-browser/scripts/ai_research_browser.py",
+        "browser-cdp-recover",
+        "--browser",
+        browser_id,
+        "--profile",
+        profile_arg,
+        "--provider",
+        provider_id,
+        "--port",
+        str(cdp_port),
+        "--dry-run",
+    ]
+
+    guidance = {
+        "detected": True,
+        "requested_port": int(cdp_port),
+        "owner_command": str(owner.get("command", "")),
+        "owner_pid": str(owner.get("pid", "")),
+        "policy": "do-not-treat-an-occupied-port-as-the-intended-browser",
+        "suggested_cdp_port": suggested_port,
+        "suggestion_error": suggestion_error,
+        "recovery_command": command,
+        "note": "The dry-run recovery plan may select a different free port; use the recovered output port for the workflow.",
+    }
+    steps = [
+        f"Port {int(cdp_port)} is occupied by {owner.get('command') or 'another process'}; do not treat it as {browser_id} without owner verification.",
+        "Run browser-cdp-recover --dry-run so the CLI can select a free loopback CDP port and produce a restart plan for the real profile.",
+        "Use the recovered port from the recovery output for the following workflow-run or workflow-live-run.",
+    ]
+    return guidance, steps
+
+
 def build_real_session_preflight(
     *,
     browser: dict[str, Any],
@@ -7800,7 +7927,38 @@ def build_real_session_preflight(
         blockers.append("browser-running-without-remote-debugging")
     if not endpoint.get("ok") and not blockers:
         blockers.append("cdp-endpoint-not-reachable")
+    primary_port_blockers = list(blockers)
+    alternate_cdp = discover_attachable_cdp_port(
+        browser=browser,
+        profile=profile,
+        requested_port=cdp_port,
+        main_args=main_args,
+    )
+    attach_port = cdp_port
+    if alternate_cdp.get("found"):
+        attach_port = int(alternate_cdp.get("port") or cdp_port)
+        blockers = [blocker for blocker in blockers if blocker == "browser-running-without-remote-debugging"]
     session_evidence = provider_session_evidence(profile, provider_id)
+    port_collision, collision_steps = cdp_port_collision_guidance(
+        browser_id=browser_id,
+        profile=profile,
+        provider_id=provider_id,
+        cdp_port=cdp_port,
+        blockers=primary_port_blockers,
+        owner=owner,
+    )
+    safe_next_steps = [
+        "Use an already-running browser only when this preflight reports can_attach=true.",
+        "Do not quit or relaunch the user's active browser automatically.",
+        "For Gemini Deep Research, profile clones may preserve cookie evidence but still fail entitlement/login checks; use a real CDP-enabled session for final E2E.",
+    ]
+    if alternate_cdp.get("found"):
+        safe_next_steps.append(
+            f"Detected the intended running browser on CDP port {attach_port}; use this attach_port instead of the occupied requested port and avoid restart recovery."
+        )
+        safe_next_steps.append("Run browser-cdp-recover only if attaching to the discovered attach_port fails.")
+    else:
+        safe_next_steps.extend(collision_steps)
     return {
         "browser": browser_id,
         "browser_name": browser.get("display_name", ""),
@@ -7808,20 +7966,20 @@ def build_real_session_preflight(
         "profile_name": profile.get("name", ""),
         "provider": provider_id,
         "port": cdp_port,
-        "can_attach": bool(endpoint.get("ok")) and not blockers,
+        "attach_port": attach_port,
+        "can_attach": (bool(endpoint.get("ok")) or bool(alternate_cdp.get("found"))) and not blockers,
         "blockers": blockers,
+        "primary_port_blockers": primary_port_blockers,
         "cdp_owner_verification": owner_verification,
         "cdp_endpoint": endpoint,
+        "alternate_cdp": alternate_cdp,
         "port_owner": owner,
+        "port_collision": port_collision,
         "browser_main_process_count": len(main_args),
         "browser_main_process_has_remote_debugging": any("--remote-debugging-port" in line for line in main_args),
         "ignored_existing_non_cdp_processes": bool(running_without_cdp and ignore_existing_non_cdp),
         "session_evidence": session_evidence,
-        "safe_next_steps": [
-            "Use an already-running browser only when this preflight reports can_attach=true.",
-            "Do not quit or relaunch the user's active browser automatically.",
-            "For Gemini Deep Research, profile clones may preserve cookie evidence but still fail entitlement/login checks; use a real CDP-enabled session for final E2E.",
-        ],
+        "safe_next_steps": safe_next_steps,
         "hidden_gemini_commands": {
             "check": [
                 "python3",
@@ -9245,6 +9403,7 @@ def cmd_workflow_run(args: argparse.Namespace) -> int:
         allow_sibling_fallback=bool(getattr(args, "allow_sibling_fallback", False)),
     )
     selected_strategy = str(strategy.get("selected") or strategy.get("strategy") or "")
+    attach_cdp_port = int(preflight.get("attach_port") or cdp_port)
     cache_root = Path(args.cache_root).expanduser() if args.cache else None
     if selected_strategy == "live-cdp":
         payload = agent_browser_live_workflow_run(
@@ -9254,7 +9413,7 @@ def cmd_workflow_run(args: argparse.Namespace) -> int:
             mode=args.mode,
             prompt=prompt,
             artifact_root=Path(args.artifact_root).expanduser(),
-            cdp_port=cdp_port,
+            cdp_port=attach_cdp_port,
             submit=args.submit,
             confirm_start=args.confirm_start,
             wait_seconds=args.wait_seconds,
@@ -9389,6 +9548,9 @@ def cmd_workflow_run(args: argparse.Namespace) -> int:
             "blocker": str(strategy.get("reason") or f"selected strategy is not executable by CLI yet: {selected_strategy}"),
             "manual_action_required": selected_strategy == "gui-fallback",
         }
+    effective_owner_verification = preflight.get("cdp_owner_verification", {})
+    if attach_cdp_port != cdp_port and isinstance(preflight.get("alternate_cdp"), dict):
+        effective_owner_verification = preflight.get("alternate_cdp", {}).get("cdp_owner_verification", effective_owner_verification)
     payload = {
         **payload,
         "backend": str(getattr(args, "backend", "playwright-cdp")),
@@ -9396,7 +9558,8 @@ def cmd_workflow_run(args: argparse.Namespace) -> int:
         "selected_strategy": selected_strategy,
         "restart_required": selected_strategy == "restart-cdp" or any("remote-debugging" in str(item) or "cdp" in str(item) for item in preflight.get("blockers", [])),
         "sibling_fallback_allowed": bool(getattr(args, "allow_sibling_fallback", False)),
-        "cdp_owner_verification": preflight.get("cdp_owner_verification", {}),
+        "cdp_owner_verification": effective_owner_verification,
+        "requested_cdp_owner_verification": preflight.get("cdp_owner_verification", {}),
         "account_baseline": workflow_account_baseline(payload, strategy=selected_strategy),
     }
     artifact_privacy = str(getattr(args, "artifact_privacy", "redacted"))
@@ -9437,7 +9600,7 @@ def cmd_workflow_run(args: argparse.Namespace) -> int:
             prompt=prompt,
             provider=args.provider,
             mode=args.mode,
-            cdp_port=cdp_port,
+            cdp_port=int(payload.get("cdp_port") or attach_cdp_port),
             artifact_privacy=artifact_privacy,
             oracle_mode=oracle_mode,
         )

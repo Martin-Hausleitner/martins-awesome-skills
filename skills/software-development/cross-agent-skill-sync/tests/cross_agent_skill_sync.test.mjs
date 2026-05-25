@@ -124,6 +124,47 @@ test("hermes target uses copy projection even when symlink strategy is requested
   assert.equal(report.actions[0].strategy, "copy");
 });
 
+test("update-existing refreshes stale copy-projected skills", () => {
+  const fixture = mkdtempSync(join(tmpdir(), "cross-agent-skill-sync-"));
+  const sourceRoot = join(fixture, "repo", "skills");
+  const skillDir = join(sourceRoot, "software-development", "demo-skill");
+  const targetRoot = join(fixture, ".hermes", "skills");
+  const destination = join(targetRoot, "software-development", "demo-skill");
+  const outFile = join(fixture, "report.json");
+
+  mkdirSync(skillDir, { recursive: true });
+  mkdirSync(destination, { recursive: true });
+  writeSkill(skillDir, "demo-skill");
+  writeFileSync(join(destination, "SKILL.md"), `---
+name: demo-skill
+description: Old local copy.
+---
+
+# Old
+`);
+
+  execFileSync(process.execPath, [
+    script,
+    "--source-root",
+    sourceRoot,
+    "--target-root",
+    `hermes=${targetRoot}:preserve`,
+    "--target",
+    "hermes",
+    "--strategy",
+    "symlink",
+    "--update-existing",
+    "--execute",
+    "--out",
+    outFile,
+  ], { cwd: repoRoot, stdio: "pipe", env: { ...process.env, HOME: fixture } });
+
+  const report = JSON.parse(readFileSync(outFile, "utf8"));
+  assert.equal(report.actions[0].status, "installed");
+  assert.equal(report.actions[0].reason, "update-existing-copy");
+  assert.match(readFileSync(join(destination, "SKILL.md"), "utf8"), /Use this in tests/);
+});
+
 test("required missing skill is reported and can fail the run", () => {
   const fixture = mkdtempSync(join(tmpdir(), "cross-agent-skill-sync-"));
   const sourceRoot = join(fixture, "skills");

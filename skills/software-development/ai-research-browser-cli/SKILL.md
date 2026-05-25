@@ -28,6 +28,7 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 - Do not use temporary clone/sibling success as proof of a real account login. Clone/sibling runs are diagnostic or explicit fallback only.
 - Before typing or submitting, require provider inventory: signed-in state, visible account, plan, model/feature evidence, screenshot, and no CAPTCHA/rate-limit/challenge.
 - Paid/quota workflows such as Deep Research, Agent, image generation, research, artifacts, or Labs need `--allow-paid-quota-use`.
+- Deep Research prompts must pass the prompt-budget guard before submit: ideal `<= 6,000` chars, default automated max `<= 12,000` chars, review required above that, and block above `24,000` chars. See `docs/DEEP_RESEARCH_PROMPT_BUDGETS.md`.
 - If CAPTCHA, Cloudflare, Turnstile, login challenge, provider warning, or rate-limit text appears, stop and persist cooldown. Do not solve or bypass it.
 - For restart recovery, generate a dry-run plan first. Execute restart only when the user explicitly allowed it or supplied the required restart flags.
 - Use `--artifact-privacy redacted` by default. Use `full` only when the user explicitly needs raw URLs/text and accepts the privacy tradeoff.
@@ -49,6 +50,14 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 
 Only after the preflight proves the real account, plan, feature, screenshot, and
 CDP target should a paid Deep Research run be planned or submitted.
+
+Before submitting a real Deep Research prompt, measure it:
+
+```bash
+python3 skills/research/comparison-deep-research/scripts/deep_research_prompt_budget.py \
+  --file /tmp/deep-research-prompt.txt \
+  --json
+```
 
 1. Discover browsers/profiles:
 

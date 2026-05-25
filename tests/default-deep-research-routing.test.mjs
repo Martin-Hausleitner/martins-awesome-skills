@@ -23,3 +23,18 @@ test("ambiguous Deep Research intent routes to Comet Gemini preflight first", ()
   assert.match(cliSkill, /--browser comet --profile work --provider google --mode deep-research --cdp-port 9333/);
   assert.match(cliSkill, /do not route to a\s+Brave-first fallback/i);
 });
+
+test("Deep Research prompt budget is documented for agents", () => {
+  const budgets = read("docs/DEEP_RESEARCH_PROMPT_BUDGETS.md");
+  const cliSkill = read("skills/software-development/ai-research-browser-cli/SKILL.md");
+  const comparisonSkill = read("skills/research/comparison-deep-research/SKILL.md");
+
+  for (const text of [budgets, cliSkill, comparisonSkill]) {
+    assert.match(text, /6,000/);
+    assert.match(text, /12,000/);
+    assert.match(text, /24,000/);
+  }
+
+  assert.match(budgets, /do not paste into provider UI/i);
+  assert.match(cliSkill, /deep_research_prompt_budget\.py/);
+});

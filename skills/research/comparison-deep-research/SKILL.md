@@ -37,6 +37,19 @@ python3 skills/research/comparison-deep-research/scripts/comparison_deep_researc
 
 Then pass the generated prompt into `ai-research-browser` or Oracle-assisted Deep Research.
 
+Before submitting, check the prompt budget:
+
+```bash
+python3 skills/research/comparison-deep-research/scripts/deep_research_prompt_budget.py \
+  --prompt "$(python3 skills/research/comparison-deep-research/scripts/comparison_deep_research_prompt.py --topic '...' --use-case '...' --candidate-count 50)" \
+  --json
+```
+
+Ideal prompts stay at or below `6,000` characters. Default automated UI submits
+should stay at or below `12,000` characters. If the prompt is longer, compress it
+or move source material into files/links. Above `24,000` characters, do not paste
+it into Deep Research.
+
 ## Required Deep Research Output
 
 Tell the model to produce this structure:
@@ -73,6 +86,7 @@ Tell the model to produce this structure:
 ## Integration Guidance
 
 - Use `ai-research-browser` or `ai-research-browser-cli` for the browser run.
+- Use `docs/DEEP_RESEARCH_PROMPT_BUDGETS.md` and the prompt-budget script before submitting any paid Deep Research run.
 - Use `--allow-paid-quota-use` only when the user explicitly asked for Deep Research or a paid mode.
 - Use `ai-research-output-publisher` after the report finishes to create a polished message, duration metrics, PSPin/deep-research links, and optional Notion payload.
 - Use `tool-comparison-heatmap` after the research if the user wants an interactive visual matrix from the final data.

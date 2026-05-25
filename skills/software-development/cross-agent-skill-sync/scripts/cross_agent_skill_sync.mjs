@@ -103,6 +103,7 @@ function parseArgs(rawArgs) {
     json: false,
     failOnWarning: false,
     fullPaths: false,
+    updateExisting: false,
   };
 
   for (let index = 0; index < rawArgs.length; index += 1) {
@@ -131,6 +132,8 @@ function parseArgs(rawArgs) {
       parsed.failOnWarning = true;
     } else if (arg === "--full-paths") {
       parsed.fullPaths = true;
+    } else if (arg === "--update-existing") {
+      parsed.updateExisting = true;
     } else if (arg === "--help" || arg === "-h") {
       printHelp();
       process.exit(0);
@@ -163,6 +166,7 @@ Options:
   --json                     Print summary JSON.
   --fail-on-warning          Exit non-zero if warnings exist.
   --full-paths               Do not redact the home directory in reports.
+  --update-existing          Replace existing copy-projected skills when their SKILL.md hash differs.
 `);
 }
 
@@ -338,6 +342,9 @@ function planAction(source, target, strategy) {
     if (destHash === source.hash) {
       return { ...action, status: "exists", reason: "same-skill-hash" };
     }
+    if (strategy === "copy" && args.updateExisting) {
+      return { ...action, status: "install", reason: "update-existing-copy" };
+    }
     return { ...action, status: "exists", reason: "destination-exists-different-hash" };
   }
 
@@ -364,8 +371,8 @@ function executeAction(action, strategy) {
     symlinkSync(action.source, action.destination, "dir");
     return;
   }
-  if (existsSync(action.destination) && lstatSync(action.destination).isSymbolicLink()) {
-    rmSync(action.destination);
+  if (existsSync(action.destination)) {
+    rmSync(action.destination, { recursive: true, force: true });
   }
   cpSync(action.source, action.destination, {
     recursive: true,

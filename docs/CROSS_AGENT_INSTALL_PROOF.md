@@ -28,6 +28,7 @@ Execute only after the plan has no warnings:
 node skills/software-development/cross-agent-skill-sync/scripts/cross_agent_skill_sync.mjs \
   --target all \
   --strategy symlink \
+  --update-existing \
   --execute \
   --require-skill ai-research-browser \
   --require-skill ai-research-browser-cli \

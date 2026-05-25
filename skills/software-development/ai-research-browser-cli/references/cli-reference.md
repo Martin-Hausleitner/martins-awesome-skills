@@ -43,6 +43,28 @@ Always inspect:
 
 Do not treat cookie evidence alone as logged-in proof.
 
+## Deep Research Prompt Budgets
+
+Browser UI Deep Research should not receive huge pasted prompt text. Measure the
+prompt before any paid submit:
+
+```bash
+python3 skills/research/comparison-deep-research/scripts/deep_research_prompt_budget.py \
+  --file /tmp/deep-research-prompt.txt \
+  --json
+```
+
+Agent-safe budgets:
+
+- `ideal`: `<= 6,000` characters, safe.
+- `standard_max`: `<= 12,000` characters, allowed if all other guards pass.
+- `review`: `12,001-24,000` characters, compress first or ask for confirmation.
+- `block`: `> 24,000` characters, do not paste; summarize or attach files.
+
+Long source material belongs in files, link lists, vector stores, connectors, or
+staged follow-up runs. The initial Deep Research prompt should be a compact
+brief with goal, scope, criteria, output format, constraints, and source links.
+
 ## Discovery And Catalogs
 
 Discover browsers and profiles:

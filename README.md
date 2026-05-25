@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/example/public-agent-skills"><img alt="GitHub" src="https://img.shields.io/badge/GitHub-Public%20Agent%20Skills-181717?logo=github"></a>
+  <a href="https://github.com/Martin-Hausleitner/martins-awesome-skills"><img alt="GitHub" src="https://img.shields.io/badge/GitHub-martins--awesome--skills-181717?logo=github"></a>
   <img alt="Status" src="https://img.shields.io/badge/status-sanitized%20public%20skills-2ea44f">
   <img alt="Agent Skills" src="https://img.shields.io/badge/agent--skills-Hermes%20%2B%20OpenClaw-6f42c1">
   <img alt="Human in the Loop" src="https://img.shields.io/badge/human--in--the--loop-Telegram%20approval-229ED9?logo=telegram">
@@ -133,8 +133,8 @@ See [docs/SKILL_CATALOG.md](docs/SKILL_CATALOG.md) for the longer catalog notes 
 Clone the repo:
 
 ```bash
-git clone https://github.com/<owner>/<public-agent-skills>.git
-cd public-agent-skills
+git clone https://github.com/Martin-Hausleitner/martins-awesome-skills.git
+cd martins-awesome-skills
 ```
 
 Copy a skill into your local agent skill directory:
@@ -155,6 +155,8 @@ cp -R skills/telegram-channel-poster ~/.openclaw/workspace/skills/
 ```
 
 See [docs/INSTALL.md](docs/INSTALL.md) for Codex, Claude, Gemini, OpenCode, Hermes, and cross-agent sync installs.
+
+See [docs/CROSS_AGENT_INSTALL_PROOF.md](docs/CROSS_AGENT_INSTALL_PROOF.md) for the current proof matrix showing the core AI research skills installed across Hermes, Codex, OpenClaw, Gemini, OpenCode, Claude, and generic Agents roots.
 
 ## 🧭 How It Works
 

@@ -67,6 +67,11 @@ Prefer a dry run before projecting skills into multiple local roots:
 node skills/software-development/cross-agent-skill-sync/scripts/cross_agent_skill_sync.mjs \
   --source-root skills \
   --target all \
+  --require-skill ai-research-browser \
+  --require-skill ai-research-browser-cli \
+  --require-skill oracle-ai-research-e2e \
+  --require-skill ai-research-output-publisher \
+  --require-skill comparison-deep-research \
   --require-skill cross-agent-skill-sync
 ```
 
@@ -76,9 +81,19 @@ Only execute after reviewing the plan:
 node skills/software-development/cross-agent-skill-sync/scripts/cross_agent_skill_sync.mjs \
   --source-root skills \
   --target all \
+  --strategy symlink \
   --execute \
+  --require-skill ai-research-browser \
+  --require-skill ai-research-browser-cli \
+  --require-skill oracle-ai-research-e2e \
+  --require-skill ai-research-output-publisher \
+  --require-skill comparison-deep-research \
   --require-skill cross-agent-skill-sync
 ```
+
+See [CROSS_AGENT_INSTALL_PROOF.md](CROSS_AGENT_INSTALL_PROOF.md) for the
+sanitized proof matrix covering Hermes, Codex, OpenClaw, Gemini, OpenCode,
+Claude-adjacent, and generic Agents roots.
 
 ## Dedicated Telegram Approval Bot
 

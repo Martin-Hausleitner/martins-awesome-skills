@@ -31,7 +31,7 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 - Builds a full browser x profile x provider x feature test matrix for systematic E2E runs.
 - Provides an interactive wizard that lets a human choose the installed browser, profile, provider, and feature before launching or testing.
 - Archives existing provider chats into a local cache so later runs can continue from cached transcripts or intentionally refresh by scraping again.
-- Reopens cached/existing chat URLs with `workflow-followup`, sends a follow-up such as "Fass zusammen", exports Markdown, and refreshes the local cache.
+- Reopens cached/existing chat URLs with `workflow-followup`, optionally sends a follow-up such as "Fass zusammen" only when `--submit` is present, exports Markdown, and refreshes the local cache.
 - Attaches local files/images to `workflow-run` and `workflow-followup` when the provider exposes a visible file input, and records `no-file-input` instead of guessing when the upload path is hidden.
 - Discovers installed SaveAI / AI Exporter extension manifests and can copy/load selected extensions into temporary profile clones for export-oriented tests.
 - Reverse-engineers installed SaveAI / AI Exporter capabilities, including supported provider hosts, Markdown/PDF/JSON/image export actions, Notion sync actions, and local Notion session evidence without cookie values.
@@ -47,7 +47,7 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
 - Runs Agent Browser against disposable browser-profile clones and records `signed-out-or-wall` when the cloned session hits login or anti-automation pages.
 - Exposes provider-specific probe hints for account menus, model selectors, tool controls, and usage/limit text.
 - Lists automation backends such as Playwright/CDP, Codex Computer Use, Peekaboo, Unbrowser Local, CloakBrowser, OpenAI CUA/Operator, Claude Computer Use, Gemini Computer Use, Stagehand, Browser-Use, and Hyperbrowser.
-- Lists Peter Steinberger's Oracle 0.13 as an optional consult/backend layer for multi-model review, browser-session reattach, long-running Deep Research/Agent supervision, attachment readiness, and session artifacts.
+- Lists Peter Steinberger's Oracle 0.13 as an optional consult/backend layer for multi-model review, browser-session reattach, long-running Deep Research/Agent supervision, attachment readiness, and session artifacts. `workflow-run` defaults to Oracle `assist` artifacts for long-run observability, but local guards still decide whether anything is submitted.
 - Lists selectable model/tool catalogs for ChatGPT, Gemini/Google, Claude/Anthropic, Perplexity, and Grok/xAI.
 - Marks profiles as `signed-in-hidden` when browser metadata indicates account/session state but no email is exposed.
 - Reports `app_exists`, `binary_exists`, and `user_data_exists` so stale browser profile data is not confused with a launchable installed browser.

@@ -1680,7 +1680,9 @@ class AiResearchBrowserTest(unittest.TestCase):
         with_account = module.rate_limit_key(browser="brave", profile="Default", provider="chatgpt", mode="chat", account="work@example.test")
 
         self.assertNotEqual(without_account, with_account)
-        self.assertIn("work-example-test", with_account)
+        self.assertIn("|acct-", with_account)
+        self.assertNotIn("work", with_account)
+        self.assertNotIn("example", with_account)
 
     def test_provider_typing_guard_blocks_captcha_marker_before_fill(self):
         module = load_module()
@@ -4926,6 +4928,133 @@ class AiResearchBrowserTest(unittest.TestCase):
         self.assertEqual(payload["results"][1]["run_status"], "verified")
         self.assertEqual([call["browser"]["id"] for call in calls], ["comet"])
 
+    def test_workflow_suite_skips_account_scoped_rate_limited_row(self):
+        module = load_module()
+        root = Path(tempfile.mkdtemp())
+        state_path = root / "rate-limit-state.json"
+        state = {"version": 1, "entries": {}, "history": []}
+        account_key = module.rate_limit_key(
+            browser="brave",
+            profile="Default",
+            provider="chatgpt",
+            mode="chat",
+            account="work@example.test",
+        )
+        module.record_rate_limit(
+            state,
+            account_key,
+            wait_seconds=3600,
+            browser="brave",
+            profile="Default",
+            provider="chatgpt",
+            mode="chat",
+            reason="message limit",
+            source="/tmp/status.json",
+        )
+        module.write_rate_limit_state(state_path, state)
+        calls = []
+        original_discover = module.discover_browsers
+        original_run = module.run_sibling_workflow_payload
+        module.discover_browsers = lambda: [
+            {
+                "id": "brave",
+                "display_name": "Brave Browser",
+                "binary_path": "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+                "user_data_dir": str(root / "brave"),
+                "profiles": [{"directory": "Default", "name": "Default", "path": str(root / "brave" / "Default")}],
+            }
+        ]
+        module.run_sibling_workflow_payload = lambda **kwargs: calls.append(kwargs) or {"status": "verified"}
+        try:
+            out = StringIO()
+            with redirect_stdout(out):
+                exit_code = module.main(
+                    [
+                        "workflow-suite",
+                        "--sibling",
+                        "--browsers",
+                        "brave",
+                        "--profile",
+                        "Default",
+                        "--providers",
+                        "chatgpt",
+                        "--features",
+                        "chatgpt:chat",
+                        "--submit",
+                        "--no-rate-limit-wait",
+                        "--rate-limit-state",
+                        str(state_path),
+                        "--session-state",
+                        str(root / "session-state.json"),
+                    ]
+                )
+        finally:
+            module.discover_browsers = original_discover
+            module.run_sibling_workflow_payload = original_run
+
+        payload = json.loads(out.getvalue())
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(payload["summary"]["rate_limited"], 1)
+        self.assertEqual(payload["results"][0]["run_status"], "rate-limited")
+        self.assertEqual(payload["results"][0]["rate_limit"]["key"], account_key)
+        self.assertEqual(calls, [])
+
+    def test_workflow_suite_clone_path_forwards_paid_quota_guard(self):
+        module = load_module()
+        root = Path(tempfile.mkdtemp())
+        calls = []
+        original_discover = module.discover_browsers
+        original_run = module.agent_browser_profile_workflow_run
+        module.discover_browsers = lambda: [
+            {
+                "id": "brave",
+                "display_name": "Brave Browser",
+                "binary_path": "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+                "user_data_dir": str(root / "brave"),
+                "profiles": [{"directory": "Default", "name": "Default", "path": str(root / "brave" / "Default")}],
+            }
+        ]
+
+        def fake_run(**kwargs):
+            calls.append(kwargs)
+            return {
+                "status": "verified",
+                "provider": kwargs["provider"],
+                "mode": kwargs["mode"],
+                "browser": kwargs["browser"]["id"],
+                "profile": kwargs["profile"]["directory"],
+            }
+
+        module.agent_browser_profile_workflow_run = fake_run
+        try:
+            out = StringIO()
+            with redirect_stdout(out):
+                exit_code = module.main(
+                    [
+                        "workflow-suite",
+                        "--browsers",
+                        "brave",
+                        "--profile",
+                        "Default",
+                        "--providers",
+                        "chatgpt",
+                        "--features",
+                        "chatgpt:deep-research",
+                        "--submit",
+                        "--allow-paid-quota-use",
+                        "--session-state",
+                        str(root / "session-state.json"),
+                    ]
+                )
+        finally:
+            module.discover_browsers = original_discover
+            module.agent_browser_profile_workflow_run = original_run
+
+        payload = json.loads(out.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["summary"]["ok"], 1)
+        self.assertTrue(calls[0]["allow_paid_quota_use"])
+
     def test_workflow_suite_records_rate_limit_from_payload(self):
         module = load_module()
         root = Path(tempfile.mkdtemp())
@@ -5018,6 +5147,7 @@ class AiResearchBrowserTest(unittest.TestCase):
         )
         self.assertTrue(result["detected"])
         self.assertIn(key, stored_state["entries"])
+        self.assertNotIn("work-example-test", json.dumps(stored_state))
         self.assertEqual(stored_state["entries"][key]["reason"], "challenge")
         self.assertGreaterEqual(stored_state["entries"][key]["learned_wait_seconds"], 30 * 60)
 
@@ -6196,7 +6326,8 @@ class AiResearchBrowserTest(unittest.TestCase):
                     "--ignore-existing-non-cdp",
                 ]
             )
-            rc = module.cmd_real_session_preflight(args)
+            with redirect_stdout(StringIO()):
+                rc = module.cmd_real_session_preflight(args)
         finally:
             module.resolve_workflow_browser_profile = original_resolve
             module.build_real_session_preflight = original_preflight

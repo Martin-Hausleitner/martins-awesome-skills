@@ -12,16 +12,16 @@ patterns=(
   'ntn_'
   '-----BEGIN'
   '[0-9]{8,}:[A-Za-z0-9_-]{20,}'
-  '/Users/mh'
-  'Martin-Hausleitner'
-  'Martin Hausleitner'
-  "Martin's"
-  'Martin Workspace'
-  'Buchhaltung'
-  'AKTE'
   'auth\.json'
   'client_secret'
 )
+
+if [[ -n "${PUBLIC_SAFETY_EXTRA_PATTERNS_FILE:-}" && -f "${PUBLIC_SAFETY_EXTRA_PATTERNS_FILE}" ]]; then
+  while IFS= read -r pattern; do
+    [[ -z "$pattern" || "$pattern" == \#* ]] && continue
+    patterns+=("$pattern")
+  done < "${PUBLIC_SAFETY_EXTRA_PATTERNS_FILE}"
+fi
 
 status=0
 for pattern in "${patterns[@]}"; do

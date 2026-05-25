@@ -2718,7 +2718,8 @@ def detect_rate_limit_from_text(text: str, *, default_wait_seconds: int = 5 * 60
 def rate_limit_key(*, browser: str, profile: str, provider: str, mode: str, account: str = "") -> str:
     parts = [normalize_browser_name(browser), slug(profile or "Default"), normalize_provider_name(provider), slug(mode or "chat")]
     if account:
-        parts.append(slug(account))
+        account_digest = hashlib.sha256(str(account).strip().lower().encode("utf-8")).hexdigest()[:16]
+        parts.append(f"acct-{account_digest}")
     return "|".join(parts)
 
 
@@ -2882,6 +2883,8 @@ def active_rate_limit_block_payload(
     provider: str,
     mode: str,
     source: str,
+    artifact_privacy: str = "redacted",
+    extra_fields: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     state_file = state_path.expanduser()
     state = load_rate_limit_state(state_file)
@@ -2897,20 +2900,26 @@ def active_rate_limit_block_payload(
         if state_file.exists():
             write_rate_limit_state(state_file, state)
         return None
+    entry = dict(cooldown)
+    if artifact_privacy != "full":
+        entry.pop("source", None)
     payload = {
         "status": "rate-limited",
         "blocker": "active provider/account cooldown; wait before retrying this workflow",
         "pause_required": True,
         "resume_after": cooldown.get("cooldown_until"),
+        "privacy": {"artifact_privacy": artifact_privacy},
         "rate_limit": {
             "detected": True,
             "state_path": str(state_file),
             "source": source,
             "key": cooldown.get("key"),
-            "entry": cooldown,
+            "entry": entry,
             "active_before_start": True,
         },
     }
+    if extra_fields:
+        payload.update(extra_fields)
     write_rate_limit_state(state_file, state)
     return payload
 
@@ -9219,10 +9228,9 @@ def cmd_workflow_run(args: argparse.Namespace) -> int:
         provider=args.provider,
         mode=args.mode,
         source="workflow-run-preflight",
+        artifact_privacy=str(getattr(args, "artifact_privacy", "redacted")),
     )
     if rate_limit_block:
-        artifact_privacy = str(getattr(args, "artifact_privacy", "redacted"))
-        rate_limit_block.setdefault("privacy", {"artifact_privacy": artifact_privacy})
         if args.output:
             write_json(Path(args.output).expanduser(), rate_limit_block)
         print(json.dumps(rate_limit_block, ensure_ascii=False, indent=2))
@@ -9471,10 +9479,9 @@ def cmd_workflow_live_run(args: argparse.Namespace) -> int:
         provider=args.provider,
         mode=args.mode,
         source="workflow-live-run-preflight",
+        artifact_privacy=str(getattr(args, "artifact_privacy", "redacted")),
     )
     if rate_limit_block:
-        artifact_privacy = str(getattr(args, "artifact_privacy", "redacted"))
-        rate_limit_block.setdefault("privacy", {"artifact_privacy": artifact_privacy})
         if args.output:
             write_json(Path(args.output).expanduser(), rate_limit_block)
         print(json.dumps(rate_limit_block, ensure_ascii=False, indent=2))
@@ -9651,10 +9658,10 @@ def cmd_workflow_sibling_run(args: argparse.Namespace) -> int:
         provider=provider_id,
         mode=args.mode,
         source="workflow-sibling-run-preflight",
+        artifact_privacy=str(getattr(args, "artifact_privacy", "redacted")),
+        extra_fields={"execution_mode": "sibling-cdp-automation-profile", "closed_after": False},
     )
     if rate_limit_block:
-        rate_limit_block["execution_mode"] = "sibling-cdp-automation-profile"
-        rate_limit_block["closed_after"] = False
         if args.output:
             write_json(Path(args.output).expanduser(), rate_limit_block)
         print(json.dumps(rate_limit_block, ensure_ascii=False, indent=2))
@@ -9872,6 +9879,20 @@ def cmd_workflow_followup(args: argparse.Namespace) -> int:
     prompt = workflow_prompt_from_args(args)
     extension_ids = requested_extension_ids(args.include_extension, include_ai_exporter=args.include_ai_exporter)
     attachments = [Path(item).expanduser() for item in getattr(args, "attachment", []) or []]
+    rate_limit_block = active_rate_limit_block_payload(
+        state_path=Path(args.rate_limit_state).expanduser(),
+        browser=str(browser.get("id") or args.browser),
+        profile=str(profile.get("directory") or args.profile),
+        provider=args.provider,
+        mode="followup",
+        source="workflow-followup-preflight",
+        artifact_privacy=str(getattr(args, "artifact_privacy", "redacted")),
+    )
+    if rate_limit_block:
+        if args.output:
+            write_json(Path(args.output).expanduser(), rate_limit_block)
+        print(json.dumps(rate_limit_block, ensure_ascii=False, indent=2))
+        return 1
     payload = agent_browser_profile_followup_run(
         browser=browser,
         profile=profile,
@@ -9880,7 +9901,7 @@ def cmd_workflow_followup(args: argparse.Namespace) -> int:
         prompt=prompt,
         artifact_root=Path(args.artifact_root).expanduser(),
         clone_root=Path(args.clone_root).expanduser(),
-        submit=not args.no_submit,
+        submit=bool(args.submit and not args.no_submit),
         wait_seconds=args.wait_seconds,
         timeout=args.timeout,
         cache_root=Path(args.cache_root).expanduser() if args.cache else None,
@@ -9888,6 +9909,16 @@ def cmd_workflow_followup(args: argparse.Namespace) -> int:
         include_extension_ids=extension_ids,
         export_markdown=Path(args.export_markdown).expanduser() if args.export_markdown else None,
         attachments=attachments,
+    )
+    payload = attach_rate_limit_status(
+        payload,
+        browser=str(browser.get("id") or args.browser),
+        profile=str(profile.get("directory") or args.profile),
+        provider=args.provider,
+        mode="followup",
+        state_path=Path(args.rate_limit_state).expanduser(),
+        source=args.output or "workflow-followup",
+        artifact_privacy=str(getattr(args, "artifact_privacy", "redacted")),
     )
     if args.output:
         write_json(Path(args.output).expanduser(), payload)
@@ -10532,11 +10563,22 @@ def cmd_workflow_suite(args: argparse.Namespace) -> int:
             provider=str(row.get("provider", "")),
             mode=str(row.get("mode", "")),
         )
-        cooldown = active_rate_limit(rate_limit_state, limiter_key) if args.rate_limit else None
+        cooldown = (
+            active_rate_limit_for_scope(
+                rate_limit_state,
+                browser=str(row.get("browser", "")),
+                profile=str(row.get("profile_directory", "")),
+                provider=str(row.get("provider", "")),
+                mode=str(row.get("mode", "")),
+            )
+            if args.rate_limit
+            else None
+        )
         if cooldown:
+            cooldown_key = str(cooldown.get("key") or limiter_key)
             event = {
                 "event": "rate-limit-cooldown-active",
-                "key": limiter_key,
+                "key": cooldown_key,
                 "remaining_seconds": cooldown["remaining_seconds"],
                 "cooldown_until": cooldown.get("cooldown_until"),
                 "reason": cooldown.get("reason", ""),
@@ -10625,6 +10667,7 @@ def cmd_workflow_suite(args: argparse.Namespace) -> int:
                         refresh_cache=not args.no_refresh_cache,
                         include_extension_ids=extension_ids,
                         attachments=suite_attachments,
+                        allow_paid_quota_use=bool(getattr(args, "allow_paid_quota_use", False)),
                     )
 
                 run_payload = run_workflow_row_with_timeout(args.row_timeout_seconds, execute_row_payload)
@@ -11247,8 +11290,8 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_run.add_argument("--cache", action="store_true")
     workflow_run.add_argument("--cache-root", default=str(default_chat_cache_root()))
     workflow_run.add_argument("--no-refresh-cache", action="store_true")
-    workflow_run.add_argument("--include-extension", action="append", help="Copy/load an extension id or alias into the temporary clone.")
-    workflow_run.add_argument("--include-ai-exporter", action="store_true", help="Copy/load SaveAI / AI Exporter into the temporary clone.")
+    workflow_run.add_argument("--include-extension", action="append", help="Load an extension id or alias when the selected strategy supports isolated extension loading.")
+    workflow_run.add_argument("--include-ai-exporter", action="store_true", help="Load SaveAI / AI Exporter when the selected strategy supports isolated extension loading.")
     workflow_run.add_argument("--attachment", action="append", default=[], help="Local file/image path to attach through the provider file input when visible.")
     workflow_run.add_argument("--output", default="")
     add_hardening_cli_args(workflow_run)
@@ -11359,6 +11402,7 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_followup.add_argument("--chat-url", required=True)
     workflow_followup.add_argument("--prompt", default="Fass den bisherigen Deep-Research-Report kompakt zusammen und nenne die wichtigsten Quellen.")
     workflow_followup.add_argument("--prompt-file", default="")
+    workflow_followup.add_argument("--submit", action="store_true", help="Actually send the follow-up prompt. Default is dry-run/fill-only.")
     workflow_followup.add_argument("--no-submit", action="store_true", help="Fill the follow-up prompt but do not press Enter.")
     workflow_followup.add_argument("--wait-seconds", type=int, default=30)
     workflow_followup.add_argument("--timeout", type=float, default=90.0)
@@ -11370,6 +11414,8 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_followup.add_argument("--attachment", action="append", default=[], help="Local file/image path to attach through the provider file input when visible.")
     workflow_followup.add_argument("--export-markdown", default="")
     workflow_followup.add_argument("--output", default="")
+    workflow_followup.add_argument("--artifact-privacy", choices=["redacted", "metadata-only", "full"], default="redacted")
+    workflow_followup.add_argument("--rate-limit-state", default=str(default_rate_limit_state_path()), help="JSON state file for learned provider/browser/account cooldowns.")
     workflow_suite = sub.add_parser("workflow-suite")
     workflow_suite.add_argument("--artifact-root", default="/tmp/hermes-ai-research-workflow-suite")
     workflow_suite.add_argument("--clone-root", default="/tmp/hermes-ai-research-workflow-suite-clones")

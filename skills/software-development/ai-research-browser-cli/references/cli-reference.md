@@ -231,7 +231,10 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
   --output /tmp/arb-suite-plan.json
 ```
 
-Run a small real suite:
+Run a small guarded suite. By default, `workflow-suite` uses temporary diagnostic
+profile clones for matrix coverage; add `--sibling` for dedicated sibling
+automation profiles. For real live-CDP E2E proof, use `workflow-run --strategy auto`
+on one target at a time.
 
 ```bash
 python3 skills/software-development/ai-research-browser/scripts/ai_research_browser.py workflow-suite \
@@ -366,6 +369,10 @@ python3 skills/software-development/ai-research-browser/scripts/ai_research_brow
   --submit \
   --copy-output
 ```
+
+`workflow-followup` is dry-run by default; `--submit` is required before it sends
+the follow-up prompt. It also honors `--rate-limit-state` before opening provider
+UI work.
 
 Inspect SaveAI / AI Exporter:
 

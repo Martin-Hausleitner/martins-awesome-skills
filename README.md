@@ -31,6 +31,7 @@ This repo is intentionally **not** a dump of a private OpenClaw/Hermes setup. It
 - [Complete Skill Table](#-complete-skill-table)
 - [Skill Cards](#-skill-cards)
 - [Quick Start](#-quick-start)
+- [Purpose-Built Usage Map](#-purpose-built-usage-map)
 - [How It Works](#-how-it-works)
 - [Featured: Cross-Agent Skill Sync](#-featured-cross-agent-skill-sync)
 - [Featured: AI Research Browser + Oracle](#-featured-ai-research-browser--oracle)
@@ -127,6 +128,67 @@ See [docs/SKILL_CATALOG.md](docs/SKILL_CATALOG.md) for the longer catalog notes 
 - 🐙 **GitHub operating loop**: auth, issues, PRs, and review workflows in one public-safe set.
 - ⚙️ **Event bridges**: webhook subscriptions with HMAC-first thinking.
 - 🧱 **Reusable templates**: start new skills from `templates/SKILL_TEMPLATE.md`.
+
+## 🧭 Purpose-Built Usage Map
+
+This repo is meant to be useful to a stranger before they know your local setup.
+Start with the task, choose the matching skill, then run the safest command that
+proves the environment before doing real work.
+
+| If You Need To... | Use This Skill | First Safe Action | Success Proof |
+|---|---|---|---|
+| Share skills across local agents | `cross-agent-skill-sync` | `--target all` dry-run | Manifest shows intended roots and no conflicts |
+| Run Gemini or ChatGPT browser research | `ai-research-browser-cli` + `ai-research-browser` | `real-session-preflight` | `can_attach=true`, verified owner/profile, account/plan evidence |
+| Supervise a long browser research run | `oracle-ai-research-e2e` | `oracle-plan` or `--oracle-mode assist` | Oracle `status`, `reattach`, and session-render commands in artifacts |
+| Publish completed research output | `ai-research-output-publisher` | `render` into local files | Markdown message plus optional Notion payload, no external write by default |
+| Compare tools, repos, or products | `comparison-deep-research` | Generate a structured prompt | Linked candidates, five weighted categories, `/100` scorecard |
+| Send anything external | `telegram-approval-gate` | Dry-run approval card | Human clicked send/edit/cancel; no silent send |
+| Work on code safely | `plan`, `test-driven-development`, `systematic-debugging` | Read the skill and run local tests | Red/green/test evidence before final report |
+
+```mermaid
+flowchart TD
+  Task["User intent"] --> Pick["Pick purpose-built skill"]
+  Pick --> Preflight["Dry-run / preflight"]
+  Preflight --> Guard{"Proof available?"}
+  Guard -- no --> Stop["Stop with blockers and next steps"]
+  Guard -- yes --> Execute["Run scoped workflow"]
+  Execute --> Evidence["Write status, tests, screenshots, or payloads"]
+  Evidence --> Report["Report exact result and limits"]
+```
+
+For browser automation, do not infer success from a click or a port number. The
+workflow is only successful when the status artifacts prove the intended account,
+provider feature, isolated automation target, and final output.
+
+```mermaid
+sequenceDiagram
+  participant Agent
+  participant CLI as ai_research_browser.py
+  participant Browser as Real Browser CDP
+  participant Provider as AI Provider UI
+  participant Oracle as Oracle Assist
+  participant Artifacts
+
+  Agent->>CLI: real-session-preflight
+  CLI->>Browser: verify CDP owner/profile
+  Browser-->>CLI: attach_port + target capability
+  CLI->>Provider: open isolated automation target
+  Provider-->>CLI: login/account/plan/feature evidence
+  CLI->>Oracle: write status/reattach plan
+  CLI->>Artifacts: status.json + screenshot + redacted logs
+  Artifacts-->>Agent: proof or blocker
+```
+
+Safe browser automation rule of thumb:
+
+- `9333` is only a preferred Comet port. If it belongs to VS Code or another
+  process, use `alternate_cdp.attach_port` when discovered, or run
+  `browser-cdp-recover --dry-run`.
+- Deep Research, Agent, image generation, and other quota-spending modes require
+  explicit `--allow-paid-quota-use` and must still pass account/plan/feature
+  guards before submit.
+- A real Deep Research result means the run has a provider start marker, a
+  completion marker, extracted output text, and a stored chat/result link.
 
 ## 🚀 Quick Start
 

@@ -67,6 +67,7 @@ This repo is intentionally **not** a dump of a private OpenClaw/Hermes setup. It
 | 🔎 Research | `arxiv`, `blogwatcher`, `comparison-deep-research`, `polymarket`, `songsee`, `youtube-content` | Paper search, market research, comparison scorecards, and blog/video/music discovery workflows |
 | 📄 Productivity | `notion`, `ocr-and-documents`, `ai-research-output-publisher` | Notion API patterns, research-result publishing, chat notifications, and OCR/document extraction |
 | 📬 Email tooling | `himalaya` | IMAP/SMTP CLI workflows with explicit-send safety |
+| 📣 Social media | `hermes-tweet` | Hermes Agent X/Twitter research, read, and gated action workflows through the Hermes Tweet plugin |
 | 🧭 Search & analysis | `multi-search-engine`, `tool-comparison-heatmap` | Multi-engine search and comparison visuals |
 | 📍 Local discovery | `find-nearby` | Nearby place lookup workflow templates |
 | 🔌 MCP | `native-mcp` | Native Model Context Protocol server setup patterns |
@@ -110,6 +111,7 @@ This repo is intentionally **not** a dump of a private OpenClaw/Hermes setup. It
 | `notion` | Productivity | Notion API workflow patterns with safe placeholders |
 | `ocr-and-documents` | Productivity | OCR and document extraction guidance |
 | `himalaya` | Email | Himalaya IMAP/SMTP workflows with explicit-send safety |
+| `hermes-tweet` | Social media | Install and operate Hermes Tweet for X/Twitter search, reading, drafting, and gated actions |
 | `find-nearby` | Local discovery | Nearby-place lookup workflow templates |
 | `multi-search-engine` | Search | Multi-engine search strategy and international search hints |
 | `tool-comparison-heatmap` | Analysis | Tool comparison heatmaps and scoring frameworks |
@@ -124,6 +126,7 @@ See [docs/SKILL_CATALOG.md](docs/SKILL_CATALOG.md) for the longer catalog notes 
 - 🎨 **Visual creation**: ASCII, Excalidraw, and p5.js workflows for fast diagrams and explainers.
 - 🔬 **Research workflows**: arXiv, Polymarket, and YouTube content helpers.
 - 🔌 **Tool plumbing**: MCP setup patterns and multi-search utilities.
+- 📣 **Social workflows**: Hermes Tweet setup and action-gated X/Twitter workflows.
 - 🔁 **Skill sharing**: additive, dry-run-first projection into local Hermes/Codex/agent skill roots.
 - 🐙 **GitHub operating loop**: auth, issues, PRs, and review workflows in one public-safe set.
 - ⚙️ **Event bridges**: webhook subscriptions with HMAC-first thinking.

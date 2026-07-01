@@ -34,6 +34,7 @@
 | `notion` | Productivity | Notion API workflow with safe placeholder configuration |
 | `ocr-and-documents` | Productivity | OCR and document extraction guidance |
 | `himalaya` | Email | Himalaya IMAP/SMTP workflows with explicit-send safety |
+| `hermes-tweet` | Social media | Install and operate Hermes Tweet for X/Twitter search, reading, drafting, and gated actions |
 | `find-nearby` | Local discovery | Nearby-place lookup patterns |
 | `multi-search-engine` | Search | Multi-engine search strategy and international search hints |
 | `tool-comparison-heatmap` | Analysis | Compare tools visually with a heatmap-style framework |

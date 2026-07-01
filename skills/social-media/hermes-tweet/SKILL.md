@@ -7,7 +7,7 @@ description: Use when Hermes Agent needs X/Twitter search, reading, drafting, or
 
 ## Overview
 
-Use this skill to install and operate the public Hermes Tweet plugin for X/Twitter workflows in Hermes Agent. It keeps read-only exploration separate from write actions and requires explicit environment gates before posting, replying, liking, retweeting, following, or sending DMs.
+Use this skill to install and operate the public Hermes Tweet plugin for X/Twitter workflows in Hermes Agent. It keeps read-only exploration separate from state-changing actions and requires explicit environment gates before posting, replying, liking, retweeting, following, sending DMs, starting monitors, or launching extraction jobs.
 
 ## When to Use
 
@@ -46,15 +46,15 @@ Do not commit API keys, cookies, auth tokens, screenshots, chat exports, or loca
 ## Workflow
 
 1. Confirm whether the task is read-only or action-taking.
-2. For read-only work, use Hermes Tweet search, read, trends, extraction, or monitor tools.
-3. For action-taking work, verify `HERMES_TWEET_ENABLE_ACTIONS=true` and ask for explicit user confirmation before sending.
+2. For read-only work, use Hermes Tweet search, read, or trends tools.
+3. For action-taking work, including monitor creation and extraction jobs, verify `HERMES_TWEET_ENABLE_ACTIONS=true` and ask for explicit user confirmation before sending or starting persistent or account-changing work.
 4. Keep generated drafts separate from sent actions until the user approves them.
 5. Summarize tool results without exposing private account details or credentials.
 
 ## Safety
 
 - Prefer read-only tools until the user asks for an action.
-- Treat every external post, reply, like, retweet, follow, and DM as a public or account-changing action.
+- Treat every external post, reply, like, retweet, follow, DM, monitor, and extraction job as a public, persistent, or account-changing action.
 - Use placeholders in examples. Never store real credentials in the repository.
 
 ## Reference

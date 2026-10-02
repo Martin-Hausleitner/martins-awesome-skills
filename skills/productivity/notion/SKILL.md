@@ -5,6 +5,14 @@ description: Use when reading, creating, updating, or organizing Notion pages an
 
 # Notion
 
+## Martins Setup (kanonisch, Stand 2026-07-14)
+
+- **Aktueller Token:** `cat ~/.config/notion/api_key` (Mac, chmod 600) — Integration **„test"** (Owner Martin). Hat Zugriff u.a. auf die Seite **EDV Hausleitner** (`39c95d5fb89280f4bc5bcb143dff62d5`).
+- **Alter Key (Backup):** `~/.config/notion/api_key.leo` — Integration „Leo" (Zugriff: Prectus-Seite). Nur nutzen, wenn eine Seite mit dem aktuellen Token 404 liefert.
+- Token NIEMALS ausgeben, loggen oder committen — immer per `$(cat ~/.config/notion/api_key)` einlesen.
+- Liefert eine Seite 404: Seite ist nicht mit der Integration geteilt → Operator bitten: ··· → Verbindungen → Integration hinzufügen.
+- `Notion-Version: 2022-06-28` verwenden.
+
 ## Overview
 
 Use Notion as a structured workspace through its API. Keep integrations narrow, explicit, and easy to revoke.
